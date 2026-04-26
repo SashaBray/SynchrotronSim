@@ -1,0 +1,2 @@
+device_type_id,field_type,map_raw_path,map_bin_path,stl_path,use_symmetry,nominal_arg
+QUAD_1,B,quad_short.txt,quad_short.bin,quad_short.stl,1,100.0

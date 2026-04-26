@@ -1,0 +1,19 @@
+# Сборка
+build/
+bin/
+obj/
+
+# Данные и результаты
+workspace/fields_bin/
+workspace/results/
+*.bin
+*.csv
+
+# Исключаем 3D модели по твоему запросу
+workspace/geometry/*.stl
+workspace/geometry/*.obj
+
+# Настройки IDE
+.vscode/
+.idea/
+*.user
