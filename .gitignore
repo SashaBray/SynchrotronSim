@@ -1,0 +1,60 @@
+# Сборка
+build/
+bin/
+obj/
+*.exe
+*.obj
+*.pdb
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Данные и результаты (большие бинарные)
+workspace/fields_bin/
+workspace/fields_raw/*.fld
+workspace/fields_raw/*.txt
+workspace/results/
+*.bak
+
+# Сгенерированные из LTE таблицы (восстанавливаются через lte_to_lattice.py
+# и assemble_lattice_configs.py)
+workspace/tables/sp_elements.csv
+workspace/tables/lattice_layout.csv
+workspace/tables/lattice_configs.csv
+
+# Сгенерированные optimconfig (производные от JSON)
+workspace/optim_inputs/*.optimconfig
+
+# 3D-модели (большие binary)
+workspace/geometry/*.stl
+workspace/geometry/*.obj
+
+# IDE
+.vscode/
+.idea/
+*.user
+*.swp
+.DS_Store
+
+# Markdown файлы (документация ведётся в plain README)
+*.md
+*.MD
+# ...кроме README.md -- основной документ проекта в markdown-формате
+!README.md
+
+# Файлы Claude (агенты, контекст, сессии, плагины)
+.claude/
+.claude*
+claude/
+*claude*
+*CLAUDE*
+AGENTS.md
+agents.md
+ARCHITECTURE.md
+
+# Резервные копии вручную
+workspace/tables/sp_elements*копия*.csv

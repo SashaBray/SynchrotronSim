@@ -1,0 +1,32 @@
+{
+  "_doc": [
+    "Определения суб-lattice'ов: укороченных копий основного lattice (101)",
+    "для экспериментов, которые работают только с частью кольца.",
+    "",
+    "Каждая запись содержит:",
+    "  lattice_id  -- ID, по которому эксперимент будет ссылаться на эту lattice",
+    "  max_gid     -- максимальный global_id из lattice_layout, включаемый в",
+    "                 копию (берутся строки с instance_id <= max_gid)",
+    "  description -- человеко-читаемое описание",
+    "",
+    "assemble_lattice_configs.py автоматически генерирует копии при каждой сборке."
+  ],
+
+  "sub_lattices": [
+    {
+      "lattice_id": 102,
+      "max_gid": 207,
+      "description": "SP1..SP3 (3 × 69 = 207 элементов). Использует exp 4 (sp3_drift_2sp)."
+    },
+    {
+      "lattice_id": 103,
+      "max_gid": 690,
+      "description": "SP1..SP10 (10 × 69 = 690). Использует exp 5 (sp10_drift_to_sp11)."
+    },
+    {
+      "lattice_id": 104,
+      "max_gid": 1520,
+      "description": "SP1..SP21 = SP1..SP19 (19 × 69) + SP20 junction (140) + SP21 (69) = 1520. Использует exp 6 (junction_tune)."
+    }
+  ]
+}

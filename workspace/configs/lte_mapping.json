@@ -1,0 +1,54 @@
+{
+  "_doc": [
+    "Конфиг для lte_to_lattice.py + assemble_lattice_configs.py.",
+    "Описывает, как LTE-элементы (Elegant CSBEND/KQUAD/KSEXT/KOCT) отображаются",
+    "в device_type_id из hardware_library.csv, а также параметры разбора кольца",
+    "на супериоды и геометрию straightening для DL/JL семейств."
+  ],
+
+  "lattice_id": 101,
+
+  "sp_type_by_first_element": {
+    "_doc": "По имени первого магнита SP определяется sp_type. Fallback: имя самого элемента.",
+    "QF1A": "standard",
+    "QF1L": "junction"
+  },
+
+  "sp_start_pattern": {
+    "_doc": "Последовательность LTE-имён, по которой парсер определяет границу нового супериода.",
+    "names": ["DR_01_2P651", "BPM", "DR_02_001"]
+  },
+
+  "dljl_family_regex": {
+    "_doc": "DL/JL семейства (5-слайсовые длинные диполи). Caps group 1 = base family, group 2 = slice [1..5].",
+    "pattern": "^([DJ]L\\d[A-Z]+)_([1-5])$"
+  },
+
+  "thresholds": {
+    "kquad_long_min_L": 0.295,
+    "csbend_short_max_L": 0.1,
+    "epsilon": 1e-30
+  },
+
+  "lte_to_hw_map": {
+    "_doc": "Соответствие LTE-типа элемента и hardware_library device_type_id. Для KSEXT/CSBEND используется ветвление по K2/K1.",
+
+    "skip_types": ["EDRIFT", "MONI"],
+
+    "KQUAD_long":   { "hw": [{"id": "QP_L_1A",         "default": "1.0"}] },
+    "KQUAD_short":  { "hw": [{"id": "QP_sh_1A",        "default": "1.0"}] },
+
+    "KSEXT_zero_K2": { "hw": [{"id": "corrector_I1_1A", "default": "1.0"},
+                              {"id": "corrector_I2_1A", "default": "1.0"}] },
+    "KSEXT_nonzero": { "hw": [{"id": "SP_I1_1A",        "default": "1.0"},
+                              {"id": "SP_I2_1A",        "default": "1.0"}] },
+
+    "KOCT":         { "hw": [{"id": "OP_1A",           "default": "1.0"}] },
+
+    "CSBEND_combined": { "hw": [{"id": "DQ_I1_1A",     "default": "1.0"},
+                                {"id": "DQ_I2_1A",     "default": "1.0"},
+                                {"id": "DQ_I3_1A",     "default": "1.0"}] },
+    "CSBEND_short":    { "hw": [{"id": "DP_sh_PM",     "default": "-"}] },
+    "CSBEND_long":     { "hw": [{"id": "DP_L_PM",      "default": "-"}] }
+  }
+}

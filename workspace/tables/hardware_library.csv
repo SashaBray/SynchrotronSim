@@ -1,0 +1,13 @@
+device_type_id;Active;field_type;map_raw_path;map_bin_path;stl_path;use_symmetry;nominal_arg;field_direction;correct_coeff
+corrector_I1_1A;True;B;corrector_I1_1A.fld;corrector_I1_1A.bin;corrector_asm.stl;1;1.0;1;1
+corrector_I2_1A;True;B;corrector_I2_1A.fld;corrector_I2_1A.bin;-;1;1.0;1;1
+DP_L_PM;False;B;DP_L_PM.fld;DP_L_PM.bin;DPL_asm.stl;1;-;-1;0.0005
+DP_sh_PM;False;B;DP_sh_PM.fld;DP_sh_PM.bin;DPsh_asm.stl;1;-;-1;0.0005
+DQ_I1_1A;True;B;DQ_I1_1A.fld;DQ_I1_1A.bin;DQ_asm.stl;1;1.0;1;1
+DQ_I2_1A;True;B;DQ_I2_1A.fld;DQ_I2_1A.bin;-;1;1.0;1;1
+DQ_I3_1A;True;B;DQ_I3_1A.fld;DQ_I3_1A.bin;-;1;1.0;1;1
+OP_1A;True;B;OP_1A.fld;OP_1A.bin;OP_asm.stl;1;1.0;1;1
+QP_L_1A;True;B;QP_L_1A.fld;QP_L_1A.bin;QPL_asm.stl;1;1.0;1;1
+QP_sh_1A;True;B;QP_sh_1A.fld;QP_sh_1A.bin;QPsh_asm.stl;1;1.0;1;1
+SP_I1_1A;True;B;SP_I1_1A.fld;SP_I1_1A.bin;SP_asm.stl;1;1.0;1;1
+SP_I2_1A;True;B;SP_I2_1A.fld;SP_I2_1A.bin;-;1;1.0;1;1

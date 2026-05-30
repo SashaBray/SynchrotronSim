@@ -1,0 +1,113 @@
+{
+  "_comment": [
+    "Конфиг для SynchrotronOptimizer.exe (через prepare_optim_config.py).",
+    "Финишная плоскость -- ЗА SP20 = ПОЛОВИНА КОЛЬЦА (yaw = 180 deg, beam идёт в -X).",
+    "",
+    "Тюним per-position arg_val:",
+    "  QP_L_1A, QP_sh_1A          -- квадруполи (длинные и короткие)",
+    "  SP_I1_1A                    -- секступоли (основная обмотка)",
+    "  OP_1A                       -- октуполи",
+    "  DQ_I1_1A, DQ_I2_1A          -- диполи-квадруполи (две основные обмотки)",
+    "",
+    "ЗАМОРОЖЕНЫ:",
+    "  DP_L_PM, DP_sh_PM correct_coeff -- постоянные диполи",
+    "  corrector_I1/I2 arg_val          -- корректоры (на нуле)",
+    "  SP_I2_1A, DQ_I3_1A arg_val       -- корректирующие обмотки секступолей/диполь-квадруполей",
+    "",
+    "Loss: sum(d^2) по магнитам SP1..SP20 (половина кольца), исключая центры",
+    "      DP и DQ (combined-function диполь-квадруполей -- центр не на орбите)."
+  ],
+  "experiment_id": 2,
+  "n_iterations": 1000,
+  "random_seed": 42,
+  "kick_every": 225,
+  "kick_scale": 0.1,
+  "revert_after_kicks": 0,
+  "loss": {
+    "type": "orbit_avg",
+    "magnet_sp_numbers": [
+      1,  2,  3,  4,  5,  6,  7,  8,  9, 10,
+      11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+    ],
+    "exclude_device_types": [
+      "DP_L_PM", "DP_sh_PM",
+      "DQ_I1_1A", "DQ_I2_1A", "DQ_I3_1A"
+    ],
+    "extra_target_magnets": [],
+    "squared": true,
+    "comment": "sum(d^2) по магнитам SP1..SP20 = ПОЛОВИНА КОЛЬЦА (за исключением центров DP_L_PM/DP_sh_PM и diп-квад DQ_I1/I2/I3). Финишная плоскость стоит за SP20 (yaw=180°)."
+  },
+  "reference": {
+    "comment": "End of superperiod 1 (yaw = 9 deg = pi/20 rad)",
+    "position": [
+      27.621576,
+      2.173865,
+      0.0
+    ],
+    "direction": [
+      0.987688340595138,
+      0.156434465040231,
+      0.0
+    ]
+  },
+  "parameter_groups": [
+    {
+      "name": "DP_L_coeff_hw",
+      "description": "Глобальный hardware-коэффициент длинных диполей DP_L_PM (опциональный bias). Per-position тонкая настройка делается через per-position блок на sp_elements.correct_coeff.",
+      "enabled": false,
+      "file": "hardware_library.csv",
+      "key_column": "device_type_id",
+      "key_values": ["DP_L_PM"],
+      "value_column": "correct_coeff",
+      "step_percent": 0.0025
+    },
+    {
+      "name": "DP_sh_coeff_hw",
+      "description": "Глобальный hardware-коэффициент коротких диполей DP_sh_PM.",
+      "enabled": false,
+      "file": "hardware_library.csv",
+      "key_column": "device_type_id",
+      "key_values": ["DP_sh_PM"],
+      "value_column": "correct_coeff",
+      "step_percent": 0.0025
+    },
+    {
+      "name": "DQ_I1_current_shared",
+      "description": "LEGACY: общий ток I1 на все DQ. ОТКЛЮЧЕН -- DQ_I1 теперь тюнится per-position.",
+      "enabled": false,
+      "file": "sp_elements.csv",
+      "key_column": "device_type_id",
+      "key_values": [
+        "DQ_I1_1A"
+      ],
+      "value_column": "arg_val",
+      "step_abs": 0.5
+    }
+  ],
+  "parameter_groups_per_position": [
+    {
+      "_comment": "Per-position ТОКИ (arg_val в sp_elements). Тюним: QP_L, QP_sh, SP_I1, OP, DQ_I1, DQ_I2. Заморожены: DP_L_PM, DP_sh_PM (постоянные магниты), corrector_I1/I2, SP_I2, DQ_I3 (корректирующие обмотки).",
+      "enabled": true,
+      "file": "sp_elements.csv",
+      "sp_types": ["standard"],
+      "exclude_device_types": [
+        "DP_L_PM", "DP_sh_PM",
+        "SP_I2_1A", "DQ_I3_1A",
+        "corrector_I1_1A", "corrector_I2_1A"
+      ],
+      "value_column": "arg_val",
+      "step_abs": 0.5
+    },
+    {
+      "_comment": "Per-position КОЭФФИЦИЕНТЫ диполей DP_L/DP_sh -- ВЫКЛЮЧЕНО по запросу: оставляем постоянные диполи строго неподвижными.",
+      "enabled": false,
+      "file": "sp_elements.csv",
+      "sp_types": ["standard"],
+      "include_device_types": ["DP_L_PM", "DP_sh_PM"],
+      "value_column": "correct_coeff",
+      "step_percent": 0.1,
+      "name_suffix": "_coeff"
+    }
+  ],
+  "plot_every": 1
+}

@@ -1,0 +1,96 @@
+{
+  "_comment": [
+    "ЭКСПЕРИМЕНТ ФОКУСИРОВКИ: 10 СУПЕРИОДОВ + НАЧАЛО SP11.",
+    "",
+    "Пучок проходит SP1..SP10 (10 SP с магнитами) и затем дрейфует ~5.87 м",
+    "в свободном пространстве до позиции первого элемента SP11.",
+    "Цель -- проверить, что орбита сохраняется коллимированной и стабильной",
+    "на длинной трассе (~280 м), что является более жёсткой проверкой чем 3 SP.",
+    "",
+    "Геометрия (lattice 103 = только SP1..SP10 от lattice 101):",
+    "  SP10 last:  (176.5696, 173.6331, 0.0000) при yaw=90°",
+    "  Tangent:    (cos90°, sin90°, 0) = (0, 1, 0)",
+    "  Drift:      5.87 м в +Y",
+    "  SP11 first: (176.5696, 179.5062, 0.0000)   <-- TARGET",
+    "  Финиш-плоскость: 0.05 м после TARGET, перпендикулярно tangent.",
+    "",
+    "LATTICE_MAX_GID=690: оптимизатор включает только первые 690 элементов",
+    "lattice_layout (SP1..SP10 = 10 × 69 = 690). Магниты SP11..SP40 НЕ",
+    "вступают в трекинг -- частица между концом SP10 и SP11 first идёт по",
+    "пустому пространству без полей.",
+    "",
+    "Composite loss: позиционная + угловая (direction) + envelope (рост амплитуды)."
+  ],
+  "experiment_id": 5,
+  "n_iterations": 2000,
+  "random_seed": 42,
+  "kick_every": 0,
+  "kick_scale": 0.05,
+  "revert_after_kicks": 0,
+  "lattice_max_gid": 690,
+  "loss": {
+    "type": "orbit_avg",
+    "magnet_sp_numbers": [
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+    ],
+    "exclude_device_types": [
+      "DP_L_PM", "DP_sh_PM",
+      "DQ_I1_1A", "DQ_I2_1A", "DQ_I3_1A"
+    ],
+    "extra_target_magnets": [
+      {"_doc": "5 целевых точек вдоль последних 5м дрейфа SP10->SP11. tangent=(0,1,0), шаг 1м в +Y. Финальная точка совпадает с SP11 first. weight=50 каждая, суммарно 250 -- сравним с ~270 магнитами SP1-10 после исключения DP/DQ."},
+      {"x": 176.570191, "y": 175.506767, "z": 0.000000, "weight": 50.0},
+      {"x": 176.570191, "y": 176.506767, "z": 0.000000, "weight": 50.0},
+      {"x": 176.570191, "y": 177.506767, "z": 0.000000, "weight": 50.0},
+      {"x": 176.570191, "y": 178.506767, "z": 0.000000, "weight": 50.0},
+      {"x": 176.570191, "y": 179.506767, "z": 0.000000, "weight": 50.0}
+    ],
+    "squared": true,
+    "comment": "sum(d^2) по магнитам SP1..SP10 (~270 точек после исключения DP и DQ) + 5 TARGET'ов на последних 5м дрейфа с весом 50 каждая (сум.вес=250).",
+    "direction_loss": {
+      "_doc": [
+        "Угол между финальным импульсом и эталонным направлением.",
+        "reference = tangent при yaw=90° = (0, 1, 0) -- направление орбиты у входа в SP11.",
+        "weight=1000: 1 mrad угловой ошибки даёт ~5*10^-3 вклада в loss."
+      ],
+      "reference": [0.0, 1.0, 0.0],
+      "weight": 1000.0
+    },
+    "envelope_loss": {
+      "_doc": [
+        "Штраф за рост амплитуды бетатронных колебаний.",
+        "Для каждого спутника (P2..P5): growth = max(0, A_final - A_init).",
+        "Loss_env = weight × Σ growth².",
+        "weight=1e6: 1 мм роста по 1 спутнику даёт вклад 1.0 в loss."
+      ],
+      "weight": 1000000.0
+    }
+  },
+  "parameter_groups": [],
+  "parameter_groups_per_position": [
+    {
+      "_comment": "Per-position ТОКИ (arg_val). Тюним QP_L, QP_sh, SP_I1, OP, DQ_I1, DQ_I2. Заморожены DP_PM, корректоры, SP_I2, DQ_I3.",
+      "enabled": true,
+      "file": "sp_elements.csv",
+      "sp_types": ["standard"],
+      "exclude_device_types": [
+        "DP_L_PM", "DP_sh_PM",
+        "SP_I2_1A", "DQ_I3_1A",
+        "corrector_I1_1A", "corrector_I2_1A"
+      ],
+      "value_column": "arg_val",
+      "step_abs": 0.25
+    },
+    {
+      "_comment": "Per-position КОЭФФИЦИЕНТЫ диполей DP_L_PM, DP_sh_PM. У постоянных магнитов нет тока, тюним correct_coeff (множитель полевой карты).",
+      "enabled": true,
+      "file": "sp_elements.csv",
+      "sp_types": ["standard"],
+      "include_device_types": ["DP_L_PM", "DP_sh_PM"],
+      "value_column": "correct_coeff",
+      "step_percent": 0.05,
+      "name_suffix": "_coeff"
+    }
+  ],
+  "plot_every": 1
+}
