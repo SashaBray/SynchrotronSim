@@ -507,7 +507,7 @@ const alg4 = [
       ['fieldDirection', 'знак направления (±1)', 'hardware_library.csv'],
       ['currentScale', 'отношение текущего тока к номинальному', 'рассчитывается при загрузке'],
       ['isActive', 'признак активного магнита (применять currentScale)', 'hardware_library.csv'],
-      ['type', 'тип поля: MAGNETIC или ELECTRIC', 'hardware_library.csv'],
+      ['(тип поля)', 'неявно: все текущие устройства магнитные, addContribution всегда пишет в totalB', '—'],
     ]),
 
   h2('4.3', 'Результаты решения'),

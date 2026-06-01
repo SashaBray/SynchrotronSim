@@ -4,7 +4,10 @@ SYNCHROTRON PARTICLE TRACKER
 Relativistic tracking of charged particles through a synchrotron magnet
 lattice. Uses real Ansys field maps, a symplectic Boris pusher for
 integration, and a stochastic optimizer for tuning magnet currents and
-calibration coefficients.
+per-instance calibration coefficients.
+
+Cross-platform: builds and runs on Windows (MSVC) and Linux/macOS
+(gcc/clang).
 
 GitHub: https://github.com/SashaBray/SynchrotronSim
 
@@ -15,21 +18,23 @@ REPOSITORY CONTENTS
 
 Source code:
     src/                            C++ sources
-        main.cpp                    SynchrotronTracker
-        optimizer.cpp               SynchrotronOptimizer
+        main.cpp                    SynchrotronTracker entry
+        optimizer.cpp               SynchrotronOptimizer entry
         Integrator.h                Boris pusher (relativistic, symplectic)
         LatticeManager.h            spatial bucket index, magnets, transforms
         FieldMap.h                  trilinear interpolation
         FinishPlane.h               sign-change finish detection
         AnsysConverter.h            .fld -> .bin converter
-    CMakeLists.txt                  C++ build
+    CMakeLists.txt                  cmake config (MSVC / gcc / clang)
 
-Python tools (top-level):
+Python tools (top-level, all cross-platform):
+    _common.py                      shared helpers (exe paths, project root,
+                                    matplotlib backend selection)
     lte_to_lattice.py               LTE -> sp_elements + lattice_layout
     assemble_lattice_configs.py     sp_elements + layout -> lattice_configs
-    prepare_optim_config.py         JSON -> .optimconfig for the optimizer
+    prepare_optim_config.py         JSON -> .optimconfig
     apply_optim_history.py          history.json -> CSV (state rollback)
-    visualize.py                    3D trajectory viewer (PyVista)
+    visualize.py                    static 3D viewer (PyVista)
     live_visualizer.py              live-reload viewer
     viz_optim_history.py            loss/params plots from the optimizer
     analyze_trajectory_stability.py envelope analysis + FFT betatron tunes
@@ -43,9 +48,20 @@ Configurations (workspace/):
     lte/SYLA_desc.lte               device descriptions (Elegant LTE)
     lte/SYLA_line.lte               element sequence
     tables/hardware_library.csv     magnet calibration + paths to field maps
+                                    (8 columns: device_type_id, Active,
+                                    map_raw_path, map_bin_path, stl_path,
+                                    nominal_arg, field_direction,
+                                    correct_coeff)
     tables/experiments.csv          experiment definitions
     tables/particle_groups.csv      particle initial conditions
-    optim_inputs/*.json             optimizer configs for various experiments
+    optim_inputs/*.json             optimizer configs per experiment
+
+Documentation:
+    README.md                       full documentation (markdown)
+    README.txt                      this file (plain text mirror)
+    docs/algorithms.md              algorithm reference (RD 50-34.698-90)
+    docs/algorithms.docx            Russian GOST-formatted version
+    docs/build_docx.js              docx generator script
 
 
 -------------------------------------------------------------------------------
@@ -58,10 +74,10 @@ Generated from LTE on first run:
     workspace/tables/lattice_configs.csv  final DB for the simulator
 
 Large binaries / build artifacts:
-    build/                                C++ objects, exe
+    build/                                C++ objects, executables
     workspace/fields_bin/                 binary field maps
     workspace/fields_raw/*.fld            raw Ansys maps (can be gigabytes)
-    workspace/results/                    trajectories, optim_history.json, .png
+    workspace/results/                    trajectories, history.json, .png
     workspace/geometry/*.stl              STL magnet models (for viz)
     venv/                                 Python virtual environment
 
@@ -76,18 +92,23 @@ PREPARING TO RUN
 
 1. C++ BUILD
 
-    cmake -B build
-    cmake --build build --config Release
+    cmake -B build -DCMAKE_BUILD_TYPE=Release
+    cmake --build build --config Release -j
 
-   Produces:
-    build/SynchrotronTracker.exe         particle tracker
-    build/SynchrotronOptimizer.exe       parameter optimizer
+   Produces (.exe suffix only on Windows):
+    build/SynchrotronTracker      particle tracker
+    build/SynchrotronOptimizer    parameter optimizer
+
+   Toolchain:
+    Windows   MSVC 2019+ (Build Tools), CMake 3.10+
+    Linux     gcc 9+ or clang 10+, CMake, OpenMP
+    macOS     clang with libomp (brew install libomp)
 
 2. PYTHON ENVIRONMENT
 
     python -m venv venv
     venv\Scripts\activate                 (Windows)
-    source venv/bin/activate              (Linux/Mac)
+    source venv/bin/activate              (Linux/macOS)
     pip install pandas numpy matplotlib pyvista
 
 3. FIELD MAPS
@@ -97,14 +118,15 @@ PREPARING TO RUN
 
    Then convert them to binary format:
 
-    build\SynchrotronTracker.exe --convert
+    build/SynchrotronTracker --convert        (Linux/macOS)
+    build\SynchrotronTracker.exe --convert    (Windows)
 
    This creates workspace/fields_bin/*.bin.
 
 4. GENERATE DB FROM LTE
 
-   The database (sp_elements.csv and lattice_layout.csv) is fully
-   generated from LTE files. Run:
+   sp_elements.csv and lattice_layout.csv are fully generated from LTE
+   files:
 
     python lte_to_lattice.py
     python assemble_lattice_configs.py
@@ -116,7 +138,7 @@ PREPARING TO RUN
 
    assemble_lattice_configs.py:
      - assembles workspace/tables/lattice_configs.csv
-     - additionally creates sub-lattices 102/103/104 (list from
+     - additionally creates sub-lattices 102/103/104 (listed in
        workspace/configs/sub_lattices.json)
 
 
@@ -124,8 +146,7 @@ PREPARING TO RUN
 RUNNING AN EXPERIMENT
 -------------------------------------------------------------------------------
 
-The list of experiments lives in workspace/tables/experiments.csv. The
-preconfigured experiments are:
+Experiments live in workspace/tables/experiments.csv. Preconfigured:
 
     exp 1   sanity test (plane x=5, lattice 101)
     exp 2   past SP20 -- half ring (lattice 101)
@@ -136,7 +157,8 @@ preconfigured experiments are:
 
 Run the tracker for experiment N:
 
-    build\SynchrotronTracker.exe N
+    build/SynchrotronTracker N            (Linux/macOS)
+    build\SynchrotronTracker.exe N        (Windows)
 
 Creates workspace/results/trajectories_expN.bin (5 trajectories).
 
@@ -159,28 +181,28 @@ OPTIMIZATION
 
 1. Prepare an optim-config from JSON:
 
-    python prepare_optim_config.py workspace\optim_inputs\sp3_drift_2sp.json
+    python prepare_optim_config.py workspace/optim_inputs/sp3_drift_2sp.json
 
    Creates workspace/optim_inputs/sp3_drift_2sp.optimconfig (flat format).
 
 2. Run the optimization:
 
-    build\SynchrotronOptimizer.exe workspace\optim_inputs\sp3_drift_2sp.optimconfig
+    build/SynchrotronOptimizer workspace/optim_inputs/sp3_drift_2sp.optimconfig
 
-   Parameters (kick_every, kick_scale, step_abs, number of iterations,
-   loss-component weights) are set in the JSON config.
+   Knobs (kick_every, kick_scale, step_abs, n_iterations, loss-component
+   weights) are set in the JSON config.
 
 3. Inspect convergence curves:
 
-    python viz_optim_history.py workspace\results\sp3_drift_2sp.history.json
+    python viz_optim_history.py workspace/results/sp3_drift_2sp.history.json
 
-4. Apply the resulting state (if the optimizer was interrupted):
+4. Apply the resulting state (only if the optimizer was interrupted):
 
-    python apply_optim_history.py workspace\results\sp3_drift_2sp.history.json
+    python apply_optim_history.py workspace/results/sp3_drift_2sp.history.json
 
-   (on completion the optimizer itself writes best values into
-   sp_elements.csv; apply_optim_history is only needed for rolling back
-   or restoring from a checkpoint)
+   (on completion the optimizer itself writes best values back into
+   sp_elements.csv and hardware_library.csv; apply_optim_history is
+   only needed for rolling back or restoring from a checkpoint)
 
 
 -------------------------------------------------------------------------------
@@ -190,24 +212,22 @@ COMPOSITE OPTIMIZER LOSS
 Loss = position_loss + direction_loss + envelope_loss
 
 1. Position loss
-   sum over (magnet, particle) pairs: w_m * d^2,
-   where d is the minimum distance from the trajectory to the magnet
-   center. Computed incrementally in the tracking loop, no trajectory
-   storage. Magnets are filtered by magnet_sp_numbers and
-   exclude_device_types. Additionally: TARGET points (virtual magnets)
-   with their own weight.
+   Sum over (magnet, particle) pairs: w_m * d^2, where d is the minimum
+   distance from the trajectory to the magnet centre. Computed
+   incrementally in the tracking loop, no trajectory storage. Magnets
+   filtered by magnet_sp_numbers and exclude_device_types. Additionally:
+   TARGET points (virtual magnets) with custom weight.
 
 2. Direction loss
-   w_dir * sum over particles sin^2(theta_i),
-   where theta_i is the angle between the particle's final momentum and
-   the reference direction (tangent of the reference orbit at the finish
-   point).
+   w_dir * sum over particles sin^2(theta_i), where theta_i is the
+   angle between the particle's final momentum and a reference
+   direction (orbit tangent at the finish point).
 
 3. Envelope loss
-   w_env * sum over particles max(0, A_final - A_init)^2,
-   where A(t) = distance to the design polyline (centers of lattice
-   elements + prelude/postlude along the tangent).
-   Only growth is penalized (damping is a useful effect).
+   w_env * sum over particles max(0, A_final - A_init)^2, where
+   A(t) = distance to the design polyline (centres of lattice elements
+   + prelude/postlude along the tangent). Only growth is penalized
+   (betatron damping is a useful effect).
 
 
 -------------------------------------------------------------------------------
@@ -221,13 +241,34 @@ where p = gamma * m * v is the relativistic momentum.
 
 The integrator is a Boris pusher (drift-kick-drift splitting). It is
 symplectic and exactly preserves |p|^2 for pure magnetic fields. 1 field
-eval / step (vs 4 in RK4).
+eval / step (vs 4 in RK4). In the current lattice all devices are
+magnetic, so E = 0 and the E-kick steps reduce to no-ops.
 
 The magnet field is computed via trilinear interpolation in the local
 coordinate system, then rotated back into world coordinates. The sum of
 fields from magnets near the position is computed via a 2D spatial
 bucket grid + bounding-sphere prescreening (~5 magnets per step instead
 of 2762).
+
+
+-------------------------------------------------------------------------------
+CROSS-PLATFORM NOTES
+-------------------------------------------------------------------------------
+
+  * Executable suffix.  _common.exe_name(stem) returns stem + ".exe" on
+    Windows and stem on Linux/macOS. Python scripts use this helper --
+    do not hardcode .exe.
+  * Workspace discovery.  Both C++ binaries call findWorkspace(argv[0]),
+    which walks up from the binary, argv[0] parent and the cwd looking
+    for a directory containing workspace/. Python scripts use
+    _common.project_root() (walks up to a directory with CMakeLists.txt
+    or README.md).
+  * Matplotlib backend.  _common.set_matplotlib_backend("TkAgg") falls
+    back to Qt5Agg or Agg if Tk is unavailable, so headless Linux works.
+  * Paths.  Python uses pathlib.Path / forward slashes uniformly;
+    Windows accepts both.
+  * OpenMP on macOS.  Install libomp via Homebrew; Apple clang ships
+    without OpenMP.
 
 
 -------------------------------------------------------------------------------
@@ -246,8 +287,7 @@ Key optimizations:
   * 2D spatial bucket grid -- ~5 magnets per step instead of 2762
   * Bounding-sphere prescreening -- early exit for far magnets
   * Boris pusher -- 1 field eval / step vs 4 in RK4
-  * Incremental loss -- minDist^2[i][m] updated in the tracking loop,
-    without storing the trajectory
+  * Incremental loss -- minDist^2[i][m] updated in the tracking loop
   * Composite loss with weights -- TARGETs pin final convergence
 
 
@@ -257,17 +297,17 @@ TROUBLESHOOTING
 
 "lattice 104 has no rows in lattice_configs.csv"
     Run python assemble_lattice_configs.py -- the script automatically
-    regenerates sub-lattices from the config.
+    regenerates sub-lattices.
 
 "ERROR: baseline tracking failed"
     At least one particle fails to reach the finish plane within 50M
-    steps. Possible causes:
-    - Current arg_val gives an unstable orbit on the long path
-    - max_turns (skipSteps) is too small -- the plane is crossed
-      multiple times along the way, extra crossings need to be skipped
-    Run SynchrotronTracker.exe N to see where the beam is lost.
+    steps. Likely causes:
+    - arg_val gives an unstable orbit on the long path
+    - max_turns (skipSteps) too small -- the plane is crossed multiple
+      times along the way, extra crossings need to be skipped
+    Run SynchrotronTracker N directly to see where the beam is lost.
 
-"Access is denied" when launching .exe (Windows)
+"Access is denied" when launching the .exe (Windows)
     Defender may delete a freshly built .exe. Add the build/ folder to
     Windows Defender exclusions.
 
@@ -279,10 +319,10 @@ Optimization "gets stuck"
     Play with the balance of step_abs and kick_scale in the JSON config:
     - kick_scale > step_abs: aggressive kicks jump out of local minima
     - kick_scale ~ step_abs: conservative kicks, precise convergence
-    For final polishing, reduce step_abs (from 1.0 to 0.1 A).
+    For final polishing, reduce step_abs (1.0 -> 0.1 A).
 
 Analyzer shows stale data
     After optimization, re-run the tracker:
         python assemble_lattice_configs.py
-        build\SynchrotronTracker.exe N
+        build/SynchrotronTracker N
         python analyze_trajectory_stability.py N

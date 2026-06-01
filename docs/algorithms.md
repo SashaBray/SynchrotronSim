@@ -318,7 +318,7 @@ interpolation.
 | `fieldDirection` | sign flip (±1) | hardware_library.csv |
 | `currentScale` | current/nominal_current (active electromagnets) | computed at load |
 | `isActive` | true ↔ apply currentScale | hardware_library.csv |
-| `type` | MAGNETIC or ELECTRIC | hardware_library.csv |
+| (field type) | implicit — all current devices are magnetic; `addContribution` always writes to `totalB` |
 
 ### 4.3 Solution results
 
