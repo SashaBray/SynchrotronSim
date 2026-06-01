@@ -4,7 +4,7 @@
 **Document type:** Algorithm description
 **Standard:** RD 50-34.698-90 (methodological guidelines to GOST 34),
 section "Description of algorithm"
-**Revision:** 2026-05-31
+**Revision:** 2026-06-01
 
 ---
 
@@ -44,7 +44,7 @@ References to source files use the convention `path:line` (e.g.,
 
 ## 1. Boris pusher
 
-**Source:** `src/Integrator.h:111` (`Integrator::borisStep`).
+**Source:** `src/Integrator.h:53` (`Integrator::borisStep`).
 
 ### 1.1 Purpose and characteristics
 
@@ -90,6 +90,10 @@ dp/dt = q · (E + v × B)
 p = γ · m · v,   γ = √(1 + p²/(m²c²))
 ```
 
+In the current lattice all devices are magnetic, so `E ≡ 0`. The
+E-kick steps below reduce to no-ops; the general form is retained for
+forward compatibility.
+
 Boris splits one step into seven half-operations:
 
 ```
@@ -126,11 +130,12 @@ OUTPUT : s updated to step n+1
 12. pos ← pos + mom · (dt/2) / (m0·γ)              ; half-drift
 ```
 
-A cheaper analytic-drift helper (`Integrator::driftStep`,
-`AcceleratorConfig::isDriftRegion`) was added in an earlier optimization
-round but is **not invoked** in the current tracking/optimization loops
-— `borisStep` is used uniformly. The bucket-grid prescreening alone
-already brings drift-region cost down to a near-empty inner loop.
+Earlier revisions kept an analytic-drift helper (`Integrator::driftStep`)
+and a predicate (`AcceleratorConfig::isDriftRegion`) for switching to
+`x += v · dt` on segments without magnets. Both were removed in the
+2026-06 refactor — the spatial bucket index already collapses drift-region
+cost to a single empty-bucket lookup, so the separate code path provided
+no measurable benefit.
 
 ---
 
@@ -206,8 +211,8 @@ OUTPUT: field vector at p
 
 ## 3. Spatial bucket grid
 
-**Source:** `src/LatticeManager.h:186` (`AcceleratorConfig::buildSpatialIndex`),
-`src/LatticeManager.h:253` (`getTotalFields`).
+**Source:** `src/LatticeManager.h:179` (`AcceleratorConfig::buildSpatialIndex`),
+`src/LatticeManager.h:235` (`getTotalFields`).
 
 ### 3.1 Purpose and characteristics
 
@@ -286,17 +291,14 @@ by = floor(y / bucketSize) - byMin
        elements[i].addContribution(pos, B, E)
 ```
 
-**Drift check (helper, currently unused):**
-`isDriftRegion(pos)` returns true if the bucket containing `pos` is
-empty or outside the grid. It was intended to let the caller substitute
-the cheaper analytic `driftStep` for `borisStep`, but the current code
-calls `borisStep` unconditionally.
+Drift regions hit an empty bucket and the inner loop is empty, so no
+field evaluations occur.
 
 ---
 
 ## 4. Magnet contribution
 
-**Source:** `src/LatticeManager.h:115` (`MagneticElement::addContribution`).
+**Source:** `src/LatticeManager.h:114` (`MagneticElement::addContribution`).
 
 ### 4.1 Purpose and characteristics
 
@@ -313,17 +315,20 @@ interpolation.
 | `worldCenter, worldRadius²` | bounding sphere | `computeBounds()` |
 | `transform` | local↔world (rotation + translation) | lattice_configs.csv |
 | `map` | field grid | hardware_library.csv |
-| `useSymmetry` | YZ symmetry flag | hardware_library.csv |
+| `useSymmetry` | YZ symmetry flag | `MagneticElement` default (`true`) |
 | `correctCoeff` | calibration factor | hardware_library + sp_elements |
 | `fieldDirection` | sign flip (±1) | hardware_library.csv |
 | `currentScale` | current/nominal_current (active electromagnets) | computed at load |
 | `isActive` | true ↔ apply currentScale | hardware_library.csv |
-| (field type) | implicit — all current devices are magnetic; `addContribution` always writes to `totalB` |
+
+All current devices are magnetic; `addContribution` always accumulates
+into `totalB`. The `totalE` accumulator is passed through unchanged for
+Boris-pusher compatibility (E ≡ 0).
 
 ### 4.3 Solution results
 
-In-place update of `totalB` or `totalE` (depending on `type`). No
-return value.
+In-place addition into `totalB`. No return value. `totalE` is left
+untouched.
 
 ### 4.4 Mathematical description
 
@@ -334,7 +339,7 @@ localF   = trilinear(map, localPos, useSymmetry)
 if localF == 0:                                       return            (sparse grid)
 globalF  = R · localF                                                   (local → world)
 scale    = correctCoeff · fieldDirection · (currentScale if isActive)
-totalB or totalE += scale · globalF
+totalB  += scale · globalF
 ```
 
 ### 4.5 Solution algorithm
@@ -348,15 +353,15 @@ totalB or totalE += scale · globalF
 5. globalF  ← transform.rotateVector(localF)
 6. scale    ← correctCoeff · fieldDirection
    if isActive:  scale *= currentScale
-7. if type == MAGNETIC:  totalB += scale · globalF
-   else                  totalE += scale · globalF
+7. totalB  += scale · globalF
 ```
 
 ---
 
 ## 5. Finish-plane detection
 
-**Source:** `src/FinishPlane.h:22` (`FinishPlane::hasCrossed`).
+**Source:** `src/FinishPlane.h:51` (`FinishPlane::hasCrossed`); setup at
+`src/FinishPlane.h:30`.
 
 ### 5.1 Purpose and characteristics
 
@@ -888,21 +893,29 @@ f_betatron = argmax_(f > f_min) |Â(f)|     (DC bin masked)
 
 | File | Consumed by | Purpose |
 |---|---|---|
-| `workspace/configs/lte_mapping.json` | `lte_to_lattice.py`, `assemble_lattice_configs.py` | LTE type mapping + lattice_id |
+| `workspace/configs/lte_mapping.json` | `lte_to_lattice.py`, `assemble_lattice_configs.py` | LTE type mapping + `lattice_id` |
 | `workspace/configs/sub_lattices.json` | `assemble_lattice_configs.py`, `src/optimizer.cpp` | sub-lattice definitions |
 | `workspace/configs/visualizer.json` | `visualize.py`, `live_visualizer.py` | camera, colors, opacity, projection |
-| `workspace/optim_inputs/*.json` | `prepare_optim_config.py` → `SynchrotronOptimizer.exe` | optimizer setup per experiment |
+| `workspace/optim_inputs/*.json` | `prepare_optim_config.py` → `SynchrotronOptimizer[.exe]` | optimizer setup per experiment |
+| `_common.py` | all top-level Python scripts | cross-platform helpers (executable suffix, project root, matplotlib backend) |
 
 ## Appendix B. Data files
 
 | File | Format | Description |
 |---|---|---|
 | `workspace/fields_bin/*.bin` | binary `GridHeader + FieldVector[nx·ny·nz]` | per-magnet field map |
-| `workspace/tables/hardware_library.csv` | `;`-separated CSV | per device_type calibration |
+| `workspace/tables/hardware_library.csv` | `;`-separated CSV, 8 columns | per `device_type` calibration |
 | `workspace/tables/sp_elements.csv` | `;`-separated CSV | superperiod template (editable) |
 | `workspace/tables/lattice_layout.csv` | `;`-separated CSV | ring unrolling (generated) |
 | `workspace/tables/lattice_configs.csv` | `;`-separated CSV | simulator input (generated) |
 | `workspace/tables/experiments.csv` | `;`-separated CSV | experiment definitions |
 | `workspace/tables/particle_groups.csv` | `;`-separated CSV | initial conditions |
-| `workspace/results/trajectories_exp{id}.bin` | binary | output of `SynchrotronTracker.exe` |
-| `workspace/results/{name}.history.json` | JSON | output of `SynchrotronOptimizer.exe` |
+| `workspace/results/trajectories_exp{id}.bin` | binary | output of `SynchrotronTracker[.exe]` |
+| `workspace/results/{name}.history.json` | JSON | output of `SynchrotronOptimizer[.exe]` |
+
+Columns of `hardware_library.csv` (after the 2026-06 refactor):
+`device_type_id`, `Active`, `map_raw_path`, `map_bin_path`, `stl_path`,
+`nominal_arg`, `field_direction`, `correct_coeff`. The earlier
+`field_type` and `use_symmetry` columns were removed — both binaries
+hardcoded `MAGNETIC` and `true` respectively, and the columns were
+never read.
