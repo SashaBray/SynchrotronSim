@@ -40,11 +40,13 @@ workspace/geometry/*.obj
 *.swp
 .DS_Store
 
-# Markdown файлы (документация ведётся в plain README)
+# Markdown файлы (документация ведётся в plain README и в docs/)
 *.md
 *.MD
-# ...кроме README.md -- основной документ проекта в markdown-формате
+# ...кроме README.md и всего, что в docs/
 !README.md
+!docs/
+!docs/**/*.md
 
 # Файлы Claude (агенты, контекст, сессии, плагины)
 .claude/
