@@ -14,7 +14,7 @@ const {
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, Header, Footer,
   AlignmentType, LevelFormat, HeadingLevel, BorderStyle, WidthType, ShadingType,
   PageNumber, PageBreak, TabStopType, TabStopPosition,
-  Bookmark, InternalHyperlink,
+  Bookmark, InternalHyperlink, PageReference,
   Math: MathBlock, MathRun, MathFraction, MathRadical, MathSuperScript, MathSubScript,
   MathSubSuperScript, MathRoundBrackets, MathSquareBrackets, MathAngledBrackets, MathSum
 } = docx;
@@ -51,12 +51,50 @@ const SIZE_CAPT = 24;             // 12 pt
 // ---------------------------------------------------------------------------
 function _m(x) { return typeof x === 'string' ? new MathRun(x) : x; }
 function _arr(x) { return (Array.isArray(x) ? x : [x]).map(_m); }
+
+// Авто-нумерация формул в формате (X.Y), где X — номер главы (задаётся
+// через startSection), Y — порядковый номер формулы внутри главы.
+let _currentSection = null;
+const _formulaCounters = new Map();
+function startSection(num) {
+  _currentSection = num;
+  if (num !== null && !_formulaCounters.has(num)) _formulaCounters.set(num, 0);
+}
+function _nextFormulaLabel() {
+  if (_currentSection === null) return null;
+  const n = (_formulaCounters.get(_currentSection) || 0) + 1;
+  _formulaCounters.set(_currentSection, n);
+  return `(${_currentSection}.${n})`;
+}
+
+// Display-формула. Если активна нумерация (startSection вызван), формула
+// получает метку (X.Y), прижатую к правому краю содержимой области.
 function mathPara(...nodes) {
+  const label = _nextFormulaLabel();
+  const mathNode = new MathBlock({ children: nodes.map(_m) });
+  if (label === null) {
+    // Без номера — центрировано.
+    return new Paragraph({
+      alignment: AlignmentType.CENTER,
+      spacing: { line: 360, lineRule: 'auto', before: 160, after: 160 },
+      indent: { firstLine: 0 },
+      children: [ mathNode ],
+    });
+  }
+  // С номером: левое выравнивание + центрирующий tab + правый tab для (X.Y).
   return new Paragraph({
-    alignment: AlignmentType.CENTER,
+    alignment: AlignmentType.LEFT,
     spacing: { line: 360, lineRule: 'auto', before: 160, after: 160 },
     indent: { firstLine: 0 },
-    children: [ new MathBlock({ children: nodes.map(_m) }) ],
+    tabStops: [
+      { type: TabStopType.CENTER, position: Math.round(CONTENT_W / 2) },
+      { type: TabStopType.RIGHT,  position: CONTENT_W },
+    ],
+    children: [
+      new TextRun({ text: '\t', font: TIMES, size: SIZE_BODY }),
+      mathNode,
+      new TextRun({ text: '\t' + label, font: TIMES, size: SIZE_BODY }),
+    ],
   });
 }
 // Несколько строк в одной формуле — каждый row рендерится отдельным абзацем.
@@ -340,10 +378,10 @@ const titlePage = [
 // Содержание
 // ---------------------------------------------------------------------------
 // Кликабельный пункт оглавления. anchorId — bookmark в теле документа,
-// на который ссылка должна указывать. Текст и точечный лидер до номера
-// страницы — внутри одного InternalHyperlink, чтобы клик в любом месте
-// строки переносил на главу.
-function tocItem(anchorId, num, text, page) {
+// на который ссылка должна указывать. Номер страницы вставляется как
+// поле PAGEREF: Word подставит фактический номер при первом открытии
+// (если пользователь подтвердит «обновить поля»; иначе F9 в редакторе).
+function tocItem(anchorId, num, text) {
   const tabs = [{ type: TabStopType.RIGHT, position: CONTENT_W - mm(2),
                   leader: 'dot' }];
   return new Paragraph({
@@ -351,13 +389,20 @@ function tocItem(anchorId, num, text, page) {
     indent: { firstLine: 0 },
     tabStops: tabs,
     children: [
+      // Название главы — гиперссылка на bookmark.
       new InternalHyperlink({
         anchor: anchorId,
         children: [
           new TextRun({ text: `${num ? num + ' ' : ''}${text}`,
                         font: TIMES, size: SIZE_BODY }),
-          new TextRun({ text: '\t' + (page || ''),
-                        font: TIMES, size: SIZE_BODY }),
+        ],
+      }),
+      // Tab → к правому краю + поле PAGEREF (тоже как гиперссылка).
+      new TextRun({ text: '\t', font: TIMES, size: SIZE_BODY }),
+      new InternalHyperlink({
+        anchor: anchorId,
+        children: [
+          new PageReference(anchorId, { hyperlink: false }),
         ],
       }),
     ],
@@ -386,6 +431,7 @@ const TOC_ENTRIES = [
 // ---------------------------------------------------------------------------
 // Введение
 // ---------------------------------------------------------------------------
+startSection(null);
 const intro = [
   h1Unnumbered('Введение', { id: 'intro', pageBreakBefore: true }),
   body('Настоящий документ содержит описание вычислительных моделей, реализованных в составе программ SynchrotronTracker.exe и SynchrotronOptimizer.exe. Документ оформлен в соответствии с методическими указаниями РД 50-34.698-90, разделом «Описание алгоритма», где для каждого алгоритма приводятся пять подразделов: назначение и характеристика, используемая информация, результаты решения, математическое описание, алгоритм решения.'),
@@ -396,6 +442,7 @@ const intro = [
 // ---------------------------------------------------------------------------
 // 1. Boris pusher
 // ---------------------------------------------------------------------------
+startSection('1');
 const alg1 = [
   h1('1', 'Интегратор Бориса — релятивистский симплектический интегратор'),
   body('Исходный код: src/Integrator.h:53, метод Integrator::borisStep.'),
@@ -516,6 +563,7 @@ const alg1 = [
 // ---------------------------------------------------------------------------
 // 2. Trilinear field interpolation
 // ---------------------------------------------------------------------------
+startSection('2');
 const alg2 = [
   h1('2', 'Трилинейная интерполяция поля с учётом YZ-симметрии'),
   body('Исходный код: src/FieldMap.h:41, метод FieldMap::getInterpolatedField.'),
@@ -601,6 +649,7 @@ const alg2 = [
 // ---------------------------------------------------------------------------
 // 3. Spatial bucket grid
 // ---------------------------------------------------------------------------
+startSection('3');
 const alg3 = [
   h1('3', 'Двумерный bucket-индекс магнитов'),
   body('Исходный код: src/LatticeManager.h:179 (buildSpatialIndex), src/LatticeManager.h:235 (getTotalFields).'),
@@ -675,6 +724,7 @@ const alg3 = [
 // ---------------------------------------------------------------------------
 // 4. Magnet contribution
 // ---------------------------------------------------------------------------
+startSection('4');
 const alg4 = [
   h1('4', 'Вклад магнита с прескринингом по охватывающей сфере'),
   body('Исходный код: src/LatticeManager.h:114, метод MagneticElement::addContribution.'),
@@ -758,6 +808,7 @@ const alg4 = [
 // ---------------------------------------------------------------------------
 // 5. Finish plane
 // ---------------------------------------------------------------------------
+startSection('5');
 const alg5 = [
   h1('5', 'Детектор пересечения финишной плоскости'),
   body('Исходный код: src/FinishPlane.h:51 (FinishPlane::hasCrossed), setup на строке 30.'),
@@ -821,6 +872,7 @@ const alg5 = [
 // ---------------------------------------------------------------------------
 // 6. Distance to polyline
 // ---------------------------------------------------------------------------
+startSection('6');
 const alg6 = [
   h1('6', 'Расстояние от точки до полилинии проектной орбиты'),
   body('Исходный код: src/optimizer.cpp:66, функция distanceToPolyline.'),
@@ -881,6 +933,7 @@ const alg6 = [
 // ---------------------------------------------------------------------------
 // 7. Composite loss
 // ---------------------------------------------------------------------------
+startSection('7');
 const alg7 = [
   h1('7', 'Составная функция потерь оптимизатора'),
   body('Исходный код: src/optimizer.cpp, функция runTrackingAndLoss.'),
@@ -1001,6 +1054,7 @@ const alg7 = [
 // ---------------------------------------------------------------------------
 // 8. Stochastic optimizer
 // ---------------------------------------------------------------------------
+startSection('8');
 const alg8 = [
   h1('8', 'Стохастический оптимизатор (hill-climber c киками)'),
   body('Исходный код: src/optimizer.cpp, функция main и вспомогательные функции.'),
@@ -1113,6 +1167,7 @@ const alg8 = [
 // ---------------------------------------------------------------------------
 // 9. LTE -> lattice
 // ---------------------------------------------------------------------------
+startSection('9');
 const alg9 = [
   h1('9', 'Генерация решётки из LTE-описания'),
   body('Исходный код: lte_to_lattice.py.'),
@@ -1190,6 +1245,7 @@ const alg9 = [
 // ---------------------------------------------------------------------------
 // 10. Sub-lattice assembly
 // ---------------------------------------------------------------------------
+startSection('10');
 const alg10 = [
   h1('10', 'Сборка таблицы конфигурации и суб-решёток'),
   body('Исходный код: assemble_lattice_configs.py.'),
@@ -1257,6 +1313,7 @@ const alg10 = [
 // ---------------------------------------------------------------------------
 // 11. Envelope + FFT
 // ---------------------------------------------------------------------------
+startSection('11');
 const alg11 = [
   h1('11', 'Анализ огибающей и бетатронных частот по FFT'),
   body('Исходный код: analyze_trajectory_stability.py.'),
@@ -1369,6 +1426,7 @@ const alg11 = [
 // ---------------------------------------------------------------------------
 // Приложения
 // ---------------------------------------------------------------------------
+startSection(null);
 const appA = [
   h1Unnumbered('Приложение А. Файлы конфигурации', { id: 'A' }),
   body('В таблице А.1 приведены конфигурационные файлы проекта и их назначение.'),
@@ -1423,7 +1481,7 @@ const appB = [
 // ---------------------------------------------------------------------------
 const toc = [
   h1Unnumbered('Содержание', { pageBreakBefore: false }),
-  ...TOC_ENTRIES.map(([anchor, num, text]) => tocItem(anchor, num, text, '')),
+  ...TOC_ENTRIES.map(([anchor, num, text]) => tocItem(anchor, num, text)),
 ];
 
 // ---------------------------------------------------------------------------

@@ -87,6 +87,7 @@ Simulation*, 1985, §4-3.
 $$
 \frac{d\vec{x}}{dt} = \vec{v}, \qquad
 \frac{d\vec{p}}{dt} = q\,\bigl(\vec{E} + \vec{v}\times\vec{B}\bigr)
+\tag{1.1}
 $$
 
 Variables:
@@ -111,6 +112,7 @@ linked by
 $$
 \vec{p} = \gamma\,m\,\vec{v}, \qquad
 \gamma = \frac{1}{\sqrt{1 - |\vec{v}|^2/c^2}} = \sqrt{1 + \frac{|\vec{p}|^2}{m^2 c^2}}
+\tag{1.2}
 $$
 
 Variables:
@@ -138,6 +140,7 @@ momentum:
 
 $$
 \vec{x}_{n+1/2} = \vec{x}_n + \frac{\vec{p}_n}{\gamma_n\,m}\,\frac{\Delta t}{2}
+\tag{1.3}
 $$
 
 - $\Delta t$ — integration timestep, in seconds (`experiments.csv.dt`).
@@ -147,6 +150,7 @@ $$
 
 $$
 (\vec{B},\,\vec{E}) \leftarrow \mathrm{lattice.getTotalFields}(\vec{x}_{n+1/2})
+\tag{1.4}
 $$
 
 This is the **only** field evaluation per step. RK4 would need four.
@@ -155,6 +159,7 @@ This is the **only** field evaluation per step. RK4 would need four.
 
 $$
 \vec{p}^{-} = \vec{p}_n + \frac{q\,\vec{E}\,\Delta t}{2}
+\tag{1.5}
 $$
 
 - $\vec{p}^{-}$ — momentum after the first E-kick, before the magnetic
@@ -164,6 +169,7 @@ $$
 
 $$
 \gamma^{-} = \sqrt{1 + \frac{|\vec{p}^{-}|^2}{m^2 c^2}}
+\tag{1.6}
 $$
 
 This $\gamma^{-}$ is the "instantaneous" relativistic factor used by the
@@ -174,6 +180,7 @@ magnetic rotation that follows.
 $$
 \vec{t} = \frac{q\,\vec{B}\,\Delta t}{2\,\gamma^{-}\,m}, \qquad
 \vec{s} = \frac{2\,\vec{t}}{1 + |\vec{t}|^2}
+\tag{1.7}
 $$
 
 - $\vec{t}$ — half-angle rotation vector; its magnitude equals $\tan(\theta/2)$,
@@ -186,6 +193,7 @@ The momentum is then rotated in two stages:
 $$
 \vec{p}' = \vec{p}^{-} + \vec{p}^{-} \times \vec{t}, \qquad
 \vec{p}^{+} = \vec{p}^{-} + \vec{p}' \times \vec{s}
+\tag{1.8}
 $$
 
 - $\vec{p}'$ — intermediate momentum after the first half-rotation.
@@ -197,6 +205,7 @@ $$
 
 $$
 \vec{p}_{n+1} = \vec{p}^{+} + \frac{q\,\vec{E}\,\Delta t}{2}
+\tag{1.9}
 $$
 
 This and Step 3 together implement a centred E-acceleration: each one
@@ -206,6 +215,7 @@ contributes half of the impulse $q\vec{E}\,\Delta t$.
 
 $$
 \vec{x}_{n+1} = \vec{x}_{n+1/2} + \frac{\vec{p}_{n+1}}{\gamma_{n+1}\,m}\,\frac{\Delta t}{2}
+\tag{1.10}
 $$
 
 - $\gamma_{n+1} = \sqrt{1 + |\vec{p}_{n+1}|^2/(m^2 c^2)}$ — Lorentz factor
@@ -288,6 +298,7 @@ point:
 $$
 i = \left\lfloor \frac{p_x - x_{\min}}{\Delta x} \right\rfloor, \quad
 t_x = \frac{p_x - x_{\min}}{\Delta x} - i
+\tag{2.1}
 $$
 
 (analogous definitions for $j, t_y$ and $k, t_z$).
@@ -309,6 +320,7 @@ $a, b, c \in \{0, 1\}$. The interpolated field is
 $$
 \vec{F}(\vec{p}) = \sum_{a, b, c \in \{0, 1\}}
        w_{abc}(t_x, t_y, t_z)\;\vec{v}_{abc}
+\tag{2.2}
 $$
 
 with the corner weight
@@ -318,6 +330,7 @@ w_{abc}(t_x, t_y, t_z) =
    \bigl[(1 - t_x)^{1-a}\,t_x^{a}\bigr]\,
    \bigl[(1 - t_y)^{1-b}\,t_y^{b}\bigr]\,
    \bigl[(1 - t_z)^{1-c}\,t_z^{c}\bigr]
+\tag{2.3}
 $$
 
 - $\vec{v}_{abc}$ — vector field at one of the eight corners (in tesla
@@ -341,6 +354,7 @@ $$
    \vec{F}_{\text{raw}}(p_x, p_y, p_z) & \text{if } p_x \ge 0 \\
    \mathrm{diag}(-1, +1, +1)\;\vec{F}_{\text{raw}}(-p_x, p_y, p_z) & \text{if } p_x < 0
 \end{cases}
+\tag{2.4}
 $$
 
 - $\vec{F}_{\text{raw}}$ — interpolation performed on the stored
@@ -420,6 +434,7 @@ across all elements. The grid step is chosen as
 
 $$
 h = \max\bigl(1\,\mathrm{m},\;2\,r_{\max}\bigr)
+\tag{3.1}
 $$
 
 - $h$ — edge length of one square bucket, in metres.
@@ -436,6 +451,7 @@ indices $(b_x, b_y)$ by
 $$
 b_x = \left\lfloor \frac{x}{h} \right\rfloor - b_x^{\min}, \qquad
 b_y = \left\lfloor \frac{y}{h} \right\rfloor - b_y^{\min}
+\tag{3.2}
 $$
 
 - $\lfloor\cdot\rfloor$ — floor function (round down to the nearest
@@ -531,6 +547,7 @@ the query point is outside its sphere of influence:
 
 $$
 |\vec{x} - \vec{c}_i|^2 > r_i^2 \;\;\Rightarrow\;\; \text{contribution is 0}
+\tag{4.1}
 $$
 
 - $\vec{c}_i$ — centre of magnet $i$'s bounding sphere in the global
@@ -545,6 +562,7 @@ magnet's local frame:
 
 $$
 \vec{x}_\text{loc} = R_i^{\!\top}\,(\vec{x} - \vec{T}_i)
+\tag{4.2}
 $$
 
 - $\vec{T}_i$ — translation: the magnet's local-origin position in the
@@ -562,6 +580,7 @@ $$
 
 $$
 \vec{F}_\text{loc} = \mathrm{trilinear}(\mathrm{map}_i,\,\vec{x}_\text{loc},\,\text{useSymmetry}_i)
+\tag{4.3}
 $$
 
 - $\mathrm{map}_i$ — magnet $i$'s field map (binary grid of vectors).
@@ -575,6 +594,7 @@ of the grid) we return early without doing the rest.
 
 $$
 \vec{F}_\text{global} = R_i\,\vec{F}_\text{loc}
+\tag{4.4}
 $$
 
 The translation does **not** apply here — a magnetic field is a vector,
@@ -591,6 +611,7 @@ $$
       I_i / I_i^{\text{nom}} & \text{if } i \text{ is active} \\
       1 & \text{otherwise}
    \end{cases}
+\tag{4.5}
 $$
 
 - $c_i^{\text{hw}}$ — device-level calibration coefficient
@@ -615,10 +636,12 @@ $$
 $$
 \vec{B}_\text{total} \mathrel{+}= \text{scale}_i\,\vec{F}_\text{global} \quad
    \text{if } \text{type}_i = \text{MAGNETIC}
+\tag{4.6}
 $$
 $$
 \vec{E}_\text{total} \mathrel{+}= \text{scale}_i\,\vec{F}_\text{global} \quad
    \text{if } \text{type}_i = \text{ELECTRIC}
+\tag{4.7}
 $$
 
 - $\vec{B}_\text{total},\,\vec{E}_\text{total}$ — running sums of
@@ -683,6 +706,7 @@ oriented "signed distance" test.
 
 $$
 \hat{n} \;=\; \frac{(\vec{b} - \vec{a}) \times (\vec{c} - \vec{a})}{\bigl|(\vec{b} - \vec{a}) \times (\vec{c} - \vec{a})\bigr|}
+\tag{5.1}
 $$
 
 - $\vec{a},\,\vec{b},\,\vec{c}$ — three plane-defining points from
@@ -697,6 +721,7 @@ is arbitrary, so it is flipped to guarantee the particle starts on the
 
 $$
 \hat{n} \leftarrow -\hat{n} \quad \text{if } (\vec{x}_0 - \vec{a}) \cdot \hat{n} > 0
+\tag{5.2}
 $$
 
 - $\vec{x}_0$ — initial particle position, in metres
@@ -709,6 +734,7 @@ $$
 
 $$
 d(\vec{x}) = (\vec{x} - \vec{a}) \cdot \hat{n}
+\tag{5.3}
 $$
 
 - $d > 0$ means $\vec{x}$ is on the same side as $\hat{n}$ points.
@@ -723,6 +749,7 @@ is declared when the sign flips:
 $$
 \bigl(d_{n-1} < 0 \;\wedge\; d_n \ge 0\bigr) \;\vee\;
 \bigl(d_{n-1} \ge 0 \;\wedge\; d_n < 0\bigr)
+\tag{5.4}
 $$
 
 The half-open form ($d_n \ge 0$ vs $d_n < 0$) avoids the degenerate
@@ -785,6 +812,7 @@ parameter
 
 $$
 t^{*} = \frac{(\vec{p} - \vec{a}) \cdot (\vec{b} - \vec{a})}{|\vec{b} - \vec{a}|^2}
+\tag{6.1}
 $$
 
 - $\vec{a},\,\vec{b}$ — endpoints of the segment, in metres.
@@ -800,6 +828,7 @@ we clamp $t^{*}$ to the unit interval:
 
 $$
 t = \mathrm{clip}(t^{*},\,0,\,1) = \min\bigl(1,\,\max(0,\,t^{*})\bigr)
+\tag{6.2}
 $$
 
 The closest point on segment $[\vec{a}, \vec{b}]$ to $\vec{p}$ is then
@@ -807,6 +836,7 @@ The closest point on segment $[\vec{a}, \vec{b}]$ to $\vec{p}$ is then
 $$
 \vec{c} = \vec{a} + t\,(\vec{b} - \vec{a}), \qquad
 d_i = |\vec{p} - \vec{c}|
+\tag{6.3}
 $$
 
 - $\vec{c}$ — foot of the perpendicular projection (or the closest
@@ -818,6 +848,7 @@ $$
 $$
 \mathrm{dist}(\vec{p},\,\Pi) = \min_{i = 0,\,\ldots,\,N-2}\,d_i
    \;=\; \sqrt{\,\min_{i}\,|\vec{p} - \vec{c}_i|^2\,}
+\tag{6.4}
 $$
 
 - $\Pi = (\vec{p}_0, \vec{p}_1, \ldots, \vec{p}_{N-1})$ — the polyline
@@ -892,6 +923,7 @@ The total objective is a sum of three terms:
 
 $$
 \mathcal{L} \;=\; \mathcal{L}_{\text{pos}} \;+\; \mathcal{L}_{\text{dir}} \;+\; \mathcal{L}_{\text{env}}
+\tag{7.1}
 $$
 
 - $\mathcal{L}$ — scalar loss minimised by the optimizer (units: m²
@@ -905,6 +937,7 @@ $$
 $$
 \mathcal{L}_{\text{pos}}
    \;=\; \sum_{i = 1}^{N_p}\,\sum_{m \in \mathcal{M}} w_m\,\min_{t}\,\bigl|\vec{x}_i(t) - \vec{c}_m\bigr|^2
+\tag{7.2}
 $$
 
 - $N_p$ — number of tracked particles (5 in this project: a reference
@@ -931,6 +964,7 @@ $$
 \mathcal{L}_{\text{dir}}
    \;=\; w_{\text{dir}}\,\sum_{i = 1}^{N_p}\,\sin^2 \theta_i, \qquad
 \cos\theta_i = \frac{\vec{p}_i^{\,\text{fin}}\cdot \hat{r}}{|\vec{p}_i^{\,\text{fin}}|}
+\tag{7.3}
 $$
 
 - $w_{\text{dir}}$ — weight of the direction term (typically $10^{3}$);
@@ -952,12 +986,14 @@ pass through the lattice:
 $$
 \mathcal{L}_{\text{env}}
    \;=\; w_{\text{env}}\,\sum_{i = 1}^{N_p}\,\max\bigl(0,\;A_i^{\text{fin}} - A_i^{\text{init}}\bigr)^2
+\tag{7.4}
 $$
 
 with
 
 $$
 A_i(t) = \mathrm{dist}\bigl(\vec{x}_i(t),\,\Pi_{\text{design}}\bigr)
+\tag{7.5}
 $$
 
 - $w_{\text{env}}$ — envelope weight, typically $10^{6}$ (large, because
@@ -1078,6 +1114,7 @@ its parameters are shifted by a per-group step with a random sign:
 $$
 \theta'_g = \theta_g + \varepsilon_g \cdot \mathrm{sgn}(u - \tfrac{1}{2}), \qquad
 \theta'_k = \theta_k \;\text{ for all } k \ne g
+\tag{8.1}
 $$
 
 - $u \sim \mathrm{Uniform}(0, 1)$ — a fresh random number.
@@ -1091,6 +1128,7 @@ $$
    \texttt{step\_abs}_g           & \text{if group $g$ targets the } \texttt{arg\_val} \text{ column} \\
    \texttt{step\_percent}_g \cdot \theta_g & \text{if group $g$ targets } \texttt{correct\_coeff}
 \end{cases}
+\tag{8.2}
 $$
 
 - $\texttt{step\_abs}_g$ — absolute step in amperes (typical 0.1–1.0).
@@ -1104,6 +1142,7 @@ perturbed simultaneously to escape local minima:
 $$
 \theta'_g = \theta_g + \delta_g, \quad
 \delta_g \sim \mathrm{Uniform}(-\Delta,\,+\Delta) \;\;\text{for all } g
+\tag{8.3}
 $$
 
 - $\Delta = \texttt{kick\_scale}$ — kick amplitude (amperes or fraction,
@@ -1121,6 +1160,7 @@ $$
    \boldsymbol{\theta}',\;\mathcal{L}(\boldsymbol{\theta}') & \text{if } \mathcal{L}(\boldsymbol{\theta}') < \mathcal{L}_{\text{best}} \\
    \boldsymbol{\theta},\;\mathcal{L}_{\text{best}} & \text{otherwise (revert)}
 \end{cases}
+\tag{8.4}
 $$
 
 This is a pure hill-climber — no temperature, no Metropolis acceptance
@@ -1211,6 +1251,7 @@ arc has length
 
 $$
 L_{\text{chord}} = 2\,\rho\,\sin\!\frac{\alpha}{2} = \frac{2 L}{\alpha}\,\sin\!\frac{\alpha}{2}
+\tag{9.1}
 $$
 
 - $L$ — arc length of the bending magnet, in metres (from the LTE
@@ -1234,10 +1275,12 @@ geometric midpoint. The state update is
 
 $$
 \psi' = \psi + \Delta\psi
+\tag{9.2}
 $$
 $$
 x' = x + \ell\,\cos\!\Bigl(\psi + \tfrac{\Delta\psi}{2}\Bigr), \qquad
 y' = y + \ell\,\sin\!\Bigl(\psi + \tfrac{\Delta\psi}{2}\Bigr)
+\tag{9.3}
 $$
 
 - $\psi$ — yaw angle (rotation about the global $z$ axis), in radians.
@@ -1322,6 +1365,7 @@ $$
    = R_{\text{master}}
    \,\cup\,
    \bigcup_{s \,\in\, \mathrm{SubLattices}}\,R_s
+\tag{10.1}
 $$
 
 where
@@ -1336,10 +1380,12 @@ R_{\text{master}} = \{\;
    & (s.\text{sp\_type},\,s.\text{sp\_element\_id}) = (\ell.\text{sp\_type},\,\ell.\text{sp\_element\_id})
 \;\}
 \end{aligned}
+\tag{10.2}
 $$
 
 $$
 R_s = \{\,(s.\text{lattice\_id},\;\text{rest of the row}) \;\big|\; r \in R_{\text{master}},\; r.\text{instance\_id} \le s.\text{max\_gid}\,\}
+\tag{10.3}
 $$
 
 - $L_0 = 101$ — master lattice ID (from `lte_mapping.json`).
@@ -1412,6 +1458,7 @@ sample $k$:
 
 $$
 A_i(t_k) = \mathrm{dist}\bigl(\vec{x}_i(t_k),\,\Pi_{\text{design}}\bigr)
+\tag{11.1}
 $$
 
 - $\vec{x}_i(t_k)$ — position of particle $i$ at the $k$-th saved time
@@ -1426,6 +1473,7 @@ $$
 $$
 A(t) \approx m\,t + A_0, \qquad
 (m, A_0) = \arg\min_{m, A_0}\,\sum_{k}\bigl(A(t_k) - m\,t_k - A_0\bigr)^2
+\tag{11.2}
 $$
 
 - $m$ — linear growth rate of the envelope, in metres per second.
@@ -1439,6 +1487,7 @@ $$
 $$
 A(t) \approx A_0\,e^{\gamma\,t} \quad \Longleftrightarrow \quad
 \ln A(t) \approx \ln A_0 + \gamma\,t
+\tag{11.3}
 $$
 
 - $\gamma$ — exponential growth rate, in inverse seconds (sometimes
@@ -1456,6 +1505,7 @@ R^2 = 1 - \frac{SS_{\text{res}}}{SS_{\text{tot}}}, \quad
 SS_{\text{res}} = \sum_{k}\bigl(\ln A(t_k) - \widehat{\ln A(t_k)}\bigr)^2,
 \;\;
 SS_{\text{tot}} = \sum_{k}\bigl(\ln A(t_k) - \overline{\ln A}\bigr)^2
+\tag{11.4}
 $$
 
 - $SS_{\text{res}}$ — residual sum of squares (fit error).
@@ -1474,6 +1524,7 @@ $\Delta t_{\text{sample}} = t_k - t_{k-1}$:
 $$
 \widehat{A}(f_n) = \sum_{k = 0}^{K-1} A(t_k)\,e^{-2\pi i\,f_n\,t_k}, \quad
 f_n = \frac{n}{K\,\Delta t_{\text{sample}}}, \quad n = 0, 1, \ldots, K-1
+\tag{11.5}
 $$
 
 - $K$ — number of envelope samples in the trajectory.
@@ -1485,6 +1536,7 @@ amplitude, excluding the DC bin which carries only the mean:
 
 $$
 f_{\text{betatron}} = \arg\max_{f_n > f_{\min}}\bigl|\widehat{A}(f_n)\bigr|
+\tag{11.6}
 $$
 
 - $f_{\min}$ — small floor frequency that masks out the DC component
