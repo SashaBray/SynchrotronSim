@@ -237,8 +237,10 @@ def verdict(a_init, a_final, a_max, gamma, r2_exp):
 def analyze(exp_id, show=True):
     traj_path = WS / "results" / f"trajectories_exp{exp_id}.bin"
     if not traj_path.exists():
+        from _common import tracker_exe
+        rel = tracker_exe().relative_to(tracker_exe().parents[1])
         print(f"ERROR: {traj_path} not found.")
-        print(f"  Run first: build\\SynchrotronTracker.exe {exp_id}")
+        print(f"  Run first: {rel} {exp_id}")
         sys.exit(1)
 
     # Опорная орбита: загрузить, сгладить арками, добавить prelude/postlude

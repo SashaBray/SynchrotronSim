@@ -262,26 +262,24 @@ def write_flat_config(cfg, out_path, sp_elements_path, history_output):
 
 
 def main():
+    from _common import workspace_dir
+    ws = workspace_dir()
     if len(sys.argv) < 2:
-        cfg_path = "workspace/optim_inputs/sp1_endpoint.json"
+        cfg_path = ws / "optim_inputs" / "sp1_endpoint.json"
     else:
-        cfg_path = sys.argv[1]
-    cfg_path = Path(cfg_path).resolve()
+        cfg_path = Path(sys.argv[1])
+    cfg_path = cfg_path.resolve()
     out_path = cfg_path.with_suffix(".optimconfig")
     history_output = str(cfg_path.with_suffix(".history.json").name)
     with open(cfg_path, encoding="utf-8") as f:
         cfg = json.load(f)
-    sp_elements_path = Path(cfg_path).parent.parent.parent / "workspace" / "tables" / "sp_elements.csv"
-    # ^ предполагает workspace/optim_inputs/*.json -> workspace/tables/sp_elements.csv
-    # На случай нестандартного расположения позволим override через окружение
+    # sp_elements.csv ищем в workspace проекта (через _common). Может быть
+    # переопределён переменной окружения SP_ELEMENTS_PATH для нестандартных
+    # раскладок.
+    sp_elements_path = ws / "tables" / "sp_elements.csv"
     sp_env = os.environ.get("SP_ELEMENTS_PATH")
     if sp_env:
         sp_elements_path = Path(sp_env)
-    if not sp_elements_path.exists():
-        # ещё одна попытка: относительно скрипта
-        guess = Path(__file__).resolve().parent / "workspace" / "tables" / "sp_elements.csv"
-        if guess.exists():
-            sp_elements_path = guess
     write_flat_config(cfg, out_path, sp_elements_path, history_output)
 
 

@@ -31,11 +31,12 @@ import pandas as pd
 import pyvista as pv
 
 from visualize import build_combined_mesh, load_trajectories
+from _common import tracker_exe, project_root, workspace_dir
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-WS         = SCRIPT_DIR / "workspace"
-EXE        = SCRIPT_DIR / "build" / "SynchrotronTracker.exe"
+SCRIPT_DIR = project_root()
+WS         = workspace_dir(SCRIPT_DIR)
+EXE        = tracker_exe(SCRIPT_DIR)
 ASM        = SCRIPT_DIR / "assemble_lattice_configs.py"
 SP_PATH    = WS / "tables" / "sp_elements.csv"
 HW_PATH    = WS / "tables" / "hardware_library.csv"

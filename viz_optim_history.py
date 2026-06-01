@@ -16,14 +16,14 @@ import json
 import sys
 from pathlib import Path
 
-import matplotlib
-matplotlib.use("TkAgg")
-import matplotlib.pyplot as plt
-import numpy as np
+from _common import set_matplotlib_backend, workspace_dir
+set_matplotlib_backend("TkAgg")          # fallback to Qt5Agg / Agg if Tk не доступен
+import matplotlib.pyplot as plt          # noqa: E402
+import numpy as np                        # noqa: E402
 
 
 def main():
-    default_path = Path(__file__).resolve().parent / "workspace" / "results" / "sp1_endpoint.history.json"
+    default_path = workspace_dir() / "results" / "sp1_endpoint.history.json"
     path = Path(sys.argv[1]) if len(sys.argv) > 1 else default_path
     if not path.exists():
         print(f"ERROR: history file not found: {path}")

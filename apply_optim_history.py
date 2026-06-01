@@ -22,9 +22,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from _common import tracker_exe, project_root, workspace_dir
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-WS         = SCRIPT_DIR / "workspace"
+
+SCRIPT_DIR = project_root()
+WS         = workspace_dir(SCRIPT_DIR)
 SP_PATH    = WS / "tables" / "sp_elements.csv"
 HW_PATH    = WS / "tables" / "hardware_library.csv"
 ASSEMBLE   = SCRIPT_DIR / "assemble_lattice_configs.py"
@@ -154,10 +156,10 @@ def main():
 
     # Перегенерация trajectories_exp{id}.bin -- чтобы visualize.py видел актуальную траекторию.
     exp_id = int(h.get("experiment_id", 2))
-    exe_path = SCRIPT_DIR / "build" / "SynchrotronTracker.exe"
-    if exe_path.exists():
+    exe = tracker_exe(SCRIPT_DIR)
+    if exe.exists():
         print(f"\nRe-running tracker for exp {exp_id} ...")
-        r = subprocess.run([str(exe_path), str(exp_id)], capture_output=True, text=True)
+        r = subprocess.run([str(exe), str(exp_id)], capture_output=True, text=True)
         if r.returncode != 0:
             print(f"  WARN: tracker failed (visualize.py покажет старую траекторию): "
                   f"{r.stderr.strip()[:300]}")
@@ -166,8 +168,8 @@ def main():
             for line in r.stdout.strip().splitlines()[-8:]:
                 print(f"  {line}")
     else:
-        print(f"\nWARN: {exe_path} not found, skip re-tracking. "
-              f"Запустите вручную: build\\SynchrotronTracker.exe {exp_id}")
+        print(f"\nWARN: {exe} not found, skip re-tracking. "
+              f"Запустите вручную: {exe.relative_to(SCRIPT_DIR)} {exp_id}")
 
     print(f"\nDone. Запустите python visualize.py {exp_id} чтобы увидеть финальную решётку.")
 
