@@ -60,8 +60,6 @@ struct FinishPlane {
         lastD = d;
         return crossed;
     }
-
-    void reset() { callCount = 0; initialized = false; lastD = 0.0; }
 };
 
 #endif // FINISH_PLANE_H

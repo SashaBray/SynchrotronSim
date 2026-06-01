@@ -461,17 +461,12 @@ int main(int argc, char* argv[]) {
             grpId    = std::stoi(r[2]);
             dt       = std::stod(r[3]);
             maxTurns = std::stoi(r[4]);
-            // Колонка 5 -- traj_stride. Backward compat: если в строке 14
-            // столбцов -- старый формат без traj_stride.
+            // Колонка 5 -- traj_stride.
             if (r.size() >= 15) {
                 try { trajStride = std::max(1, std::stoi(r[5])); } catch (...) {}
                 fp1 = {std::stod(r[6]),  std::stod(r[7]),  std::stod(r[8])};
                 fp2 = {std::stod(r[9]),  std::stod(r[10]), std::stod(r[11])};
                 fp3 = {std::stod(r[12]), std::stod(r[13]), std::stod(r[14])};
-            } else if (r.size() >= 14) {
-                fp1 = {std::stod(r[5]),  std::stod(r[6]),  std::stod(r[7])};
-                fp2 = {std::stod(r[8]),  std::stod(r[9]),  std::stod(r[10])};
-                fp3 = {std::stod(r[11]), std::stod(r[12]), std::stod(r[13])};
             }
             break;
         }
@@ -579,8 +574,6 @@ int main(int argc, char* argv[]) {
         }
         MagneticElement el;
         el.map            = mapCache[devType];
-        el.type           = FieldType::MAGNETIC;
-        el.useSymmetry    = true;
         el.isActive       = isActive;
         el.fieldDirection = fieldDir;
         // Эффективный коэффициент = hw × per-instance из sp_elements.
@@ -957,9 +950,7 @@ int main(int argc, char* argv[]) {
         // reset particles
         for (size_t i = 0; i < beam.size(); ++i) beam[i] = beam0[i];
         results.assign(beam.size(), {});
-        FinishPlane fPlane;
-        // Поскольку FinishPlane хранит callCount per-instance, а мы запускаем
-        // 5 частиц параллельно, делаем 5 копий.
+        // FinishPlane хранит callCount per-instance -- по копии на частицу.
         std::vector<FinishPlane> planes(beam.size());
         for (size_t i = 0; i < beam.size(); ++i) {
             planes[i].setup(fp1, fp2, fp3, startRef, maxTurns);

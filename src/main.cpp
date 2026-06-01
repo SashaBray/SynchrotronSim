@@ -106,15 +106,18 @@ int main(int argc, char* argv[]) {
     if (std::string(argv[1]) == "--convert") {
         auto hwData = readCSV(ws + "tables/hardware_library.csv");
         int converted = 0, failed = 0;
+        // Колонки hardware_library.csv (см. main loop):
+        //   0:device_type_id 1:Active 2:map_raw_path 3:map_bin_path
+        //   4:stl_path 5:nominal_arg 6:field_direction 7:correct_coeff
         for (auto& h : hwData) {
-            if (h.size() < 5 || h[0].empty()) continue;
-            std::string rawPath = ws + "fields_raw/" + h[3];
-            std::string binPath = ws + "fields_bin/" + h[4];
+            if (h.size() < 4 || h[0].empty()) continue;
+            std::string rawPath = ws + "fields_raw/" + h[2];
+            std::string binPath = ws + "fields_bin/" + h[3];
             double nominalArg = 1.0;
-            if (h.size() > 7 && h[7] != "-") {
-                try { nominalArg = std::stod(h[7]); } catch (...) { nominalArg = 1.0; }
+            if (h.size() > 5 && h[5] != "-") {
+                try { nominalArg = std::stod(h[5]); } catch (...) { nominalArg = 1.0; }
             }
-            std::cout << "[" << h[0] << "] " << h[3] << " -> " << h[4]
+            std::cout << "[" << h[0] << "] " << h[2] << " -> " << h[3]
                       << " (nominal=" << nominalArg << ")" << std::endl;
             if (AnsysConverter::convert(rawPath, binPath, nominalArg)) converted++;
             else { failed++; std::cerr << "  FAILED" << std::endl; }
@@ -144,18 +147,11 @@ int main(int argc, char* argv[]) {
             maxTurns = std::stoi(r[4]);
             // Колонка 5 -- traj_stride: сохранять каждую N-ю точку траектории
             // (проверка финишной плоскости всё равно идёт каждый шаг).
-            // 1 = старое поведение, N>1 = прорежение. Backward compat:
-            // если в строке всего 14 столбцов -- считаем traj_stride=1, а
-            // p1..p3 берём по старому смещению (с 5-го).
             if (r.size() >= 15) {
                 try { trajStride = std::max(1, std::stoi(r[5])); } catch (...) {}
                 fp1 = {std::stod(r[6]),  std::stod(r[7]),  std::stod(r[8])};
                 fp2 = {std::stod(r[9]),  std::stod(r[10]), std::stod(r[11])};
                 fp3 = {std::stod(r[12]), std::stod(r[13]), std::stod(r[14])};
-            } else if (r.size() >= 14) {
-                fp1 = {std::stod(r[5]),  std::stod(r[6]),  std::stod(r[7])};
-                fp2 = {std::stod(r[8]),  std::stod(r[9]),  std::stod(r[10])};
-                fp3 = {std::stod(r[11]), std::stod(r[12]), std::stod(r[13])};
             }
             break;
         }
@@ -189,11 +185,12 @@ int main(int argc, char* argv[]) {
             for (auto& h : hwData) {
                 if (h[0] == type) {
                     isActive = (h[1] == "True" || h[1] == "true" || h[1] == "1");
-                    binName = h[4];
-                    // Колонки CSV: 0:id 1:Active 2:field_type 3:raw 4:bin 5:stl
-                    //              6:use_symmetry 7:nominal_arg 8:field_direction 9:correct_coeff
-                    fieldDir = std::stod(h[8]);
-                    corrCoeff = std::stod(h[9]);
+                    binName  = h[3];
+                    // Колонки hardware_library.csv:
+                    //   0:device_type_id 1:Active 2:map_raw_path 3:map_bin_path
+                    //   4:stl_path 5:nominal_arg 6:field_direction 7:correct_coeff
+                    fieldDir  = std::stod(h[6]);
+                    corrCoeff = std::stod(h[7]);
                     foundType = true;
                     break;
                 }
@@ -211,8 +208,6 @@ int main(int argc, char* argv[]) {
             if (mapCache.count(type)) {
                 MagneticElement el;
                 el.map = mapCache[type];
-                el.type = FieldType::MAGNETIC; // По умолчанию B
-                el.useSymmetry = true;
 
                 // Переносим калибровочные параметры
                 el.isActive = isActive;

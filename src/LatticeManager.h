@@ -7,8 +7,6 @@
 #include <cmath>
 #include <algorithm>
 
-enum class FieldType { MAGNETIC, ELECTRIC };
-
 struct TransformMatrix {
     double m[3][3];
     double tx, ty, tz;
@@ -36,15 +34,16 @@ struct TransformMatrix {
 class MagneticElement {
 public:
     std::shared_ptr<FieldMap> map;
-    FieldType type;
     TransformMatrix transform;
     double currentScale;
-    bool useSymmetry;
+    // В текущем поколении карт поля все магниты симметричны по плоскости YZ,
+    // поэтому useSymmetry задаётся по умолчанию true и обычно не переопределяется.
+    bool useSymmetry = true;
 
-    // Новые калибровочные параметры
-    bool isActive;         // Из колонки "Active" (True/False)
-    double fieldDirection; // Из колонки "field_direction" (1/-1)
-    double correctCoeff;   // Из колонки "correct_coeff"
+    // Калибровочные параметры
+    bool isActive;         // колонка hardware_library.Active (True/False)
+    double fieldDirection; // колонка field_direction (1/-1)
+    double correctCoeff;   // hw.correct_coeff × sp.correct_coeff (per-instance)
 
     // Bounding sphere в МИРОВЫХ координатах -- для быстрого прескрининга
     // в getTotalFields (избегаем transformPointInv для далёких магнитов).
@@ -132,15 +131,13 @@ public:
             finalScale *= currentScale;
         }
 
-        globalF.x *= finalScale;
-        globalF.y *= finalScale;
-        globalF.z *= finalScale;
-
-        if (type == FieldType::MAGNETIC) {
-            totalB.x += globalF.x; totalB.y += globalF.y; totalB.z += globalF.z;
-        } else {
-            totalE.x += globalF.x; totalE.y += globalF.y; totalE.z += globalF.z;
-        }
+        // В текущей конфигурации все элементы магнитные, поэтому вклад идёт
+        // только в totalB; totalE сохраняется в сигнатуре для совместимости с
+        // Boris pusher'ом (там E ≡ 0 даёт безобидные no-op).
+        (void)totalE;
+        totalB.x += globalF.x * finalScale;
+        totalB.y += globalF.y * finalScale;
+        totalB.z += globalF.z * finalScale;
     }
 };
 
@@ -157,7 +154,6 @@ public:
 class AcceleratorConfig {
 private:
     std::vector<MagneticElement> elements;
-    double maxRadiusSq = 0;
 
     // Spatial grid
     bool   gridBuilt = false;
@@ -175,11 +171,8 @@ public:
     void addElement(const MagneticElement& el) {
         elements.push_back(el);
         elements.back().computeBounds();
-        double r_sq = el.transform.tx * el.transform.tx + el.transform.ty * el.transform.ty + el.transform.tz * el.transform.tz;
-        if (r_sq > maxRadiusSq) maxRadiusSq = r_sq;
         gridBuilt = false;
     }
-    double getMaxRadiusSq() const { return maxRadiusSq; }
 
     // Построить bucket grid. Вызывать ПОСЛЕ окончания всех addElement.
     // Возвращает суммарное число (elem, bucket) пар (для диагностики).
@@ -237,17 +230,6 @@ public:
                               if ((int)b.size() > maxBucketLen) maxBucketLen = b.size(); }
         }
         avgBucketLen = nNonEmpty > 0 ? (double)sum / nNonEmpty : 0.0;
-    }
-
-    // Возвращает true, если в окрестности pos НЕТ магнитов (drift section).
-    // Можно использовать для перехода на аналитический drift `x += v*dt`
-    // вместо полного Boris step. Дёшевая проверка: 2 деления + 1 ветка.
-    inline bool isDriftRegion(const FieldVector& pos) const {
-        if (!gridBuilt) return false;  // safe fallback
-        int bx = floorDiv(pos.x, bucketSize) - bxMin;
-        int by = floorDiv(pos.y, bucketSize) - byMin;
-        if (bx < 0 || bx >= bxN || by < 0 || by >= byN) return true;
-        return bucketGrid[(size_t)bx * byN + by].empty();
     }
 
     void getTotalFields(const FieldVector& pos, FieldVector& B, FieldVector& E) const {
