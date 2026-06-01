@@ -14,7 +14,7 @@ const {
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, Header, Footer,
   AlignmentType, LevelFormat, HeadingLevel, BorderStyle, WidthType, ShadingType,
   PageNumber, PageBreak, TabStopType, TabStopPosition,
-  Bookmark, InternalHyperlink, PageReference,
+  Bookmark, InternalHyperlink,
   Math: MathBlock, MathRun, MathFraction, MathRadical, MathSuperScript, MathSubScript,
   MathSubSuperScript, MathRoundBrackets, MathSquareBrackets, MathAngledBrackets, MathSum
 } = docx;
@@ -378,9 +378,8 @@ const titlePage = [
 // Содержание
 // ---------------------------------------------------------------------------
 // Кликабельный пункт оглавления. anchorId — bookmark в теле документа,
-// на который ссылка должна указывать. Номер страницы вставляется как
-// поле PAGEREF: Word подставит фактический номер при первом открытии
-// (если пользователь подтвердит «обновить поля»; иначе F9 в редакторе).
+// на который ссылка должна указывать. Номер страницы оставлен пустым —
+// проставляется вручную в Word после генерации.
 function tocItem(anchorId, num, text) {
   const tabs = [{ type: TabStopType.RIGHT, position: CONTENT_W - mm(2),
                   leader: 'dot' }];
@@ -389,20 +388,12 @@ function tocItem(anchorId, num, text) {
     indent: { firstLine: 0 },
     tabStops: tabs,
     children: [
-      // Название главы — гиперссылка на bookmark.
       new InternalHyperlink({
         anchor: anchorId,
         children: [
           new TextRun({ text: `${num ? num + ' ' : ''}${text}`,
                         font: TIMES, size: SIZE_BODY }),
-        ],
-      }),
-      // Tab → к правому краю + поле PAGEREF (тоже как гиперссылка).
-      new TextRun({ text: '\t', font: TIMES, size: SIZE_BODY }),
-      new InternalHyperlink({
-        anchor: anchorId,
-        children: [
-          new PageReference(anchorId, { hyperlink: false }),
+          new TextRun({ text: '\t', font: TIMES, size: SIZE_BODY }),
         ],
       }),
     ],
