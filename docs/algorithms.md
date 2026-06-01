@@ -126,9 +126,11 @@ OUTPUT : s updated to step n+1
 12. pos ← pos + mom · (dt/2) / (m0·γ)              ; half-drift
 ```
 
-For drift sections (no magnets nearby, `lattice.isDriftRegion(pos) ==
-true`) the cheaper `Integrator::driftStep` is used: `pos += (mom /
-(m0·γ)) · dt`, momentum unchanged.
+A cheaper analytic-drift helper (`Integrator::driftStep`,
+`AcceleratorConfig::isDriftRegion`) was added in an earlier optimization
+round but is **not invoked** in the current tracking/optimization loops
+— `borisStep` is used uniformly. The bucket-grid prescreening alone
+already brings drift-region cost down to a near-empty inner loop.
 
 ---
 
@@ -212,8 +214,9 @@ OUTPUT: field vector at p
 Accelerates the per-step lookup of magnets that can contribute to the
 field at the current particle position. Without indexing, the simulator
 would iterate over all ~2762 elements per step. The bucket grid reduces
-this to ~5 candidates (and ~95% of steps fall into empty buckets in
-drift regions, allowing the cheap `driftStep`).
+this to ~5 candidates per step; in drift regions the bucket is empty
+and the per-step cost collapses to a single bucket lookup with no field
+evaluations.
 
 The index is built once after `addElement(...)` finishes, then used
 read-only throughout tracking and optimization.
@@ -283,10 +286,11 @@ by = floor(y / bucketSize) - byMin
        elements[i].addContribution(pos, B, E)
 ```
 
-**Drift check (used by tracker):**
+**Drift check (helper, currently unused):**
 `isDriftRegion(pos)` returns true if the bucket containing `pos` is
-empty or outside the grid — caller may invoke `driftStep` instead of
-`borisStep`.
+empty or outside the grid. It was intended to let the caller substitute
+the cheaper analytic `driftStep` for `borisStep`, but the current code
+calls `borisStep` unconditionally.
 
 ---
 
@@ -548,7 +552,7 @@ B) Per particle i:
    minDist²[m] ← +∞ for each m in magnets_idx ∪ virtual_targets
    A_init     ← distanceToPolyline(x_init,  design_poly)
    for each step until finish plane:
-       step Boris/drift
+       Boris step
        for each m in candidates from bucket:
            d² ← |x − c_m|²
            if d² < minDist²[m]:  minDist²[m] ← d²
