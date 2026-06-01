@@ -533,6 +533,8 @@ int main(int argc, char* argv[]) {
     int hw_bin   = hwCsv.col("map_bin_path");
     int hw_fd    = hwCsv.col("field_direction");
     int hw_cc    = hwCsv.col("correct_coeff");
+    int hw_ft    = hwCsv.col("field_type");      // -1 если колонка отсутствует
+    int hw_sym   = hwCsv.col("use_symmetry");    // -1 если колонка отсутствует
 
     auto findHwRow = [&](const std::string& devType) -> int {
         for (int i = 0; i < (int)hwCsv.rows.size(); ++i)
@@ -567,6 +569,20 @@ int main(int argc, char* argv[]) {
         double fieldDir = std::stod(h[hw_fd]);
         double corrCoeff = std::stod(h[hw_cc]);
 
+        // field_type: "B"/"M"/"MAGNETIC" → MAGNETIC; "E"/"ELECTRIC" → ELECTRIC.
+        // Колонка отсутствует или значение нестандартное → MAGNETIC.
+        FieldType fieldKind = FieldType::MAGNETIC;
+        if (hw_ft >= 0 && (int)h.size() > hw_ft) {
+            std::string ft = h[hw_ft];
+            for (auto& c : ft) c = (char)std::toupper((unsigned char)c);
+            if (ft == "E" || ft == "ELECTRIC") fieldKind = FieldType::ELECTRIC;
+        }
+        // use_symmetry: "1"/"True" → true, "0"/"False" → false, иначе → true.
+        bool useSym = true;
+        if (hw_sym >= 0 && (int)h.size() > hw_sym && !h[hw_sym].empty()) {
+            useSym = (h[hw_sym] == "1" || h[hw_sym] == "True" || h[hw_sym] == "true");
+        }
+
         if (mapCache.find(devType) == mapCache.end()) {
             auto m = std::make_shared<FieldMap>();
             if (!m->loadFromBinary(ws + "fields_bin/" + binName)) continue;
@@ -574,6 +590,8 @@ int main(int argc, char* argv[]) {
         }
         MagneticElement el;
         el.map            = mapCache[devType];
+        el.type           = fieldKind;
+        el.useSymmetry    = useSym;
         el.isActive       = isActive;
         el.fieldDirection = fieldDir;
         // Эффективный коэффициент = hw × per-instance из sp_elements.

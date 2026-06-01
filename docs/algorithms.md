@@ -315,20 +315,23 @@ interpolation.
 | `worldCenter, worldRadius²` | bounding sphere | `computeBounds()` |
 | `transform` | local↔world (rotation + translation) | lattice_configs.csv |
 | `map` | field grid | hardware_library.csv |
-| `useSymmetry` | YZ symmetry flag | `MagneticElement` default (`true`) |
+| `useSymmetry` | YZ symmetry flag (read from `use_symmetry` column) | hardware_library.csv |
 | `correctCoeff` | calibration factor | hardware_library + sp_elements |
 | `fieldDirection` | sign flip (±1) | hardware_library.csv |
 | `currentScale` | current/nominal_current (active electromagnets) | computed at load |
 | `isActive` | true ↔ apply currentScale | hardware_library.csv |
+| `type` | `MAGNETIC` / `ELECTRIC` (read from `field_type` column: `B`/`M`/`MAGNETIC` → MAGNETIC; `E`/`ELECTRIC` → ELECTRIC; missing → MAGNETIC) | hardware_library.csv |
 
-All current devices are magnetic; `addContribution` always accumulates
-into `totalB`. The `totalE` accumulator is passed through unchanged for
-Boris-pusher compatibility (E ≡ 0).
+`addContribution` routes by `type` — `MAGNETIC` accumulates into
+`totalB`, `ELECTRIC` into `totalE`. All current devices are magnetic, so
+`totalE` stays at zero in practice and the E-kick steps of the Boris
+pusher are no-ops, but the routing is live and supports adding
+electrostatic elements without code changes.
 
 ### 4.3 Solution results
 
-In-place addition into `totalB`. No return value. `totalE` is left
-untouched.
+In-place addition into `totalB` (if `type == MAGNETIC`) or `totalE`
+(if `type == ELECTRIC`). No return value.
 
 ### 4.4 Mathematical description
 
@@ -339,7 +342,7 @@ localF   = trilinear(map, localPos, useSymmetry)
 if localF == 0:                                       return            (sparse grid)
 globalF  = R · localF                                                   (local → world)
 scale    = correctCoeff · fieldDirection · (currentScale if isActive)
-totalB  += scale · globalF
+totalB or totalE += scale · globalF                                     (by type)
 ```
 
 ### 4.5 Solution algorithm
@@ -353,7 +356,8 @@ totalB  += scale · globalF
 5. globalF  ← transform.rotateVector(localF)
 6. scale    ← correctCoeff · fieldDirection
    if isActive:  scale *= currentScale
-7. totalB  += scale · globalF
+7. if type == MAGNETIC:  totalB += scale · globalF
+   else                  totalE += scale · globalF
 ```
 
 ---
@@ -904,7 +908,7 @@ f_betatron = argmax_(f > f_min) |Â(f)|     (DC bin masked)
 | File | Format | Description |
 |---|---|---|
 | `workspace/fields_bin/*.bin` | binary `GridHeader + FieldVector[nx·ny·nz]` | per-magnet field map |
-| `workspace/tables/hardware_library.csv` | `;`-separated CSV, 8 columns | per `device_type` calibration |
+| `workspace/tables/hardware_library.csv` | `;`-separated CSV, 10 columns | per `device_type` calibration |
 | `workspace/tables/sp_elements.csv` | `;`-separated CSV | superperiod template (editable) |
 | `workspace/tables/lattice_layout.csv` | `;`-separated CSV | ring unrolling (generated) |
 | `workspace/tables/lattice_configs.csv` | `;`-separated CSV | simulator input (generated) |
@@ -913,9 +917,13 @@ f_betatron = argmax_(f > f_min) |Â(f)|     (DC bin masked)
 | `workspace/results/trajectories_exp{id}.bin` | binary | output of `SynchrotronTracker[.exe]` |
 | `workspace/results/{name}.history.json` | JSON | output of `SynchrotronOptimizer[.exe]` |
 
-Columns of `hardware_library.csv` (after the 2026-06 refactor):
-`device_type_id`, `Active`, `map_raw_path`, `map_bin_path`, `stl_path`,
-`nominal_arg`, `field_direction`, `correct_coeff`. The earlier
-`field_type` and `use_symmetry` columns were removed — both binaries
-hardcoded `MAGNETIC` and `true` respectively, and the columns were
-never read.
+Columns of `hardware_library.csv` (in file order):
+`device_type_id`, `Active`, `field_type`, `map_raw_path`, `map_bin_path`,
+`stl_path`, `use_symmetry`, `nominal_arg`, `field_direction`,
+`correct_coeff`. The two flags `field_type` (`B`/`E`) and
+`use_symmetry` (`1`/`0`) are read into `MagneticElement::type` and
+`MagneticElement::useSymmetry` at load time. All current rows are
+`B` / `1`, but the routing in `addContribution` and the mirror branch
+in `FieldMap::getInterpolatedField` honour both flags, so introducing
+an electrostatic device or an asymmetric field map needs only a CSV
+edit.

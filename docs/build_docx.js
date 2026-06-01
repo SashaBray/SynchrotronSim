@@ -503,16 +503,17 @@ const alg4 = [
       ['worldCenter, worldRadius²', 'параметры охватывающей сферы', 'computeBounds()'],
       ['transform', 'преобразование локальная↔мировая система', 'lattice_configs.csv'],
       ['map', 'карта поля магнита', 'hardware_library.csv'],
-      ['useSymmetry', 'флаг YZ-симметрии', 'MagneticElement default (true)'],
+      ['useSymmetry', 'флаг YZ-симметрии (из колонки use_symmetry)', 'hardware_library.csv'],
       ['correctCoeff', 'калибровочный множитель', 'hardware_library + sp_elements'],
       ['fieldDirection', 'знак направления (±1)', 'hardware_library.csv'],
       ['currentScale', 'отношение текущего тока к номинальному', 'рассчитывается при загрузке'],
       ['isActive', 'признак активного магнита (применять currentScale)', 'hardware_library.csv'],
+      ['type', 'MAGNETIC / ELECTRIC (из колонки field_type: B/M/MAGNETIC → MAGNETIC; E/ELECTRIC → ELECTRIC; отсутствие → MAGNETIC)', 'hardware_library.csv'],
     ]),
-  body('Все текущие устройства магнитные, поэтому addContribution всегда накапливает вклад в totalB. Аргумент totalE передаётся без изменений (он сохранён в сигнатуре для совместимости с Boris pusher\'ом, где E ≡ 0).'),
+  body('addContribution маршрутизирует вклад по типу: MAGNETIC накапливается в totalB, ELECTRIC — в totalE. Все текущие устройства магнитные, поэтому totalE на практике остаётся нулём и шаги E-толчка Boris pusher\'а холостые, но логика поддерживает оба типа, и добавление электростатического элемента не потребует изменения кода.'),
 
   h2('4.3', 'Результаты решения'),
-  body('Обновление по месту накопителя totalB. Возвращаемого значения нет. totalE остаётся без изменений.'),
+  body('Обновление по месту накопителя totalB (если type == MAGNETIC) или totalE (если type == ELECTRIC). Возвращаемого значения нет.'),
 
   h2('4.4', 'Математическое описание'),
   code(
@@ -522,7 +523,7 @@ const alg4 = [
     'если localF == 0:                                 return      (разреж. сетка)\n' +
     'globalF  = R · localF                             (локал → мир)\n' +
     'scale    = correctCoeff · fieldDirection · (currentScale если isActive)\n' +
-    'totalB  += scale · globalF'),
+    'totalB (или totalE) += scale · globalF             (по type)'),
 
   h2('4.5', 'Алгоритм решения'),
   code(
@@ -534,7 +535,8 @@ const alg4 = [
     '5. globalF ← transform.rotateVector(localF)\n' +
     '6. scale ← correctCoeff · fieldDirection\n' +
     '   если isActive: scale *= currentScale\n' +
-    '7. totalB += scale · globalF'),
+    '7. если type == MAGNETIC: totalB += scale · globalF\n' +
+    '   иначе                  totalE += scale · globalF'),
 ];
 
 // ---------------------------------------------------------------------------
@@ -1034,7 +1036,7 @@ const appB = [
     [
       ['workspace/fields_bin/*.bin', 'двоичный: GridHeader + FieldVector[nx·ny·nz]',
         'карта поля одного магнита'],
-      ['workspace/tables/hardware_library.csv', 'CSV «;», 8 колонок',
+      ['workspace/tables/hardware_library.csv', 'CSV «;», 10 колонок',
         'калибровка по device_type'],
       ['workspace/tables/sp_elements.csv', 'CSV «;»',
         'шаблон СП (редактируется)'],
@@ -1051,7 +1053,7 @@ const appB = [
       ['workspace/results/{name}.history.json', 'JSON',
         'выход SynchrotronOptimizer[.exe]'],
     ]),
-  body('Колонки hardware_library.csv (после рефакторинга 2026-06): device_type_id, Active, map_raw_path, map_bin_path, stl_path, nominal_arg, field_direction, correct_coeff. Колонки field_type и use_symmetry, существовавшие ранее, удалены: оба бинарника жёстко использовали MAGNETIC и true соответственно, и значения CSV никогда не читались.'),
+  body('Колонки hardware_library.csv (в порядке файла): device_type_id, Active, field_type, map_raw_path, map_bin_path, stl_path, use_symmetry, nominal_arg, field_direction, correct_coeff. Флаги field_type (B/E) и use_symmetry (1/0) читаются в MagneticElement::type и MagneticElement::useSymmetry при загрузке. Все текущие строки имеют B / 1, но маршрутизация в addContribution и зеркальная ветка в FieldMap::getInterpolatedField реально учитывают оба флага — для добавления электростатического элемента или асимметричной карты поля изменения кода не требуется.'),
 ];
 
 // ---------------------------------------------------------------------------

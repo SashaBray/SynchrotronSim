@@ -106,18 +106,18 @@ int main(int argc, char* argv[]) {
     if (std::string(argv[1]) == "--convert") {
         auto hwData = readCSV(ws + "tables/hardware_library.csv");
         int converted = 0, failed = 0;
-        // Колонки hardware_library.csv (см. main loop):
-        //   0:device_type_id 1:Active 2:map_raw_path 3:map_bin_path
-        //   4:stl_path 5:nominal_arg 6:field_direction 7:correct_coeff
+        // Колонки hardware_library.csv:
+        //   0:device_type_id 1:Active 2:field_type 3:map_raw_path 4:map_bin_path
+        //   5:stl_path 6:use_symmetry 7:nominal_arg 8:field_direction 9:correct_coeff
         for (auto& h : hwData) {
-            if (h.size() < 4 || h[0].empty()) continue;
-            std::string rawPath = ws + "fields_raw/" + h[2];
-            std::string binPath = ws + "fields_bin/" + h[3];
+            if (h.size() < 5 || h[0].empty()) continue;
+            std::string rawPath = ws + "fields_raw/" + h[3];
+            std::string binPath = ws + "fields_bin/" + h[4];
             double nominalArg = 1.0;
-            if (h.size() > 5 && h[5] != "-") {
-                try { nominalArg = std::stod(h[5]); } catch (...) { nominalArg = 1.0; }
+            if (h.size() > 7 && h[7] != "-") {
+                try { nominalArg = std::stod(h[7]); } catch (...) { nominalArg = 1.0; }
             }
-            std::cout << "[" << h[0] << "] " << h[2] << " -> " << h[3]
+            std::cout << "[" << h[0] << "] " << h[3] << " -> " << h[4]
                       << " (nominal=" << nominalArg << ")" << std::endl;
             if (AnsysConverter::convert(rawPath, binPath, nominalArg)) converted++;
             else { failed++; std::cerr << "  FAILED" << std::endl; }
@@ -181,16 +181,34 @@ int main(int argc, char* argv[]) {
             double corrCoeff = 1.0;
             std::string binName = "";
             bool foundType = false;
+            FieldType fieldKind = FieldType::MAGNETIC;
+            bool useSym = true;
 
             for (auto& h : hwData) {
                 if (h[0] == type) {
                     isActive = (h[1] == "True" || h[1] == "true" || h[1] == "1");
-                    binName  = h[3];
                     // Колонки hardware_library.csv:
-                    //   0:device_type_id 1:Active 2:map_raw_path 3:map_bin_path
-                    //   4:stl_path 5:nominal_arg 6:field_direction 7:correct_coeff
-                    fieldDir  = std::stod(h[6]);
-                    corrCoeff = std::stod(h[7]);
+                    //   0:device_type_id 1:Active 2:field_type 3:map_raw_path
+                    //   4:map_bin_path 5:stl_path 6:use_symmetry 7:nominal_arg
+                    //   8:field_direction 9:correct_coeff
+                    // field_type: "B" / "M" / "MAGNETIC" → B; "E" / "ELECTRIC" → E.
+                    // Любое другое значение — fallback MAGNETIC.
+                    {
+                        std::string ft = (h.size() > 2) ? h[2] : "B";
+                        for (auto& c : ft) c = (char)std::toupper((unsigned char)c);
+                        fieldKind = (ft == "E" || ft == "ELECTRIC")
+                                  ? FieldType::ELECTRIC : FieldType::MAGNETIC;
+                    }
+                    // use_symmetry: "1" / "True" / "true" → true; "0" / "False"
+                    // / "false" → false. Пустая клетка / отсутствие колонки → true.
+                    if (h.size() > 6 && !h[6].empty()) {
+                        useSym = (h[6] == "1" || h[6] == "True" || h[6] == "true");
+                    } else {
+                        useSym = true;
+                    }
+                    binName   = h[4];
+                    fieldDir  = std::stod(h[8]);
+                    corrCoeff = std::stod(h[9]);
                     foundType = true;
                     break;
                 }
@@ -207,7 +225,9 @@ int main(int argc, char* argv[]) {
 
             if (mapCache.count(type)) {
                 MagneticElement el;
-                el.map = mapCache[type];
+                el.map         = mapCache[type];
+                el.type        = fieldKind;
+                el.useSymmetry = useSym;
 
                 // Переносим калибровочные параметры
                 el.isActive = isActive;

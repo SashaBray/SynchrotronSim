@@ -48,10 +48,14 @@ Configurations (workspace/):
     lte/SYLA_desc.lte               device descriptions (Elegant LTE)
     lte/SYLA_line.lte               element sequence
     tables/hardware_library.csv     magnet calibration + paths to field maps
-                                    (8 columns: device_type_id, Active,
-                                    map_raw_path, map_bin_path, stl_path,
-                                    nominal_arg, field_direction,
-                                    correct_coeff)
+                                    (10 columns: device_type_id, Active,
+                                    field_type, map_raw_path, map_bin_path,
+                                    stl_path, use_symmetry, nominal_arg,
+                                    field_direction, correct_coeff)
+                                    -- field_type ("B"/"E") and use_symmetry
+                                    are placeholders for future electric /
+                                    asymmetric devices; current rows are
+                                    all B / 1, the code routes by them.
     tables/experiments.csv          experiment definitions
     tables/particle_groups.csv      particle initial conditions
     optim_inputs/*.json             optimizer configs per experiment

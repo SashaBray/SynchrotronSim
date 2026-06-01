@@ -202,18 +202,26 @@ the full local-frame transform.
 All CSV files in `workspace/tables/` use `;` as separator (so European
 decimal commas like `1,00E-11` in `dt` are unambiguous).
 
-### `hardware_library.csv` (8 columns, hand-edited)
+### `hardware_library.csv` (10 columns, hand-edited)
 
 | Column | Description |
 |---|---|
 | `device_type_id` | unique magnet-type ID (`QP_L_1A`, `DQ_I1_1A`, …) |
 | `Active` | `True` for an active electromagnet, `False` for a permanent magnet |
+| `field_type` | `B` (magnetic, all current devices) / `E` (electric — placeholder for future electrostatic elements) |
 | `map_raw_path` | filename of the Ansys `.fld` source (under `workspace/fields_raw/`) |
 | `map_bin_path` | filename of the compiled `.bin` (under `workspace/fields_bin/`) |
 | `stl_path` | STL model for the visualizer (`-` if none) |
+| `use_symmetry` | `1` ↔ field map is antisymmetric in x across the YZ plane (storage halved); `0` ↔ no mirror |
 | `nominal_arg` | nominal current the field map was computed at (`-` for PM) |
 | `field_direction` | sign multiplier `±1` |
 | `correct_coeff` | device-level field calibration |
+
+`field_type` and `use_symmetry` are read at load time and stored on each
+`MagneticElement`. Today all entries are `B` / `1`, but the routing in
+`MagneticElement::addContribution` and the mirror branch in
+`FieldMap::getInterpolatedField` handle the other cases — adding an `E`
+row or an asymmetric magnet requires no code change.
 
 ### `sp_elements.csv` (templates, hand-edited)
 

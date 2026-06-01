@@ -7,6 +7,13 @@
 #include <cmath>
 #include <algorithm>
 
+// Тип физического поля магнита.
+// Сейчас все устройства в hardware_library — магнитные (B), но колонка
+// field_type в CSV и эта развилка оставлены под будущие электростатические
+// (E) элементы. addContribution() ниже маршрутизирует вклад в totalB или
+// totalE по этому флагу.
+enum class FieldType { MAGNETIC, ELECTRIC };
+
 struct TransformMatrix {
     double m[3][3];
     double tx, ty, tz;
@@ -36,9 +43,12 @@ public:
     std::shared_ptr<FieldMap> map;
     TransformMatrix transform;
     double currentScale;
-    // В текущем поколении карт поля все магниты симметричны по плоскости YZ,
-    // поэтому useSymmetry задаётся по умолчанию true и обычно не переопределяется.
-    bool useSymmetry = true;
+
+    // Тип поля и флаг YZ-симметрии читаются из hardware_library.csv.
+    // Текущие карты поля все магнитные и YZ-симметричные, но логика
+    // поддерживает оба типа поля и асимметричные карты.
+    FieldType type     = FieldType::MAGNETIC;
+    bool useSymmetry   = true;
 
     // Калибровочные параметры
     bool isActive;         // колонка hardware_library.Active (True/False)
@@ -131,13 +141,18 @@ public:
             finalScale *= currentScale;
         }
 
-        // В текущей конфигурации все элементы магнитные, поэтому вклад идёт
-        // только в totalB; totalE сохраняется в сигнатуре для совместимости с
-        // Boris pusher'ом (там E ≡ 0 даёт безобидные no-op).
-        (void)totalE;
-        totalB.x += globalF.x * finalScale;
-        totalB.y += globalF.y * finalScale;
-        totalB.z += globalF.z * finalScale;
+        // Маршрутизация по типу поля: магнитные карты → totalB, электрические → totalE.
+        // Текущие устройства все MAGNETIC, но ветка ELECTRIC остаётся живой
+        // на случай добавления электростатических элементов.
+        if (type == FieldType::MAGNETIC) {
+            totalB.x += globalF.x * finalScale;
+            totalB.y += globalF.y * finalScale;
+            totalB.z += globalF.z * finalScale;
+        } else {
+            totalE.x += globalF.x * finalScale;
+            totalE.y += globalF.y * finalScale;
+            totalE.z += globalF.z * finalScale;
+        }
     }
 };
 
