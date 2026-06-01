@@ -82,33 +82,137 @@ Simulation*, 1985, §4-3.
 
 ### 1.4 Mathematical description
 
-Equations of motion:
+**Lorentz equations of motion** for a relativistic charged particle:
 
-```
-dx/dt = v
-dp/dt = q · (E + v × B)
-p = γ · m · v,   γ = √(1 + p²/(m²c²))
-```
+$$
+\frac{d\vec{x}}{dt} = \vec{v}, \qquad
+\frac{d\vec{p}}{dt} = q\,\bigl(\vec{E} + \vec{v}\times\vec{B}\bigr)
+$$
 
-In the current lattice all devices are magnetic, so `E ≡ 0`. The
-E-kick steps below reduce to no-ops; the general form is retained for
-forward compatibility.
+Variables:
+- $\vec{x}(t)$ — particle position in world coordinates, in metres.
+- $\vec{v}(t)$ — particle velocity, in metres per second.
+- $\vec{p}(t)$ — **relativistic momentum**, in kg·m/s; the quantity actually
+  integrated by the code. It coincides with the classical $m\vec{v}$ only
+  at low speeds; see definition below.
+- $q$ — particle charge, in coulombs. For electrons $q = -1.602\!\times\!10^{-19}$ C.
+- $m$ — particle rest mass, in kilograms. For electrons $m = 9.109\!\times\!10^{-31}$ kg.
+- $\vec{E}, \vec{B}$ — electric and magnetic field vectors evaluated at the
+  particle's current position, in V/m and tesla respectively.
+- $t$ — physical (lab-frame) time, in seconds.
 
-Boris splits one step into seven half-operations:
+The cross product $\vec{v}\times\vec{B}$ is the **magnetic Lorentz force per
+unit charge**: a magnetic field bends the trajectory but does no work, so
+energy is conserved exactly.
 
-```
-1) half drift:    x_{n+½} = x_n + (p_n / (γ_n · m)) · dt/2
-2) sample fields: B, E ← getTotalFields(x_{n+½})
-3) half E-kick:   p⁻ = p_n + q · E · dt/2
-4) γ⁻ = √(1 + |p⁻|² / (m²c²))
-5) magnetic rotation:
-       t = q · B · dt / (2 · γ⁻ · m)
-       s = 2 · t / (1 + |t|²)
-       p' = p⁻ + (p⁻ × t)
-       p⁺ = p⁻ + (p' × s)       (|p⁺| = |p⁻|, exact)
-6) half E-kick:   p_{n+1} = p⁺ + q · E · dt/2
-7) half drift:    x_{n+1} = x_{n+½} + (p_{n+1} / (γ_{n+1} · m)) · dt/2
-```
+**Relativistic momentum and Lorentz factor.** Momentum and velocity are
+linked by
+
+$$
+\vec{p} = \gamma\,m\,\vec{v}, \qquad
+\gamma = \frac{1}{\sqrt{1 - |\vec{v}|^2/c^2}} = \sqrt{1 + \frac{|\vec{p}|^2}{m^2 c^2}}
+$$
+
+Variables:
+- $\gamma \ge 1$ — **Lorentz factor**, a dimensionless quantity that measures
+  how relativistic the motion is ($\gamma = 1$ at rest, $\gamma \to \infty$
+  as $|\vec{v}|\to c$).
+- $c = 299\,792\,458$ m/s — speed of light (exact, by definition of the metre).
+- $|\vec{v}|^2 = v_x^2 + v_y^2 + v_z^2$ — squared speed (scalar).
+- $|\vec{p}|^2 = p_x^2 + p_y^2 + p_z^2$ — squared momentum (scalar).
+
+The second form (in terms of $|\vec{p}|$) is what the code evaluates each
+step: $\gamma$ is recovered directly from $\vec{p}$ without ever needing
+$\vec{v}$.
+
+In the current lattice all devices are magnetic, so $\vec{E}\equiv\vec{0}$.
+The E-kick steps below collapse to no-ops; the general form is retained
+in case future electrostatic elements are added.
+
+**Boris splitting.** One step $\Delta t$ is applied to the state
+$(\vec{x}_n, \vec{p}_n) \mapsto (\vec{x}_{n+1}, \vec{p}_{n+1})$ as seven
+half-operations:
+
+*Step 1 — half-drift.* Position advances by half a step using the current
+momentum:
+
+$$
+\vec{x}_{n+1/2} = \vec{x}_n + \frac{\vec{p}_n}{\gamma_n\,m}\,\frac{\Delta t}{2}
+$$
+
+- $\Delta t$ — integration timestep, in seconds (`experiments.csv.dt`).
+- $\gamma_n = \sqrt{1 + |\vec{p}_n|^2/(m^2 c^2)}$ — Lorentz factor at step $n$.
+
+*Step 2 — sample fields* at the midpoint position $\vec{x}_{n+1/2}$:
+
+$$
+(\vec{B},\,\vec{E}) \leftarrow \mathrm{lattice.getTotalFields}(\vec{x}_{n+1/2})
+$$
+
+This is the **only** field evaluation per step. RK4 would need four.
+
+*Step 3 — first half of the electric kick:*
+
+$$
+\vec{p}^{-} = \vec{p}_n + \frac{q\,\vec{E}\,\Delta t}{2}
+$$
+
+- $\vec{p}^{-}$ — momentum after the first E-kick, before the magnetic
+  rotation. When $\vec{E}=\vec{0}$ this simplifies to $\vec{p}^{-}=\vec{p}_n$.
+
+*Step 4 — re-evaluate $\gamma$* using the post-E-kick momentum:
+
+$$
+\gamma^{-} = \sqrt{1 + \frac{|\vec{p}^{-}|^2}{m^2 c^2}}
+$$
+
+This $\gamma^{-}$ is the "instantaneous" relativistic factor used by the
+magnetic rotation that follows.
+
+*Step 5 — magnetic rotation.* Two auxiliary vectors are formed:
+
+$$
+\vec{t} = \frac{q\,\vec{B}\,\Delta t}{2\,\gamma^{-}\,m}, \qquad
+\vec{s} = \frac{2\,\vec{t}}{1 + |\vec{t}|^2}
+$$
+
+- $\vec{t}$ — half-angle rotation vector; its magnitude equals $\tan(\theta/2)$,
+  where $\theta = qB\,\Delta t / (\gamma^{-} m)$ is the Larmor rotation angle.
+- $\vec{s}$ — rescaled rotation vector chosen so that the two-step update
+  below preserves the momentum magnitude exactly.
+
+The momentum is then rotated in two stages:
+
+$$
+\vec{p}' = \vec{p}^{-} + \vec{p}^{-} \times \vec{t}, \qquad
+\vec{p}^{+} = \vec{p}^{-} + \vec{p}' \times \vec{s}
+$$
+
+- $\vec{p}'$ — intermediate momentum after the first half-rotation.
+- $\vec{p}^{+}$ — momentum after the full magnetic rotation; it satisfies
+  $|\vec{p}^{+}| = |\vec{p}^{-}|$ as an exact algebraic identity (this is
+  what makes the Boris pusher conserve energy in a pure magnetic field).
+
+*Step 6 — second half of the electric kick:*
+
+$$
+\vec{p}_{n+1} = \vec{p}^{+} + \frac{q\,\vec{E}\,\Delta t}{2}
+$$
+
+This and Step 3 together implement a centred E-acceleration: each one
+contributes half of the impulse $q\vec{E}\,\Delta t$.
+
+*Step 7 — second half-drift:*
+
+$$
+\vec{x}_{n+1} = \vec{x}_{n+1/2} + \frac{\vec{p}_{n+1}}{\gamma_{n+1}\,m}\,\frac{\Delta t}{2}
+$$
+
+- $\gamma_{n+1} = \sqrt{1 + |\vec{p}_{n+1}|^2/(m^2 c^2)}$ — Lorentz factor
+  at the new step.
+
+After all seven sub-operations the state has been advanced by exactly one
+$\Delta t$ with second-order accuracy in time.
 
 ### 1.5 Solution algorithm
 
@@ -173,19 +277,78 @@ Returns `{0,0,0}` for points outside the grid bbox.
 
 ### 2.4 Mathematical description
 
-Let `(i, j, k)` be the lower grid indices and `(tx, ty, tz)` the
-fractional offsets in [0, 1]. Trilinear interpolation:
+The field is stored at the nodes of a regular Cartesian grid. A query
+point $\vec{p} = (p_x, p_y, p_z)$ in local coordinates lies inside a
+unit cell of that grid; trilinear interpolation blends the eight
+corner values.
 
-```
-F(p) =  v000·(1-tx)(1-ty)(1-tz) + v100·tx·(1-ty)(1-tz)
-      + v010·(1-tx)·ty·(1-tz)   + v110·tx·ty·(1-tz)
-      + v001·(1-tx)(1-ty)·tz    + v101·tx·(1-ty)·tz
-      + v011·(1-tx)·ty·tz       + v111·tx·ty·tz
-```
+**Fractional cell coordinates.** First locate the cell containing the
+point:
 
-YZ-symmetry mirror rule (when `p.x < 0` and `useSymmetry`):
-sample at `(-p.x, p.y, p.z)`, then flip `F.x ← -F.x` (antisymmetric Bx,
-symmetric By, Bz).
+$$
+i = \left\lfloor \frac{p_x - x_{\min}}{\Delta x} \right\rfloor, \quad
+t_x = \frac{p_x - x_{\min}}{\Delta x} - i
+$$
+
+(analogous definitions for $j, t_y$ and $k, t_z$).
+
+- $i,\,j,\,k$ — integer indices of the **lower** corner of the cell
+  (zero-based; the upper corner is $(i\!+\!1, j\!+\!1, k\!+\!1)$).
+- $t_x, t_y, t_z \in [0, 1]$ — fractional offsets inside the cell;
+  $t_\alpha = 0$ means the point sits on the lower face along axis
+  $\alpha$, $t_\alpha = 1$ on the upper face.
+- $x_{\min},\,y_{\min},\,z_{\min}$ — coordinates of the grid corner with
+  the smallest indices, in metres (from the binary header).
+- $\Delta x,\,\Delta y,\,\Delta z$ — grid spacing along each axis, in
+  metres (uniform per axis but independent across axes).
+
+**Trilinear interpolation.** Let $\vec{v}_{abc}$ denote the stored field
+vector at corner $(i\!+\!a,\,j\!+\!b,\,k\!+\!c)$ for
+$a, b, c \in \{0, 1\}$. The interpolated field is
+
+$$
+\vec{F}(\vec{p}) = \sum_{a, b, c \in \{0, 1\}}
+       w_{abc}(t_x, t_y, t_z)\;\vec{v}_{abc}
+$$
+
+with the corner weight
+
+$$
+w_{abc}(t_x, t_y, t_z) =
+   \bigl[(1 - t_x)^{1-a}\,t_x^{a}\bigr]\,
+   \bigl[(1 - t_y)^{1-b}\,t_y^{b}\bigr]\,
+   \bigl[(1 - t_z)^{1-c}\,t_z^{c}\bigr]
+$$
+
+- $\vec{v}_{abc}$ — vector field at one of the eight corners (in tesla
+  for $\vec{B}$, in V/m for $\vec{E}$).
+- $w_{abc}$ — non-negative weight that decreases linearly with the
+  distance from the query point to that corner. The eight weights
+  always sum to one, so the result is a true weighted average.
+
+At the corners ($t_\alpha \in \{0, 1\}$ for all $\alpha$) one weight is 1
+and the rest are 0, so $\vec{F}$ equals the stored corner value exactly
+— the interpolant is **node-exact**.
+
+**YZ-symmetry mirror rule.** When the field map is known to be
+antisymmetric in $x$ (i.e. only half the volume is stored,
+$x \in [0, x_{\max}]$), a query at negative $x$ is folded into the stored
+half:
+
+$$
+\vec{F}(p_x, p_y, p_z) \;=\;
+\begin{cases}
+   \vec{F}_{\text{raw}}(p_x, p_y, p_z) & \text{if } p_x \ge 0 \\
+   \mathrm{diag}(-1, +1, +1)\;\vec{F}_{\text{raw}}(-p_x, p_y, p_z) & \text{if } p_x < 0
+\end{cases}
+$$
+
+- $\vec{F}_{\text{raw}}$ — interpolation performed on the stored
+  ($p_x \ge 0$) half of the grid.
+- $\mathrm{diag}(-1, +1, +1)$ — diagonal matrix that flips the
+  $x$-component and leaves the other two untouched. This encodes the
+  physical antisymmetry of $B_x$ across the YZ plane (whereas
+  $B_y, B_z$ are symmetric).
 
 ### 2.5 Solution algorithm
 
@@ -247,21 +410,45 @@ bucket containing `pos`.
 
 ### 3.4 Mathematical description
 
-Projection of bounding spheres onto the X-Y plane (the synchrotron ring
-lies in z ≈ 0):
+Every magnet has a precomputed **bounding sphere** with centre
+$\vec{c}_i$ (in world coordinates) and radius $r_i$ that fully contains
+its field map. The bucket index works in the $xy$-plane only, because
+the ring is flat in $z \approx 0$.
 
-```
-bucketSize = max(1.0, 2 · max_i worldRadius_i)
-```
+**Bucket size.** Let $r_{\max}$ be the largest bounding-sphere radius
+across all elements. The grid step is chosen as
 
-This guarantees every element's projected disk fits inside a 2×2 group
-of buckets, so it is registered at most 4 times.
+$$
+h = \max\bigl(1\,\mathrm{m},\;2\,r_{\max}\bigr)
+$$
 
-Bucket coordinates of a query point:
-```
-bx = floor(x / bucketSize) - bxMin
-by = floor(y / bucketSize) - byMin
-```
+- $h$ — edge length of one square bucket, in metres.
+- $r_{\max} = \max_i r_i$ — largest bounding-sphere radius across all
+  magnets, in metres. The factor of 2 guarantees that the
+  $xy$-projection of any bounding circle fits inside a $2 \times 2$
+  group of buckets, so each magnet is registered in at most 4 buckets.
+- The lower bound of 1 m prevents pathologically small buckets when all
+  magnets are tiny — the bucket array would otherwise become huge.
+
+**Bucket coordinates.** A world point $(x, y, z)$ is mapped to bucket
+indices $(b_x, b_y)$ by
+
+$$
+b_x = \left\lfloor \frac{x}{h} \right\rfloor - b_x^{\min}, \qquad
+b_y = \left\lfloor \frac{y}{h} \right\rfloor - b_y^{\min}
+$$
+
+- $\lfloor\cdot\rfloor$ — floor function (round down to the nearest
+  integer).
+- $b_x^{\min}, b_y^{\min}$ — global integer offsets chosen at build time
+  so that all element-occupied buckets have non-negative indices. They
+  are computed from the lowest $x$ and $y$ coordinates reached by any
+  bounding sphere.
+
+A magnet $i$ is registered in every bucket $(b_x, b_y)$ that intersects
+the disk
+$\{(x, y) : (x - c_{i,x})^2 + (y - c_{i,y})^2 \le r_i^2\}$;
+by construction this is at most a 2×2 block of buckets.
 
 ### 3.5 Solution algorithm
 
@@ -335,15 +522,110 @@ In-place addition into `totalB` (if `type == MAGNETIC`) or `totalE`
 
 ### 4.4 Mathematical description
 
-```
-if |globalPos − worldCenter|² > worldRadius²:        return            (prescreen)
-localPos = R⁻¹ · (globalPos − T)                                       (world → local)
-localF   = trilinear(map, localPos, useSymmetry)
-if localF == 0:                                       return            (sparse grid)
-globalF  = R · localF                                                   (local → world)
-scale    = correctCoeff · fieldDirection · (currentScale if isActive)
-totalB or totalE += scale · globalF                                     (by type)
-```
+Each magnet has its own local coordinate frame in which the field map
+was computed. The contribution of magnet $i$ at a world query point
+$\vec{x}$ is built in four geometric steps and a scaling.
+
+**Step 1 — bounding-sphere prescreen.** Reject the magnet immediately if
+the query point is outside its sphere of influence:
+
+$$
+|\vec{x} - \vec{c}_i|^2 > r_i^2 \;\;\Rightarrow\;\; \text{contribution is 0}
+$$
+
+- $\vec{c}_i$ — centre of magnet $i$'s bounding sphere in world
+  coordinates, in metres. Computed from the magnet's transform and field
+  map bounding box.
+- $r_i$ — bounding-sphere radius of magnet $i$, in metres.
+
+Squaring both sides avoids a square root in the hot loop.
+
+**Step 2 — world → local transform.** The world point is mapped to the
+magnet's local frame:
+
+$$
+\vec{x}_\text{loc} = R_i^{\!\top}\,(\vec{x} - \vec{T}_i)
+$$
+
+- $\vec{T}_i$ — translation: world position of the magnet's local
+  origin, in metres.
+- $R_i$ — rotation matrix (3×3, orthogonal, $R_i^{\!\top}R_i = I$) that
+  takes a local vector to world coordinates. Built from the magnet's
+  $(\text{yaw},\,\text{pitch},\,\text{roll})$ Euler angles in
+  `lattice_configs.csv`.
+- $R_i^{\!\top}$ is the **inverse** rotation (transpose of an
+  orthogonal matrix equals its inverse), so this line undoes the
+  magnet's placement.
+
+**Step 3 — sample the local field** via trilinear interpolation
+(§ 2.4):
+
+$$
+\vec{F}_\text{loc} = \mathrm{trilinear}(\mathrm{map}_i,\,\vec{x}_\text{loc},\,\text{useSymmetry}_i)
+$$
+
+- $\mathrm{map}_i$ — magnet $i$'s field map (binary grid of vectors).
+- $\text{useSymmetry}_i \in \{\text{true, false}\}$ — whether the YZ
+  mirror rule is applied (see § 2.4).
+
+If $\vec{F}_\text{loc} = \vec{0}$ (the query falls in a zero-padded part
+of the grid) we return early without doing the rest.
+
+**Step 4 — local → world rotation** of the field vector:
+
+$$
+\vec{F}_\text{world} = R_i\,\vec{F}_\text{loc}
+$$
+
+The translation does **not** apply here — a magnetic field is a vector,
+not a point, so only the rotation part of the transform matters.
+
+**Step 5 — calibration scaling.** Multiply by all per-magnet
+calibration factors:
+
+$$
+\text{scale}_i =
+   c_i^{\text{hw}} \cdot c_i^{\text{sp}}
+   \cdot d_i
+   \cdot \begin{cases}
+      I_i / I_i^{\text{nom}} & \text{if } i \text{ is active} \\
+      1 & \text{otherwise}
+   \end{cases}
+$$
+
+- $c_i^{\text{hw}}$ — device-level calibration coefficient
+  (`hardware_library.csv.correct_coeff`), dimensionless. One value per
+  device type.
+- $c_i^{\text{sp}}$ — per-instance calibration coefficient
+  (`sp_elements.csv.correct_coeff`), dimensionless. One value per
+  $(sp\_type, sp\_element\_id)$ pair. Defaults to 1.0 if blank.
+- $d_i \in \{+1, -1\}$ — direction flip
+  (`hardware_library.csv.field_direction`). Used when a magnet's
+  physical orientation differs from the one assumed in the field map.
+- $I_i$ — actual current through the magnet, in amperes
+  (`sp_elements.csv.arg_val`). Only used for active electromagnets;
+  permanent magnets carry no current and the factor is 1.
+- $I_i^{\text{nom}}$ — nominal current at which the field map was
+  computed, in amperes (`hardware_library.csv.nominal_arg`). The ratio
+  $I_i / I_i^{\text{nom}}$ rescales the field linearly with current
+  (valid for the unsaturated regime).
+
+**Step 6 — accumulate into the right field sum:**
+
+$$
+\vec{B}_\text{total} \mathrel{+}= \text{scale}_i\,\vec{F}_\text{world} \quad
+   \text{if } \text{type}_i = \text{MAGNETIC}
+$$
+$$
+\vec{E}_\text{total} \mathrel{+}= \text{scale}_i\,\vec{F}_\text{world} \quad
+   \text{if } \text{type}_i = \text{ELECTRIC}
+$$
+
+- $\vec{B}_\text{total},\,\vec{E}_\text{total}$ — running sums of
+  magnetic and electric field at the query point, in tesla and V/m.
+- $\text{type}_i$ — `MAGNETIC` (default, all current devices) or
+  `ELECTRIC` (placeholder for future electrostatic elements), from
+  `hardware_library.csv.field_type`.
 
 ### 4.5 Solution algorithm
 
@@ -392,22 +674,59 @@ integration and write the trajectory.
 
 ### 5.4 Mathematical description
 
-Plane normal:
-```
-n̂ = (b − a) × (c − a) / |(b − a) × (c − a)|
-```
-Sign convention is fixed so that `startPos` has negative signed distance:
-```
-n̂ ← −n̂ if (startPos − a) · n̂ > 0
-```
-Signed distance from arbitrary `pos`:
-```
-d(pos) = (pos − a) · n̂
-```
-Crossing condition between successive samples:
-```
-(lastD <  0 ∧ d ≥ 0) ∨ (lastD ≥ 0 ∧ d < 0)
-```
+The finish plane is given by three world points $\vec{a},\,\vec{b},\,
+\vec{c}$ that are assumed not to be collinear. They span the plane
+itself; the algorithm computes a unit normal and uses it for an
+oriented "signed distance" test.
+
+**Plane normal.** Two edge vectors are formed and crossed:
+
+$$
+\hat{n} \;=\; \frac{(\vec{b} - \vec{a}) \times (\vec{c} - \vec{a})}{\bigl|(\vec{b} - \vec{a}) \times (\vec{c} - \vec{a})\bigr|}
+$$
+
+- $\vec{a},\,\vec{b},\,\vec{c}$ — three plane-defining points from
+  `experiments.csv`, in metres.
+- $\hat{n}$ — **unit normal** to the plane (length 1). The cross
+  product gives a vector orthogonal to the plane; the denominator
+  normalises its length.
+
+**Sign convention.** The orientation of $\hat{n}$ from a cross product
+is arbitrary, so it is flipped to guarantee the particle starts on the
+"behind the plane" side:
+
+$$
+\hat{n} \leftarrow -\hat{n} \quad \text{if } (\vec{x}_0 - \vec{a}) \cdot \hat{n} > 0
+$$
+
+- $\vec{x}_0$ — initial particle position, in metres
+  (`particle_groups.csv`).
+- The dot product on the left is the signed projection of
+  $\vec{x}_0 - \vec{a}$ onto $\hat{n}$. After this fix, the particle
+  starts at a negative signed distance by construction.
+
+**Signed distance** of an arbitrary point $\vec{x}$ from the plane:
+
+$$
+d(\vec{x}) = (\vec{x} - \vec{a}) \cdot \hat{n}
+$$
+
+- $d > 0$ means $\vec{x}$ is on the same side as $\hat{n}$ points.
+- $d < 0$ means $\vec{x}$ is on the opposite side.
+- $|d|$ equals the Euclidean distance from $\vec{x}$ to the closest
+  point on the plane.
+
+**Crossing detection.** Between two consecutive samples $\vec{x}_{n-1}$
+and $\vec{x}_n$ (with signed distances $d_{n-1}$ and $d_n$), a crossing
+is declared when the sign flips:
+
+$$
+\bigl(d_{n-1} < 0 \;\wedge\; d_n \ge 0\bigr) \;\vee\;
+\bigl(d_{n-1} \ge 0 \;\wedge\; d_n < 0\bigr)
+$$
+
+The half-open form ($d_n \ge 0$ vs $d_n < 0$) avoids the degenerate
+case $d_n = 0$ being missed.
 
 ### 5.5 Solution algorithm
 
@@ -456,17 +775,56 @@ Scalar distance ≥ 0.
 
 ### 6.4 Mathematical description
 
-For each segment `[a, b]`, project `p` onto the line, clamp to `[0, 1]`:
+The polyline is a sequence of line segments. The distance from a query
+point to the polyline is the minimum distance to any single segment;
+the per-segment problem is a standard projection with clamping.
 
-```
-t = clamp( ((p − a) · (b − a)) / |b − a|², 0, 1 )
-c = a + t · (b − a)
-d_i² = |p − c|²
-```
-Result:
-```
-dist(p, poly) = √(min_i d_i²)
-```
+**Per-segment projection.** Consider segment $[\vec{a},\,\vec{b}]$. The
+point on the *infinite* line that is closest to query $\vec{p}$ has
+parameter
+
+$$
+t^{*} = \frac{(\vec{p} - \vec{a}) \cdot (\vec{b} - \vec{a})}{|\vec{b} - \vec{a}|^2}
+$$
+
+- $\vec{a},\,\vec{b}$ — endpoints of the segment, in metres.
+- $\vec{p}$ — query point, in metres.
+- $t^{*}$ — line parameter; $t^{*} = 0$ gives $\vec{a}$, $t^{*} = 1$
+  gives $\vec{b}$, $t^{*} \in (0, 1)$ a point in between, and values
+  outside $[0, 1]$ lie on the extension of the segment.
+- $|\vec{b} - \vec{a}|^2$ — squared length of the segment (skipped if
+  $\le 10^{-30}$ to handle a degenerate zero-length segment).
+
+To restrict the closest point to the actual segment (not its extension)
+we clamp $t^{*}$ to the unit interval:
+
+$$
+t = \mathrm{clip}(t^{*},\,0,\,1) = \min\bigl(1,\,\max(0,\,t^{*})\bigr)
+$$
+
+The closest point on segment $[\vec{a}, \vec{b}]$ to $\vec{p}$ is then
+
+$$
+\vec{c} = \vec{a} + t\,(\vec{b} - \vec{a}), \qquad
+d_i = |\vec{p} - \vec{c}|
+$$
+
+- $\vec{c}$ — foot of the perpendicular projection (or the closest
+  endpoint, when the perpendicular falls outside the segment).
+- $d_i$ — Euclidean distance from $\vec{p}$ to segment $i$, in metres.
+
+**Distance to the polyline** is the minimum over all $N\!-\!1$ segments:
+
+$$
+\mathrm{dist}(\vec{p},\,\Pi) = \min_{i = 0,\,\ldots,\,N-2}\,d_i
+   \;=\; \sqrt{\,\min_{i}\,|\vec{p} - \vec{c}_i|^2\,}
+$$
+
+- $\Pi = (\vec{p}_0, \vec{p}_1, \ldots, \vec{p}_{N-1})$ — the polyline
+  (an ordered list of $N$ vertices).
+- The square root is taken only once at the end; per-segment work
+  compares squared distances, which is both faster and avoids the
+  square-root branch in the hot inner loop.
 
 ### 6.5 Solution algorithm
 
@@ -530,18 +888,90 @@ the final step of each particle.
 
 ### 7.4 Mathematical description
 
-```
-position_loss  = Σ_(i particle, m magnet)  w_m · min_t |x_i(t) − c_m|²
-direction_loss = w_dir · Σ_i sin²(θ_i),
-                 cos θ_i = (p_i_final · r̂) / |p_i_final|
-envelope_loss  = w_env · Σ_i max(0, A_i_final − A_i_init)²,
-                 A_i(t) = distanceToPolyline(x_i(t), design_polyline)
+The total objective is a sum of three terms:
 
-loss = position_loss + direction_loss + envelope_loss
-```
+$$
+\mathcal{L} \;=\; \mathcal{L}_{\text{pos}} \;+\; \mathcal{L}_{\text{dir}} \;+\; \mathcal{L}_{\text{env}}
+$$
 
-Only **growth** of the envelope is penalized; betatron damping carries
-zero penalty.
+- $\mathcal{L}$ — scalar loss minimised by the optimizer (units: m²
+  before weighting; the weights re-scale the individual terms to make
+  them comparable).
+- The three terms are described below in detail.
+
+**Position loss** — particles should pass close to magnet centres
+(and to user-specified virtual targets):
+
+$$
+\mathcal{L}_{\text{pos}}
+   \;=\; \sum_{i = 1}^{N_p}\,\sum_{m \in \mathcal{M}} w_m\,\min_{t}\,\bigl|\vec{x}_i(t) - \vec{c}_m\bigr|^2
+$$
+
+- $N_p$ — number of tracked particles (5 in this project: a reference
+  particle plus 4 satellites).
+- $\mathcal{M}$ — set of "scoring magnets" plus virtual targets, after
+  filtering by `magnet_sp_numbers` and `exclude_device_types` from the
+  optimizer JSON.
+- $\vec{c}_m$ — geometric centre of magnet $m$ in world coordinates,
+  in metres.
+- $w_m$ — per-target weight (default 1; targets in
+  `extra_target_magnets` carry their own larger weights, typically 20
+  or 50, to "pin" final convergence).
+- $\vec{x}_i(t)$ — position of particle $i$ at integration time $t$,
+  in metres.
+- $\min_t\,|\vec{x}_i(t) - \vec{c}_m|^2$ — the **closest squared
+  distance** along the entire trajectory of particle $i$ to magnet $m$.
+  Computed incrementally during tracking — only the running minimum is
+  stored, never the full trajectory.
+
+**Direction loss** — at the finish plane, particle momenta should be
+parallel to a user-specified reference direction:
+
+$$
+\mathcal{L}_{\text{dir}}
+   \;=\; w_{\text{dir}}\,\sum_{i = 1}^{N_p}\,\sin^2 \theta_i, \qquad
+\cos\theta_i = \frac{\vec{p}_i^{\,\text{fin}}\cdot \hat{r}}{|\vec{p}_i^{\,\text{fin}}|}
+$$
+
+- $w_{\text{dir}}$ — weight of the direction term (typically $10^{3}$);
+  large because the angle squared is dimensionless and small in
+  magnitude.
+- $\vec{p}_i^{\,\text{fin}}$ — momentum of particle $i$ at the moment
+  it crosses the finish plane, in kg·m/s.
+- $\hat{r}$ — **unit reference direction** specified in the optimizer
+  config (`direction_loss.reference`); usually the orbit tangent at the
+  finish point.
+- $\theta_i$ — angle between $\vec{p}_i^{\,\text{fin}}$ and $\hat{r}$,
+  in radians.
+- $\sin^2\theta_i = 1 - \cos^2\theta_i$ — quadratic in $\theta$ for
+  small angles, so the term behaves like a least-squares angular error.
+
+**Envelope loss** — betatron oscillations should not grow during the
+pass through the lattice:
+
+$$
+\mathcal{L}_{\text{env}}
+   \;=\; w_{\text{env}}\,\sum_{i = 1}^{N_p}\,\max\bigl(0,\;A_i^{\text{fin}} - A_i^{\text{init}}\bigr)^2
+$$
+
+with
+
+$$
+A_i(t) = \mathrm{dist}\bigl(\vec{x}_i(t),\,\Pi_{\text{design}}\bigr)
+$$
+
+- $w_{\text{env}}$ — envelope weight, typically $10^{6}$ (large, because
+  $A$ is in metres and we want a metre-scale grow penalised harshly).
+- $A_i(t)$ — **envelope amplitude** of particle $i$ — its distance from
+  the design polyline at time $t$, computed by the algorithm in § 6.
+- $\Pi_{\text{design}}$ — design orbit polyline (centres of lattice
+  elements, plus a prelude/postlude segment along the orbit tangent).
+  Rebuilt at the start of each optimization run.
+- $A_i^{\text{init}}, A_i^{\text{fin}}$ — envelope amplitudes at the
+  start and end of the run (in metres).
+- The $\max(0, \cdot)$ wrapper means that **damping** (the beam getting
+  closer to the orbit, $A_i^{\text{fin}} < A_i^{\text{init}}$) is *not*
+  penalised — only growth.
 
 ### 7.5 Solution algorithm
 
@@ -627,21 +1057,75 @@ Properties:
 
 ### 8.4 Mathematical description
 
-Let `θ ∈ ℝ^M` be the vector of mutable parameters, `L(θ)` the loss
-function from §7, and `g ∈ {1..G}` an iteration's randomly-chosen group.
+The optimizer searches the parameter space by Monte-Carlo proposals
+with greedy acceptance.
 
-```
-Regular iter:  θ'_g = θ_g + ε_g · sign(rand() − 0.5),
-               θ'_k = θ_k  for k ≠ g
-               where ε_g = step_abs       (if group's column = arg_val)
-                  or ε_g = step_percent · θ_g  (if column = correct_coeff)
+Notation:
 
-Kick iter:     θ'   = θ + δ, where  δ_g ~ Uniform(−kick_scale,
-                                                  +kick_scale) for each g
+- $\boldsymbol{\theta} \in \mathbb{R}^M$ — vector of all mutable
+  parameters (magnet currents and per-instance calibration
+  coefficients), of length $M$.
+- $G$ — number of **groups** declared in `parameter_groups_per_position`.
+  Each group $g$ may cover several parameter slots; mutating group $g$
+  changes all its slots at once.
+- $\mathcal{L}(\boldsymbol{\theta})$ — composite loss from § 7.
+- $\boldsymbol{\theta}_{\text{best}}$ — current best parameter vector;
+  $\mathcal{L}_{\text{best}} = \mathcal{L}(\boldsymbol{\theta}_{\text{best}})$.
 
-Acceptance:    θ  ← θ'  if L(θ') < L(θ_best);  L(θ_best) ← L(θ')
-                else θ unchanged
-```
+**Regular iteration.** A single group $g$ is picked uniformly at random;
+its parameters are shifted by a per-group step with a random sign:
+
+$$
+\theta'_g = \theta_g + \varepsilon_g \cdot \mathrm{sgn}(u - \tfrac{1}{2}), \qquad
+\theta'_k = \theta_k \;\text{ for all } k \ne g
+$$
+
+- $u \sim \mathrm{Uniform}(0, 1)$ — a fresh random number.
+- $\mathrm{sgn}(u - \tfrac{1}{2}) \in \{-1, +1\}$ — the sign of the
+  proposed shift, equally likely positive or negative.
+- $\varepsilon_g$ — step size for group $g$, defined per column type:
+
+$$
+\varepsilon_g =
+\begin{cases}
+   \texttt{step\_abs}_g           & \text{if group $g$ targets the } \texttt{arg\_val} \text{ column} \\
+   \texttt{step\_percent}_g \cdot \theta_g & \text{if group $g$ targets } \texttt{correct\_coeff}
+\end{cases}
+$$
+
+- $\texttt{step\_abs}_g$ — absolute step in amperes (typical 0.1–1.0).
+- $\texttt{step\_percent}_g$ — fractional step (typical 0.05 ≡ 5 %),
+  proportional to the current value so the relative perturbation stays
+  meaningful as $\theta_g$ shrinks.
+
+**Kick iteration.** Every `kick_every` iterations *all* groups are
+perturbed simultaneously to escape local minima:
+
+$$
+\theta'_g = \theta_g + \delta_g, \quad
+\delta_g \sim \mathrm{Uniform}(-\Delta,\,+\Delta) \;\;\text{for all } g
+$$
+
+- $\Delta = \texttt{kick\_scale}$ — kick amplitude (amperes or fraction,
+  depending on the group's column type).
+- The independent uniform draws mean each group moves randomly and
+  independently; the joint proposal is large enough to jump out of a
+  basin that step-by-step search would never leave.
+
+**Greedy acceptance.** Whether the iteration was regular or a kick, the
+proposal is accepted only if it lowers the best-known loss:
+
+$$
+\boldsymbol{\theta},\;\mathcal{L}_{\text{best}} \;\leftarrow\;
+\begin{cases}
+   \boldsymbol{\theta}',\;\mathcal{L}(\boldsymbol{\theta}') & \text{if } \mathcal{L}(\boldsymbol{\theta}') < \mathcal{L}_{\text{best}} \\
+   \boldsymbol{\theta},\;\mathcal{L}_{\text{best}} & \text{otherwise (revert)}
+\end{cases}
+$$
+
+This is a pure hill-climber — no temperature, no Metropolis acceptance
+of worse states. The kicks are what give it a chance to leave local
+minima.
 
 ### 8.5 Solution algorithm
 
@@ -720,18 +1204,55 @@ Special features:
 
 ### 9.4 Mathematical description
 
-For a bend with length `L` and bend angle `α`, the chord length is
-`Lc = 2 · (L/α) · sin(α/2)`. Five slices are placed at fractions
-`0, 0.25, 0.5, 0.75, 1.0` of the chord, each with the local yaw rotation
-that matches the chord direction at that point.
+**Chord length of a bend.** A bending magnet has an arc length $L$ and
+bend angle $\alpha$, so its radius of curvature is $\rho = L/\alpha$.
+The straight-line **chord** connecting the entry and exit faces of the
+arc has length
 
-Element placement walks the ring as a sequence of segments. For each
-segment of length `ℓ` and yaw turn `Δψ`:
-```
-yaw'  = yaw + Δψ
-x'    = x + ℓ · cos(yaw + Δψ/2)
-y'    = y + ℓ · sin(yaw + Δψ/2)
-```
+$$
+L_{\text{chord}} = 2\,\rho\,\sin\!\frac{\alpha}{2} = \frac{2 L}{\alpha}\,\sin\!\frac{\alpha}{2}
+$$
+
+- $L$ — arc length of the bending magnet, in metres (from the LTE
+  `L=` parameter).
+- $\alpha$ — total bend angle, in radians (from the LTE `ANGLE=`
+  parameter). Positive $\alpha$ means a left turn, negative a right
+  turn.
+- $\rho = L/\alpha$ — radius of curvature, in metres.
+- $L_{\text{chord}}$ — chord length used to straighten the bend (slightly
+  shorter than $L$ when $\alpha \ne 0$). For $\alpha \to 0$ the chord
+  tends to $L$ as expected.
+
+The bend is replaced by 5 thin slices uniformly distributed along the
+chord at parameter values $\tau \in \{0,\,0.25,\,0.5,\,0.75,\,1.0\}$,
+each oriented along the chord direction.
+
+**Ring traversal.** The ring is laid out segment by segment. Each
+LTE element of length $\ell$ contributes an in-plane turn $\Delta\psi$
+(0 for a drift, $\alpha$ for a bend) and a displacement of its
+geometric midpoint. The state update is
+
+$$
+\psi' = \psi + \Delta\psi
+$$
+$$
+x' = x + \ell\,\cos\!\Bigl(\psi + \tfrac{\Delta\psi}{2}\Bigr), \qquad
+y' = y + \ell\,\sin\!\Bigl(\psi + \tfrac{\Delta\psi}{2}\Bigr)
+$$
+
+- $\psi$ — yaw angle (rotation about the world $z$ axis), in radians.
+- $\Delta\psi$ — yaw turn produced by this element, in radians (equal
+  to $\alpha$ for a bending magnet, 0 for a straight element).
+- $\ell$ — element length **along the chord** (so for a bend, $\ell$ is
+  one-fifth of $L_{\text{chord}}$ per slice).
+- $x, y$ — accumulated world coordinates of the current placement
+  cursor, in metres.
+
+Using the mid-segment yaw $\psi + \Delta\psi/2$ in the trigonometric
+arguments — instead of the entry yaw $\psi$ or the exit yaw
+$\psi + \Delta\psi$ — keeps the resulting polyline tangent to the true
+arc at each end and balances the curvature error symmetrically across
+the slice.
 
 ### 9.5 Solution algorithm
 
@@ -789,17 +1310,52 @@ a sub-ring without re-walking the LTE.
 
 ### 10.4 Mathematical description
 
-No arithmetic — pure relational join:
-```
-output =  { (LATTICE_ID, layout.global_id, sp.device_type_id,
-             layout.x..roll, sp.arg_val, sp.correct_coeff)
-          | layout ∈ lattice_layout,
-            sp ∈ sp_elements where (sp.sp_type, sp.sp_element_id) =
-                                    (layout.sp_type, layout.sp_element_id) }
-        ∪ { copy of master rows with lattice_id ← sub.lattice_id and
-            instance_id ≤ sub.max_gid
-          | sub ∈ sub_lattices }
-```
+No arithmetic — the operation is a **relational join** between
+`lattice_layout` (geometry) and `sp_elements` (currents and
+calibrations), followed by a union with shortened copies of the master
+lattice.
+
+In set-builder notation:
+
+$$
+\mathrm{Output}
+   = R_{\text{master}}
+   \,\cup\,
+   \bigcup_{s \,\in\, \mathrm{SubLattices}}\,R_s
+$$
+
+where
+
+$$
+\begin{aligned}
+R_{\text{master}} = \{\;
+   (L_0,\;\ell.\text{global\_id},\;s.\text{device\_type\_id},\;\ell.\vec{q},\;s.\text{arg\_val},\;s.\text{correct\_coeff})
+   \;\;\big|\;\;
+   & \ell \in \mathrm{lattice\_layout}, \\
+   & s \in \mathrm{sp\_elements}, \\
+   & (s.\text{sp\_type},\,s.\text{sp\_element\_id}) = (\ell.\text{sp\_type},\,\ell.\text{sp\_element\_id})
+\;\}
+\end{aligned}
+$$
+
+$$
+R_s = \{\,(s.\text{lattice\_id},\;\text{rest of the row}) \;\big|\; r \in R_{\text{master}},\; r.\text{instance\_id} \le s.\text{max\_gid}\,\}
+$$
+
+- $L_0 = 101$ — master lattice ID (from `lte_mapping.json`).
+- $\ell$ — a row of `lattice_layout.csv`.
+- $\ell.\vec{q} = (\ell.x, \ell.y, \ell.z, \ell.\text{yaw},
+   \ell.\text{pitch}, \ell.\text{roll})$ — geometry tuple of the
+   element.
+- $s$ — in the first block, a row of `sp_elements.csv`. In the second
+  block, a sub-lattice descriptor from `sub_lattices.json`.
+- The join condition is on the composite key
+  $(\text{sp\_type},\,\text{sp\_element\_id})$ — every layout row pulls
+  its `device_type_id`, current and coefficient from the matching SP
+  template.
+- The sub-lattice union creates additional rows with a new
+  `lattice_id` but only for instances with `instance_id ≤ max_gid` —
+  i.e. a prefix of the master ring.
 
 ### 10.5 Solution algorithm
 
@@ -851,24 +1407,93 @@ Per particle:
 
 ### 11.4 Mathematical description
 
-Envelope:
-```
-A_i(t_k) = distanceToPolyline( x_i(t_k), design_poly )
-```
-Linear fit:
-```
-A(t) ≈ m · t + A₀                  (least squares)
-```
-Exponential fit (on log of positive part):
-```
-log A(t) ≈ γ · t + log A₀          ⇒  A(t) ≈ A₀ · exp(γ · t)
-R²_exp = 1 − SS_res / SS_tot
-```
-FFT, sample step `dt_sample = t_k − t_{k−1}`:
-```
-Â(f) = FFT(A(t)),
-f_betatron = argmax_(f > f_min) |Â(f)|     (DC bin masked)
-```
+**Envelope amplitude.** For each particle $i$ and each saved trajectory
+sample $k$:
+
+$$
+A_i(t_k) = \mathrm{dist}\bigl(\vec{x}_i(t_k),\,\Pi_{\text{design}}\bigr)
+$$
+
+- $\vec{x}_i(t_k)$ — position of particle $i$ at the $k$-th saved time
+  step, in metres.
+- $\Pi_{\text{design}}$ — design orbit polyline (centres of lattice
+  elements + prelude/postlude tangent extrapolation).
+- $A_i(t_k)$ — instantaneous Euclidean distance from the trajectory to
+  the design orbit, in metres. Computed by the algorithm of § 6.
+
+**Linear fit** (a baseline drift model):
+
+$$
+A(t) \approx m\,t + A_0, \qquad
+(m, A_0) = \arg\min_{m, A_0}\,\sum_{k}\bigl(A(t_k) - m\,t_k - A_0\bigr)^2
+$$
+
+- $m$ — linear growth rate of the envelope, in metres per second.
+  Positive $m$ means the beam is drifting away from the orbit.
+- $A_0$ — extrapolated envelope at $t = 0$, in metres.
+- The minimisation is the standard least-squares fit (closed form via
+  `numpy.polyfit(..., deg=1)`).
+
+**Exponential fit** (a growth/decay model):
+
+$$
+A(t) \approx A_0\,e^{\gamma\,t} \quad \Longleftrightarrow \quad
+\ln A(t) \approx \ln A_0 + \gamma\,t
+$$
+
+- $\gamma$ — exponential growth rate, in inverse seconds (sometimes
+  called the **Lyapunov-like exponent** of the envelope). $\gamma > 0$
+  means the amplitude grows; $\gamma < 0$ means it decays.
+- The fit is linear in $\ln A$, so it is performed in log-space by
+  least squares on the points where $A > A_{\text{floor}}$
+  (to avoid $\log 0$).
+
+The quality of the exponential fit is judged by the **coefficient of
+determination**:
+
+$$
+R^2 = 1 - \frac{SS_{\text{res}}}{SS_{\text{tot}}}, \quad
+SS_{\text{res}} = \sum_{k}\bigl(\ln A(t_k) - \widehat{\ln A(t_k)}\bigr)^2,
+\;\;
+SS_{\text{tot}} = \sum_{k}\bigl(\ln A(t_k) - \overline{\ln A}\bigr)^2
+$$
+
+- $SS_{\text{res}}$ — residual sum of squares (fit error).
+- $SS_{\text{tot}}$ — total sum of squares (variance of the data).
+- $\overline{\ln A}$ — mean log-amplitude.
+- $R^2 \in (-\infty,\,1]$ — closer to 1 means a better fit; $R^2 < 0$
+  means the fit is worse than just using the mean.
+
+A low $R^2$ disqualifies the estimate of $\gamma$ even if it is
+numerically large.
+
+**Betatron tune via FFT.** The discrete Fourier transform of the
+envelope is computed at the uniform sample step
+$\Delta t_{\text{sample}} = t_k - t_{k-1}$:
+
+$$
+\widehat{A}(f_n) = \sum_{k = 0}^{K-1} A(t_k)\,e^{-2\pi i\,f_n\,t_k}, \quad
+f_n = \frac{n}{K\,\Delta t_{\text{sample}}}, \quad n = 0, 1, \ldots, K-1
+$$
+
+- $K$ — number of envelope samples in the trajectory.
+- $f_n$ — discrete frequency bin, in hertz.
+- $\widehat{A}(f_n)$ — complex Fourier coefficient at frequency $f_n$.
+
+The dominant **betatron frequency** is the bin with the largest
+amplitude, excluding the DC bin which carries only the mean:
+
+$$
+f_{\text{betatron}} = \arg\max_{f_n > f_{\min}}\bigl|\widehat{A}(f_n)\bigr|
+$$
+
+- $f_{\min}$ — small floor frequency that masks out the DC component
+  (and optionally a few neighbouring bins to avoid leakage from a
+  non-zero mean).
+- $f_{\text{betatron}}$ — frequency of the strongest spectral peak, in
+  hertz. Converting to a fractional **tune** requires dividing by the
+  revolution frequency of the ring; the analyser does so when the
+  lattice length is known.
 
 ### 11.5 Solution algorithm
 
