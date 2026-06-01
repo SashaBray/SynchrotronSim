@@ -90,8 +90,8 @@ $$
 $$
 
 Variables:
-- $\vec{x}(t)$ — particle position in world coordinates, in metres.
-- $\vec{v}(t)$ — particle velocity, in metres per second.
+- $\vec{x}(t)$ — particle position in the global coordinate system, in metres.
+- $\vec{v}(t)$ — particle velocity in the global coordinate system, in metres per second.
 - $\vec{p}(t)$ — **relativistic momentum**, in kg·m/s; the quantity actually
   integrated by the code. It coincides with the classical $m\vec{v}$ only
   at low speeds; see definition below.
@@ -126,7 +126,7 @@ step: $\gamma$ is recovered directly from $\vec{p}$ without ever needing
 $\vec{v}$.
 
 In the current lattice all devices are magnetic, so $\vec{E}\equiv\vec{0}$.
-The E-kick steps below collapse to no-ops; the general form is retained
+The E-kick steps below leave the momentum unchanged; the general form is retained
 in case future electrostatic elements are added.
 
 **Boris splitting.** One step $\Delta t$ is applied to the state
@@ -401,7 +401,7 @@ read-only throughout tracking and optimization.
 | Symbol | Meaning |
 |---|---|
 | `bucketSize` | edge length of one bucket (m) |
-| `bxMin, byMin` | lower index of grid in world units / bucketSize |
+| `bxMin, byMin` | lower index of grid in global units / bucketSize |
 | `bxN, byN` | grid dimensions |
 | `bucketGrid[bx·byN + by]` | list of element indices intersecting bucket |
 
@@ -411,7 +411,7 @@ bucket containing `pos`.
 ### 3.4 Mathematical description
 
 Every magnet has a precomputed **bounding sphere** with centre
-$\vec{c}_i$ (in world coordinates) and radius $r_i$ that fully contains
+$\vec{c}_i$ (in the global coordinate system) and radius $r_i$ that fully contains
 its field map. The bucket index works in the $xy$-plane only, because
 the ring is flat in $z \approx 0$.
 
@@ -430,7 +430,7 @@ $$
 - The lower bound of 1 m prevents pathologically small buckets when all
   magnets are tiny — the bucket array would otherwise become huge.
 
-**Bucket coordinates.** A world point $(x, y, z)$ is mapped to bucket
+**Bucket coordinates.** A global-frame point $(x, y, z)$ is mapped to bucket
 indices $(b_x, b_y)$ by
 
 $$
@@ -498,9 +498,9 @@ interpolation.
 
 | Symbol | Meaning | Source |
 |---|---|---|
-| `globalPos` | world-frame query point | tracking loop |
+| `globalPos` | query point in the global frame | tracking loop |
 | `worldCenter, worldRadius²` | bounding sphere | `computeBounds()` |
-| `transform` | local↔world (rotation + translation) | lattice_configs.csv |
+| `transform` | local↔global (rotation + translation) | lattice_configs.csv |
 | `map` | field grid | hardware_library.csv |
 | `useSymmetry` | YZ symmetry flag (read from `use_symmetry` column) | hardware_library.csv |
 | `correctCoeff` | calibration factor | hardware_library + sp_elements |
@@ -512,7 +512,7 @@ interpolation.
 `addContribution` routes by `type` — `MAGNETIC` accumulates into
 `totalB`, `ELECTRIC` into `totalE`. All current devices are magnetic, so
 `totalE` stays at zero in practice and the E-kick steps of the Boris
-pusher are no-ops, but the routing is live and supports adding
+pusher contribute nothing in practice, but the routing is live and supports adding
 electrostatic elements without code changes.
 
 ### 4.3 Solution results
@@ -523,8 +523,8 @@ In-place addition into `totalB` (if `type == MAGNETIC`) or `totalE`
 ### 4.4 Mathematical description
 
 Each magnet has its own local coordinate frame in which the field map
-was computed. The contribution of magnet $i$ at a world query point
-$\vec{x}$ is built in four geometric steps and a scaling.
+was computed. The contribution of magnet $i$ at a global-frame query
+point $\vec{x}$ is built in four geometric steps and a scaling.
 
 **Step 1 — bounding-sphere prescreen.** Reject the magnet immediately if
 the query point is outside its sphere of influence:
@@ -533,24 +533,24 @@ $$
 |\vec{x} - \vec{c}_i|^2 > r_i^2 \;\;\Rightarrow\;\; \text{contribution is 0}
 $$
 
-- $\vec{c}_i$ — centre of magnet $i$'s bounding sphere in world
-  coordinates, in metres. Computed from the magnet's transform and field
+- $\vec{c}_i$ — centre of magnet $i$'s bounding sphere in the global
+  coordinate system, in metres. Computed from the magnet's transform and field
   map bounding box.
 - $r_i$ — bounding-sphere radius of magnet $i$, in metres.
 
 Squaring both sides avoids a square root in the hot loop.
 
-**Step 2 — world → local transform.** The world point is mapped to the
+**Step 2 — global → local transform.** The global-frame point is mapped to the
 magnet's local frame:
 
 $$
 \vec{x}_\text{loc} = R_i^{\!\top}\,(\vec{x} - \vec{T}_i)
 $$
 
-- $\vec{T}_i$ — translation: world position of the magnet's local
-  origin, in metres.
+- $\vec{T}_i$ — translation: the magnet's local-origin position in the
+  global coordinate system, in metres.
 - $R_i$ — rotation matrix (3×3, orthogonal, $R_i^{\!\top}R_i = I$) that
-  takes a local vector to world coordinates. Built from the magnet's
+  takes a local vector to the global coordinate system. Built from the magnet's
   $(\text{yaw},\,\text{pitch},\,\text{roll})$ Euler angles in
   `lattice_configs.csv`.
 - $R_i^{\!\top}$ is the **inverse** rotation (transpose of an
@@ -571,10 +571,10 @@ $$
 If $\vec{F}_\text{loc} = \vec{0}$ (the query falls in a zero-padded part
 of the grid) we return early without doing the rest.
 
-**Step 4 — local → world rotation** of the field vector:
+**Step 4 — local → global rotation** of the field vector:
 
 $$
-\vec{F}_\text{world} = R_i\,\vec{F}_\text{loc}
+\vec{F}_\text{global} = R_i\,\vec{F}_\text{loc}
 $$
 
 The translation does **not** apply here — a magnetic field is a vector,
@@ -613,11 +613,11 @@ $$
 **Step 6 — accumulate into the right field sum:**
 
 $$
-\vec{B}_\text{total} \mathrel{+}= \text{scale}_i\,\vec{F}_\text{world} \quad
+\vec{B}_\text{total} \mathrel{+}= \text{scale}_i\,\vec{F}_\text{global} \quad
    \text{if } \text{type}_i = \text{MAGNETIC}
 $$
 $$
-\vec{E}_\text{total} \mathrel{+}= \text{scale}_i\,\vec{F}_\text{world} \quad
+\vec{E}_\text{total} \mathrel{+}= \text{scale}_i\,\vec{F}_\text{global} \quad
    \text{if } \text{type}_i = \text{ELECTRIC}
 $$
 
@@ -674,7 +674,7 @@ integration and write the trajectory.
 
 ### 5.4 Mathematical description
 
-The finish plane is given by three world points $\vec{a},\,\vec{b},\,
+The finish plane is given by three global-frame points $\vec{a},\,\vec{b},\,
 \vec{c}$ that are assumed not to be collinear. They span the plane
 itself; the algorithm computes a unit normal and uses it for an
 oriented "signed distance" test.
@@ -912,7 +912,7 @@ $$
 - $\mathcal{M}$ — set of "scoring magnets" plus virtual targets, after
   filtering by `magnet_sp_numbers` and `exclude_device_types` from the
   optimizer JSON.
-- $\vec{c}_m$ — geometric centre of magnet $m$ in world coordinates,
+- $\vec{c}_m$ — geometric centre of magnet $m$ in the global coordinate system,
   in metres.
 - $w_m$ — per-target weight (default 1; targets in
   `extra_target_magnets` carry their own larger weights, typically 20
@@ -1240,12 +1240,12 @@ x' = x + \ell\,\cos\!\Bigl(\psi + \tfrac{\Delta\psi}{2}\Bigr), \qquad
 y' = y + \ell\,\sin\!\Bigl(\psi + \tfrac{\Delta\psi}{2}\Bigr)
 $$
 
-- $\psi$ — yaw angle (rotation about the world $z$ axis), in radians.
+- $\psi$ — yaw angle (rotation about the global $z$ axis), in radians.
 - $\Delta\psi$ — yaw turn produced by this element, in radians (equal
   to $\alpha$ for a bending magnet, 0 for a straight element).
 - $\ell$ — element length **along the chord** (so for a bend, $\ell$ is
   one-fifth of $L_{\text{chord}}$ per slice).
-- $x, y$ — accumulated world coordinates of the current placement
+- $x, y$ — accumulated the global coordinate system of the current placement
   cursor, in metres.
 
 Using the mid-segment yaw $\psi + \Delta\psi/2$ in the trigonometric
