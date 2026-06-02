@@ -539,18 +539,19 @@ const alg1 = [
   code(
     'Вход:  s = (pos, mom), m0, q, lattice, dt\n' +
     'Выход: s обновлено до шага n+1\n\n' +
-    ' 1.  γ ← sqrt(1 + |mom|² / (m0²·c²))\n' +
-    ' 2.  pos ← pos + mom · (dt/2) / (m0·γ)\n' +
-    ' 3.  (B, E) ← lattice.getTotalFields(pos)\n' +
-    ' 4.  p_minus ← mom + E · q · dt/2\n' +
-    ' 5.  γ_minus ← sqrt(1 + |p_minus|² / (m0²·c²))\n' +
-    ' 6.  t ← B · q · dt / (2·m0·γ_minus)\n' +
-    ' 7.  s ← 2·t / (1 + |t|²)\n' +
-    ' 8.  p_prime ← p_minus + cross(p_minus, t)\n' +
-    ' 9.  p_plus  ← p_minus + cross(p_prime, s)\n' +
-    '10.  mom ← p_plus + E · q · dt/2\n' +
-    '11.  γ ← sqrt(1 + |mom|² / (m0²·c²))\n' +
-    '12.  pos ← pos + mom · (dt/2) / (m0·γ)'),
+    ' 1.  γ ← sqrt(1 + |mom|² / (m0²·c²))            ; Лоренц-фактор по текущему импульсу\n' +
+    ' 2.  pos ← pos + mom · (dt/2) / (m0·γ)          ; ПЕРВЫЙ ПОЛУДРЕЙФ: x_n → x_{n+½}\n' +
+    ' 3.  (B, E) ← lattice.getTotalFields(pos)       ; ОПРОС ПОЛЯ в середине шага\n' +
+    '                                                ;   (единственное обращение к карте за шаг)\n' +
+    ' 4.  p_minus ← mom + E · q · dt/2               ; ПЕРВЫЙ ПОЛУ-E-ТОЛЧОК (при E=0 — no-op)\n' +
+    ' 5.  γ_minus ← sqrt(1 + |p_minus|² / (m0²·c²))  ; пересчёт γ по промежуточному импульсу\n' +
+    ' 6.  t ← B · q · dt / (2·m0·γ_minus)            ; полуугольный вектор поворота\n' +
+    ' 7.  s ← 2·t / (1 + |t|²)                       ; перенормированный вектор поворота\n' +
+    ' 8.  p_prime ← p_minus + cross(p_minus, t)      ; первый полуповорот\n' +
+    ' 9.  p_plus  ← p_minus + cross(p_prime, s)      ; завершение поворота; |p_plus| = |p_minus|\n' +
+    '10.  mom ← p_plus + E · q · dt/2                ; ВТОРОЙ ПОЛУ-E-ТОЛЧОК\n' +
+    '11.  γ ← sqrt(1 + |mom|² / (m0²·c²))            ; γ на новом шаге\n' +
+    '12.  pos ← pos + mom · (dt/2) / (m0·γ)          ; ВТОРОЙ ПОЛУДРЕЙФ: x_{n+½} → x_{n+1}'),
   body('В ранних версиях существовали вспомогательные методы Integrator::driftStep и AcceleratorConfig::isDriftRegion для замены полного шага Бориса аналитическим дрейфом x += v·dt на участках без магнитов. Оба удалены в рефакторинге 2026-06: прескрининг по bucket-индексу (см. раздел 3) уже сводит шаг в пустой области к одному обращению к бакету и пустому циклу по кандидатам, и отдельная ветка для дрейфа практической пользы не давала.'),
   body('В текущей конфигурации все устройства магнитные, поэтому E ≡ 0 и шаги 3, 6 (полу-E-толчки) не изменяют импульс. Алгоритм оставлен в общем виде для совместимости при возможном появлении электрических элементов.'),
 ];
@@ -628,16 +629,17 @@ const alg2 = [
   code(
     'Вход:  p, useSymmetry, grid (header + data)\n' +
     'Выход: вектор поля в точке p\n\n' +
-    '1. mirrored ← false\n' +
-    '2. если useSymmetry и p.x < 0:  p.x ← -p.x; mirrored ← true\n' +
-    '3. если p вне [minX..maxZ]: вернуть {0,0,0}\n' +
-    '4. fx ← (p.x - minX)/stepX;  i ← floor(fx);  tx ← fx - i\n' +
+    '1. mirrored ← false                            ; флаг применения YZ-зеркалирования\n' +
+    '2. если useSymmetry и p.x < 0:                 ; сворачиваем запрос в сохранённую половину сетки\n' +
+    '       p.x ← -p.x; mirrored ← true\n' +
+    '3. если p вне [minX..maxZ]: вернуть {0,0,0}    ; точка за пределами bbox → поле = 0\n' +
+    '4. fx ← (p.x - minX)/stepX;  i ← floor(fx);  tx ← fx - i      ; дробные координаты ячейки\n' +
     '   fy ← (p.y - minY)/stepY;  j ← floor(fy);  ty ← fy - j\n' +
     '   fz ← (p.z - minZ)/stepZ;  k ← floor(fz);  tz ← fz - k\n' +
-    '5. ограничить i, j, k интервалом [0, n-2] (граничный случай p == max)\n' +
-    '6. извлечь 8 значений v000..v111 из data[]\n' +
-    '7. покомпонентно вычислить F по формуле трилинейной интерполяции\n' +
-    '8. если mirrored: F.x ← -F.x\n' +
+    '5. ограничить i, j, k интервалом [0, n-2]      ; защита для граничного случая p == max\n' +
+    '6. извлечь 8 значений v000..v111 из data[]     ; угловые значения текущей ячейки\n' +
+    '7. покомпонентно вычислить F по формуле трилинейной интерполяции (см. § 2.4)\n' +
+    '8. если mirrored: F.x ← -F.x                   ; инверсия x-компоненты для YZ-симметрии\n' +
     '9. вернуть F'),
 ];
 
@@ -693,26 +695,27 @@ const alg3 = [
   h2('3.5', 'Алгоритм решения'),
   body('Построение индекса (выполняется однократно):'),
   code(
-    '1. maxR ← max_i elements[i].worldRadius\n' +
-    '2. bucketSize ← max(1.0, 2 · maxR)\n' +
+    '1. maxR ← max_i elements[i].worldRadius        ; наибольший радиус охватывающей сферы\n' +
+    '2. bucketSize ← max(1.0, 2 · maxR)             ; шаг сетки = 2·r_max, но не менее 1 м\n' +
+    '                                                ; нижняя граница защищает от мелких бакетов\n' +
     '3. xLo, xHi ← мин/макс по элементам от (worldCenter.x ± worldRadius)\n' +
-    '   yLo, yHi ← аналогично по y\n' +
-    '4. bxMin ← floor(xLo/bucketSize);  byMin ← floor(yLo/bucketSize)\n' +
-    '   bxN ← floor(xHi/bucketSize) - bxMin + 1\n' +
+    '   yLo, yHi ← аналогично по y                   ; bbox занимаемой кольцом области в XY\n' +
+    '4. bxMin ← floor(xLo/bucketSize);  byMin ← floor(yLo/bucketSize)   ; смещения индексов\n' +
+    '   bxN ← floor(xHi/bucketSize) - bxMin + 1                          ; размеры сетки\n' +
     '   byN ← floor(yHi/bucketSize) - byMin + 1\n' +
-    '5. bucketGrid ← массив пустых списков размера bxN·byN\n' +
-    '6. для каждого элемента i:\n' +
-    '       bxLo..bxHi ← диапазон бакетов по x\n' +
-    '       byLo..byHi ← диапазон бакетов по y\n' +
+    '5. bucketGrid ← массив пустых списков размера bxN·byN              ; плоский 2D-массив\n' +
+    '6. для каждого элемента i:                     ; регистрируем магниты в бакетах\n' +
+    '       bxLo..bxHi ← диапазон бакетов по x      ; XY-проекция охватывающей сферы\n' +
+    '       byLo..byHi ← диапазон бакетов по y      ; (по построению не более 2×2 бакетов)\n' +
     '       для bx ∈ [bxLo..bxHi], by ∈ [byLo..byHi]:\n' +
     '           bucketGrid[bx·byN + by].push_back(i)'),
   body('Запрос (на каждом шаге частицы):'),
   code(
-    '1. bx ← floor(pos.x/bucketSize) - bxMin\n' +
+    '1. bx ← floor(pos.x/bucketSize) - bxMin        ; индексы бакета, в который попала частица\n' +
     '   by ← floor(pos.y/bucketSize) - byMin\n' +
-    '2. если (bx, by) вне сетки: B, E ← 0; вернуть\n' +
-    '3. для каждого индекса i из bucketGrid[bx·byN + by]:\n' +
-    '       elements[i].addContribution(pos, B, E)'),
+    '2. если (bx, by) вне сетки: B, E ← 0; вернуть  ; вышли за пределы кольца → поля нет\n' +
+    '3. для каждого индекса i из bucketGrid[bx·byN + by]:   ; перебор только локальных кандидатов\n' +
+    '       elements[i].addContribution(pos, B, E)          ; вклад магнита (с прескринингом)'),
   body('На участках дрейфа бакет пуст, поэтому внутренний цикл по кандидатам не выполняется и вычислений поля не происходит.'),
 ];
 
@@ -793,15 +796,17 @@ const alg4 = [
 
   h2('4.5', 'Алгоритм решения'),
   code(
-    '1. dx,dy,dz ← globalPos − worldCenter\n' +
-    '   если dx²+dy²+dz² > worldRadius²:  return\n' +
-    '2. localPos ← transform.transformPointInv(globalPos)\n' +
+    '1. dx,dy,dz ← globalPos − worldCenter           ; ПРЕСКРИНИНГ по охватывающей сфере:\n' +
+    '   если dx²+dy²+dz² > worldRadius²:  return     ; точка вне сферы влияния → вклад нулевой\n' +
+    '                                                ; (сравнение квадратов, без sqrt)\n' +
+    '2. localPos ← transform.transformPointInv(globalPos)   ; ГЛОБАЛЬНАЯ → ЛОКАЛЬНАЯ система\n' +
     '3. localF   ← map.getInterpolatedField(localPos, useSymmetry)\n' +
-    '4. если localF == 0:  return\n' +
-    '5. globalF ← transform.rotateVector(localF)\n' +
-    '6. scale ← correctCoeff · fieldDirection\n' +
-    '   если isActive: scale *= currentScale\n' +
-    '7. если type == MAGNETIC: totalB += scale · globalF\n' +
+    '                                                ; интерполяция по карте поля (см. § 2)\n' +
+    '4. если localF == 0:  return                    ; нулевая зона карты — нет смысла продолжать\n' +
+    '5. globalF ← transform.rotateVector(localF)     ; ЛОКАЛЬНАЯ → ГЛОБАЛЬНАЯ (только поворот)\n' +
+    '6. scale ← correctCoeff · fieldDirection        ; калибровка по типу + знак направления\n' +
+    '   если isActive: scale *= currentScale         ; масштаб по току для активных магнитов\n' +
+    '7. если type == MAGNETIC: totalB += scale · globalF    ; маршрутизация по типу поля\n' +
     '   иначе                  totalE += scale · globalF'),
 ];
 
@@ -856,18 +861,20 @@ const alg5 = [
   h2('5.5', 'Алгоритм решения'),
   body('Инициализация (один раз на частицу):'),
   code(
-    '1. u ← b − a;  v ← c − a;  n ← u × v\n' +
-    '2. нормализовать n; при вырождении положить n ← (1, 0, 0)\n' +
-    '3. если (startPos − a) · n > 0:  n ← −n\n' +
-    '4. callCount ← 0;  lastD ← 0;  initialized ← false'),
+    '1. u ← b − a;  v ← c − a;  n ← u × v             ; вектор, ортогональный плоскости\n' +
+    '2. нормализовать n; при вырождении положить n ← (1, 0, 0)   ; единичная нормаль\n' +
+    '3. если (startPos − a) · n > 0:  n ← −n          ; стартовая точка должна иметь d < 0\n' +
+    '4. callCount ← 0;  lastD ← 0;  initialized ← false   ; стартовое состояние per-particle'),
   body('Запрос (на каждом шаге):'),
   code(
-    '1. callCount ← callCount + 1\n' +
-    '2. если callCount ≤ skipSteps:  вернуть false\n' +
-    '3. d ← (pos − a) · n\n' +
-    '4. если not initialized: lastD ← d; initialized ← true; вернуть false\n' +
-    '5. crossed ← (lastD < 0 ∧ d ≥ 0) ∨ (lastD ≥ 0 ∧ d < 0)\n' +
-    '6. lastD ← d\n' +
+    '1. callCount ← callCount + 1                     ; счётчик обращений к детектору\n' +
+    '2. если callCount ≤ skipSteps:  вернуть false   ; пропуск первых N вызовов\n' +
+    '                                                ; (нужно при пересечении плоскости несколько раз)\n' +
+    '3. d ← (pos − a) · n                            ; знаковое расстояние до плоскости\n' +
+    '4. если not initialized:                        ; первый «нормальный» вызов после skipSteps:\n' +
+    '       lastD ← d; initialized ← true; вернуть false   ; запомнить d, без проверки\n' +
+    '5. crossed ← (lastD < 0 ∧ d ≥ 0) ∨ (lastD ≥ 0 ∧ d < 0)   ; смена знака → пересечение\n' +
+    '6. lastD ← d                                    ; сохранить для следующего шага\n' +
     '7. вернуть crossed'),
 ];
 
@@ -922,16 +929,17 @@ const alg6 = [
   code(
     'Вход:  p, poly[0..N-1]\n' +
     'Выход: расстояние dist ≥ 0\n\n' +
-    '1. если N < 2:  вернуть 0\n' +
-    '2. best² ← +∞\n' +
-    '3. для i из [0..N-2]:\n' +
-    '     a ← poly[i];  b ← poly[i+1]\n' +
-    '     u ← b − a;  len² ← u·u\n' +
-    '     t ← clamp( (p − a)·u / len²,  0,  1 ),  если len² > 1e-30,  иначе 0\n' +
-    '     c ← a + t·u\n' +
-    '     d² ← (p − c)·(p − c)\n' +
-    '     если d² < best²: best² ← d²\n' +
-    '4. вернуть √best²'),
+    '1. если N < 2:  вернуть 0                      ; полилиния не определена\n' +
+    '2. best² ← +∞                                  ; текущий минимум квадрата расстояния\n' +
+    '3. для i из [0..N-2]:                          ; перебор всех N−1 отрезков\n' +
+    '     a ← poly[i];  b ← poly[i+1]               ; концы текущего отрезка\n' +
+    '     u ← b − a;  len² ← u·u                    ; направляющий вектор и его |·|²\n' +
+    '     t ← clamp( (p − a)·u / len²,  0,  1 )     ; параметр проекции с клиппингом в [0,1]\n' +
+    '         если len² > 1e-30,  иначе 0           ; защита от вырожденного отрезка\n' +
+    '     c ← a + t·u                               ; ближайшая к p точка отрезка\n' +
+    '     d² ← (p − c)·(p − c)                      ; квадрат расстояния (без sqrt в цикле)\n' +
+    '     если d² < best²: best² ← d²               ; обновление минимума\n' +
+    '4. вернуть √best²                              ; sqrt извлекается однократно — в конце'),
 ];
 
 // ---------------------------------------------------------------------------
@@ -1030,28 +1038,28 @@ const alg7 = [
   h2('7.5', 'Алгоритм решения'),
   body('А. Подготовка статических данных (выполняется один раз за вызов):'),
   code(
-    '1. magnets_idx ← фильтрация элементов по (sp_number ∈ S) ∧\n' +
-    '                                          (device_type ∉ exclude)\n' +
-    '2. virtual_targets ← список (c, w) из extra_target_magnets\n' +
-    '3. design_poly ← центры элементов 1..N + прелюдия\n' +
-    '                  (экстраполяция первого сегмента на −2.94 м) +\n' +
-    '                 постлюдия (экстраполяция последнего сегмента вперёд)'),
+    '1. magnets_idx ← фильтрация элементов по             ; учитываемые магниты: только нужные СП,\n' +
+    '       (sp_number ∈ S) ∧ (device_type ∉ exclude)     ; кроме исключённых типов\n' +
+    '2. virtual_targets ← список (c, w) из extra_target_magnets   ; виртуальные цели с весами\n' +
+    '3. design_poly ← центры элементов 1..N +             ; проектная орбита:\n' +
+    '       прелюдия  (экстраполяция первого сегмента на −2.94 м) +\n' +
+    '       постлюдия (экстраполяция последнего сегмента вперёд)'),
   body('Б. Цикл по каждой частице i:'),
   code(
-    'minDist²[m] ← +∞ для каждого m из magnets_idx ∪ virtual_targets\n' +
-    'A_init ← distanceToPolyline(x_init, design_poly)\n' +
+    'minDist²[m] ← +∞ для каждого m из magnets_idx ∪ virtual_targets   ; инкрементальный аккум.\n' +
+    'A_init ← distanceToPolyline(x_init, design_poly)    ; начальная амплитуда огибающей\n' +
     'для каждого шага до пересечения финишной плоскости:\n' +
-    '    шаг Бориса (borisStep)\n' +
-    '    для каждого m из бакета:\n' +
-    '        d² ← |x − c_m|²\n' +
-    '        если d² < minDist²[m]: minDist²[m] ← d²\n' +
-    'A_final ← distanceToPolyline(x_final, design_poly)\n' +
-    'θ_i     ← угол(p_final, r̂)'),
+    '    шаг Бориса (borisStep)                          ; продвижение частицы (см. § 1)\n' +
+    '    для каждого m из бакета:                        ; учёт только близких магнитов\n' +
+    '        d² ← |x − c_m|²                             ; квадрат расстояния до центра магнита\n' +
+    '        если d² < minDist²[m]: minDist²[m] ← d²    ; обновление инкрементального минимума\n' +
+    'A_final ← distanceToPolyline(x_final, design_poly)  ; финальная амплитуда огибающей\n' +
+    'θ_i     ← угол(p_final, r̂)                          ; угол между p_final и эталоном'),
   body('В. Агрегация:'),
   code(
-    'position_loss  = Σ_(i,m) w_m · minDist²[i, m]\n' +
-    'direction_loss = w_dir · Σ_i sin²(θ_i)\n' +
-    'envelope_loss  = w_env · Σ_i max(0, A_final − A_init)²\n' +
+    'position_loss  = Σ_(i,m) w_m · minDist²[i, m]            ; § 7.4: близость к магнитам\n' +
+    'direction_loss = w_dir · Σ_i sin²(θ_i)                   ; параллельность пучка эталону\n' +
+    'envelope_loss  = w_env · Σ_i max(0, A_final − A_init)²   ; штраф только за РОСТ огибающей\n' +
     'loss           = position_loss + direction_loss + envelope_loss'),
   body('Если хотя бы одна частица не достигает финишной плоскости за 50 миллионов шагов, функция возвращает признак сбоя, и оптимизатор отвергает текущее состояние.'),
 ];
@@ -1129,44 +1137,47 @@ const alg8 = [
 
   h2('8.5', 'Алгоритм решения'),
   code(
-    '1. Загрузить конфигурацию:\n' +
+    '1. Загрузить конфигурацию:                       ; стадия инициализации (~1 с)\n' +
     '     - прочитать JSON, заполнить OptimConfig\n' +
     '     - прочитать sp_elements, hardware_library, lattice_configs,\n' +
-    '       particle_groups\n' +
+    '       particle_groups                            ; вся БД — в память один раз\n' +
     '     - отфильтровать строки решётки по lattice_id и lattice_max_gid\n' +
+    '                                                  ; для экспериментов на части кольца\n' +
     '2. Построить ускоритель:\n' +
-    '     - загрузить карты поля в общий кеш (один .bin на device_type)\n' +
-    '     - для каждой строки: создать MagneticElement, computeBounds()\n' +
-    '     - acc.buildSpatialIndex()\n' +
-    '3. Построить список параметров:\n' +
+    '     - загрузить карты поля в общий кеш (один .bin на device_type)   ; mapCache\n' +
+    '     - для каждой строки: создать MagneticElement, computeBounds()   ; bounding sphere\n' +
+    '     - acc.buildSpatialIndex()                    ; bucket-индекс (см. § 3)\n' +
+    '3. Построить список параметров:                   ; θ — изменяемые слоты\n' +
     '     - для каждой записи parameter_groups_per_position:\n' +
-    '         найти соответствующие (sp_type, sp_eid)\n' +
+    '         найти соответствующие (sp_type, sp_eid)  ; какие элементы группа охватывает\n' +
     '         собрать индексы элементов\n' +
-    '         сохранить ссылки на изменяемые поля\n' +
+    '         сохранить ссылки на изменяемые поля     ; arg_val / correct_coeff in-place\n' +
     '4. Начальная оценка:\n' +
-    '     L_best ← runTrackingAndLoss(θ)\n' +
-    '     при сбое — прервать\n' +
-    '5. Цикл i = 1..n_iterations:\n' +
-    '     если i % kick_every == 0:\n' +
-    '         для каждой группы g: θ_g += Uniform(−kick_scale, +kick_scale)\n' +
-    '     иначе:\n' +
+    '     L_best ← runTrackingAndLoss(θ)               ; baseline для жадного приёма\n' +
+    '     при сбое — прервать                          ; стартовая конфигурация нерабочая\n' +
+    '5. Цикл i = 1..n_iterations:                      ; ГОРЯЧИЙ ЦИКЛ оптимизации\n' +
+    '     если i % kick_every == 0:                    ; КИК-ИТЕРАЦИЯ\n' +
+    '         для каждой группы g:                     ; все группы одновременно\n' +
+    '             θ_g += Uniform(−kick_scale, +kick_scale)\n' +
+    '     иначе:                                       ; ОБЫЧНАЯ ИТЕРАЦИЯ\n' +
     '         выбрать случайную группу g\n' +
-    '         θ_g_old ← θ_g\n' +
-    '         θ_g ← θ_g + step · sign(rand − 0.5)\n' +
-    '     L_new ← runTrackingAndLoss(θ)\n' +
-    '     если L_new — сбой или L_new ≥ L_best:\n' +
-    '         откатить мутации этой итерации\n' +
+    '         θ_g_old ← θ_g                            ; сохранить для возможного отката\n' +
+    '         θ_g ← θ_g + step · sign(rand − 0.5)     ; шаг со случайным знаком\n' +
+    '     L_new ← runTrackingAndLoss(θ)                ; полный прогон трекинга\n' +
+    '     если L_new — сбой или L_new ≥ L_best:        ; ЖАДНЫЙ ПРИЁМ\n' +
+    '         откатить мутации этой итерации          ; неудачное предложение — назад\n' +
     '     иначе:\n' +
-    '         L_best ← L_new\n' +
-    '         добавить (i, L_best, snapshot θ) в историю\n' +
-    '     если i % CHECKPOINT_EVERY == 0:\n' +
+    '         L_best ← L_new                           ; принимаем улучшение\n' +
+    '         добавить (i, L_best, snapshot θ) в историю   ; для viz_optim_history.py\n' +
+    '     если i % CHECKPOINT_EVERY == 0:              ; периодический чекпойнт\n' +
     '         сохранить history.json (атомарно через временный файл)\n' +
-    '6. Финальная фаза:\n' +
+    '6. Финальная фаза:                                ; результаты — на диск\n' +
     '     - записать лучшее θ обратно в sp_elements.csv и\n' +
-    '       hardware_library.csv\n' +
+    '       hardware_library.csv                       ; пользователь видит итог\n' +
     '     - пересобрать lattice_configs.csv (сохранить суб-решётки)\n' +
     '     - выполнить финальный прогон, записать trajectories_exp{id}.bin\n' +
-    '     - сохранить итоговый history.json'),
+    '                                                  ; чтобы visualize.py показал итог\n' +
+    '     - сохранить итоговый history.json            ; с пометкой "final": true'),
 ];
 
 // ---------------------------------------------------------------------------
@@ -1226,25 +1237,27 @@ const alg9 = [
   h2('9.5', 'Алгоритм решения'),
   code(
     '1. Чтение JSON-конфига → mapping, regex-шаблоны, пороги\n' +
-    '2. Разбор SYLA_desc.lte:\n' +
+    '                                                ; правила соответствия LTE-типов и СП\n' +
+    '2. Разбор SYLA_desc.lte:                        ; БИБЛИОТЕКА УСТРОЙСТВ\n' +
     '     для каждой строки "ИМЯ: ТИП, key1=val1, ..."\n' +
-    '         классифицировать ТИП через конфиг (DL/JL/SBM/DP/DQ/QP/SQ/COR/MARK/...)\n' +
+    '         классифицировать ТИП через конфиг      ; DL/JL/SBM/DP/DQ/QP/SQ/COR/MARK/...\n' +
     '         сохранить (ИМЯ, классиф_тип, длина, угол, K1, ...)\n' +
-    '3. Разбор SYLA_line.lte:\n' +
-    '     развернуть вложенные LINE-выражения в плоскую\n' +
-    '     последовательность (ИМЯ, повтор)\n' +
-    '4. Классификация в (sp_type, sp_element_id):\n' +
+    '3. Разбор SYLA_line.lte:                        ; ПОСЛЕДОВАТЕЛЬНОСТЬ ЭЛЕМЕНТОВ\n' +
+    '     развернуть вложенные LINE-выражения        ; LTE поддерживает рекурсивные ссылки\n' +
+    '     в плоскую последовательность (ИМЯ, повтор)\n' +
+    '4. Классификация в (sp_type, sp_element_id):    ; разбиение на типовые СП\n' +
     '     standard — обычные СП, повторяющиеся 1..N\n' +
     '     junction — стыковочные СП 18-21 (отличающаяся геометрия)\n' +
-    '5. Развёртка кольца:\n' +
+    '5. Развёртка кольца:                            ; РАЗМЕЩЕНИЕ В ПРОСТРАНСТВЕ\n' +
     '     для каждого элемента в плоской последовательности:\n' +
-    '         если DL/JL: выдать 5 фрагментов на хорде\n' +
+    '         если DL/JL: выдать 5 фрагментов на хорде   ; спрямление длинных бендов\n' +
     '         иначе:      выдать 1 фрагмент\n' +
-    '         обновить (x, y, yaw) по формулам п. 9.4\n' +
+    '         обновить (x, y, yaw) по формулам п. 9.4    ; продвижение курсора\n' +
     '6. Прочитать существующий sp_elements.csv (если есть):\n' +
-    '     сохранить arg_val для совпадающих ключей (sp_type, sp_eid)\n' +
-    '7. Записать sp_elements.csv (шаблоны, по одной строке на ключ)\n' +
-    '8. Записать lattice_layout.csv (полная развёртка)'),
+    '     сохранить arg_val для совпадающих ключей    ; пользователь не теряет токи\n' +
+    '     (sp_type, sp_eid)                           ; от прошлой оптимизации\n' +
+    '7. Записать sp_elements.csv                     ; шаблоны, по одной строке на ключ\n' +
+    '8. Записать lattice_layout.csv                  ; полная развёртка кольца'),
 ];
 
 // ---------------------------------------------------------------------------
@@ -1300,18 +1313,21 @@ const alg10 = [
 
   h2('10.5', 'Алгоритм решения'),
   code(
-    '1. sp_dict ← load_sp_elements()              ; ключ (sp_type, sp_eid)\n' +
-    '2. output_rows ← []\n' +
-    '3. для каждой строки r из lattice_layout.csv:\n' +
-    '     key ← (r.sp_type, r.sp_element_id)\n' +
+    '1. sp_dict ← load_sp_elements()              ; шаблоны СП по ключу (sp_type, sp_eid)\n' +
+    '                                              ; → (device_type, arg_val, correct_coeff)\n' +
+    '2. output_rows ← []                          ; накопитель результата\n' +
+    '3. для каждой строки r из lattice_layout.csv:    ; РЕЛЯЦИОННЫЙ JOIN: геометрия + шаблон\n' +
+    '     key ← (r.sp_type, r.sp_element_id)      ; составной ключ соединения\n' +
     '     если key не в sp_dict: выдать warning и пропустить\n' +
-    '     dev, arg, coeff ← sp_dict[key]\n' +
+    '                                              ; элемент layout без шаблона — диагностика\n' +
+    '     dev, arg, coeff ← sp_dict[key]          ; берём данные из SP-шаблона\n' +
     '     добавить запись {LATTICE_ID, r.global_id, dev, r.x..roll, arg, coeff}\n' +
-    '4. для каждого (sub_id, max_gid) из SUB_LATTICES:\n' +
+    '                                              ; полная итоговая строка для симулятора\n' +
+    '4. для каждого (sub_id, max_gid) из SUB_LATTICES:    ; ПОДРЕШЁТКИ для частичных экспериментов\n' +
     '     для r из output_rows, где r.instance_id ≤ max_gid:\n' +
-    '         добавить копию с lattice_id ← sub_id\n' +
+    '         добавить копию с lattice_id ← sub_id    ; префикс кольца с новым идентификатором\n' +
     '5. Запись CSV с повторными попытками при PermissionError\n' +
-    '   (блокировка файла в Windows)'),
+    '   (блокировка файла в Windows — например, Excel держит файл открытым)'),
 ];
 
 // ---------------------------------------------------------------------------
@@ -1409,21 +1425,24 @@ const alg11 = [
 
   h2('11.5', 'Алгоритм решения'),
   code(
-    '1. Загрузить траектории (5 массивов точек (Ni, 3)).\n' +
+    '1. Загрузить траектории (5 массивов точек (Ni, 3)).      ; trajectories_exp{id}.bin\n' +
     '2. Определить lattice_id по experiments.csv, загрузить lattice_configs,\n' +
-    '   построить design_poly (центры + прелюдия/постлюдия).\n' +
+    '   построить design_poly (центры + прелюдия/постлюдия).  ; проектная орбита\n' +
     '3. Для каждой частицы i:\n' +
     '     a. A_i ← [distanceToPolyline(p, design_poly) для p из traj_i]\n' +
-    '     b. t_i ← равномерный шаг (dt × traj_stride × stride)\n' +
-    '     c. линейная подгонка: m, A₀ ← polyfit(t_i, A_i, deg=1)\n' +
-    '     d. экспоненциальная подгонка (только точки с A > A_floor):\n' +
-    '            log A = γ·t + log A₀; вычислить R²\n' +
-    '     e. FFT(A_i); маскировать DC-бин; выбрать максимум как f_betatron\n' +
-    '     f. классификация:\n' +
-    '            DRIFTED      если A_init ≈ 0 и m_lin > δ\n' +
-    '            GROWING      если γ > γ_threshold и R² ≥ R²_min\n' +
+    '                                                         ; огибающая — по алгоритму § 6\n' +
+    '     b. t_i ← равномерный шаг (dt × traj_stride × stride) ; восстановление времени отсчётов\n' +
+    '     c. линейная подгонка: m, A₀ ← polyfit(t_i, A_i, deg=1)   ; baseline дрейф-модель\n' +
+    '     d. экспоненциальная подгонка (только точки с A > A_floor):   ; защита от log 0\n' +
+    '            log A = γ·t + log A₀; вычислить R²                   ; γ — Ляпунов-показатель\n' +
+    '     e. FFT(A_i); маскировать DC-бин;                     ; убираем влияние среднего\n' +
+    '        выбрать максимум как f_betatron                   ; доминирующая частота колебаний\n' +
+    '     f. классификация (вердикт по частице):\n' +
+    '            DRIFTED      если A_init ≈ 0 и m_lin > δ     ; растущий дрейф от орбиты\n' +
+    '            GROWING      если γ > γ_threshold и R² ≥ R²_min   ; экспоненциальный рост\n' +
     '            OSCILLATING  если есть выраженный пик FFT и γ ≤ γ_threshold\n' +
-    '            STABLE       иначе\n' +
+    '                                                         ; устойчивые бетатронные колебания\n' +
+    '            STABLE       иначе                            ; никаких аномалий\n' +
     '4. Построить графики, вывести таблицу вердиктов.'),
 ];
 
