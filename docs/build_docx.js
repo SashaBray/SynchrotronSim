@@ -263,6 +263,17 @@ function mdash(varExpr, prose) {
 // ---------------------------------------------------------------------------
 // Таблицы — двухколоночные «Параметр / Описание», тонкая граница, паддинг
 // ---------------------------------------------------------------------------
+// Пустой абзац-отступ после таблицы. Word не позволяет задать «space-after»
+// на самой таблице, поэтому добавляется отдельный параграф высотой обычной
+// строки. Все table*-helpers ниже автоматически возвращают [Table, tableSpacer()];
+// финальная сборка children в Document'е использует .flat() для разворачивания.
+function tableSpacer() {
+  return new Paragraph({
+    spacing: { before: 0, after: 120, line: 360, lineRule: 'auto' },
+    indent: { firstLine: 0 },
+    children: [ new TextRun({ text: '', font: TIMES, size: SIZE_BODY }) ],
+  });
+}
 function thinBorder() {
   const b = { style: BorderStyle.SINGLE, size: 4, color: '000000' };
   return { top: b, bottom: b, left: b, right: b };
@@ -295,11 +306,11 @@ function table2col(headers, rows, weights = [0.35, 0.65]) {
   const dataRows = rows.map(r => new TableRow({
     children: [ tcell(r[0], { width: w1 }), tcell(r[1], { width: w2 }) ],
   }));
-  return new Table({
+  return [ new Table({
     width: { size: CONTENT_W, type: WidthType.DXA },
     columnWidths: [w1, w2],
     rows: [headRow, ...dataRows],
-  });
+  }), tableSpacer() ];
 }
 function table3col(headers, rows, weights = [0.22, 0.30, 0.48]) {
   const w1 = Math.round(CONTENT_W * weights[0]);
@@ -316,11 +327,11 @@ function table3col(headers, rows, weights = [0.22, 0.30, 0.48]) {
                 tcell(r[1], { width: w2 }),
                 tcell(r[2], { width: w3 }) ],
   }));
-  return new Table({
+  return [ new Table({
     width: { size: CONTENT_W, type: WidthType.DXA },
     columnWidths: [w1, w2, w3],
     rows: [headRow, ...dataRows],
-  });
+  }), tableSpacer() ];
 }
 function table4col(headers, rows, weights = [0.18, 0.30, 0.12, 0.40]) {
   const w1 = Math.round(CONTENT_W * weights[0]);
@@ -333,11 +344,11 @@ function table4col(headers, rows, weights = [0.18, 0.30, 0.12, 0.40]) {
   const dataRows = rows.map(r => new TableRow({
     children: r.map((c, i) => tcell(c, { width: [w1,w2,w3,w4][i] })),
   }));
-  return new Table({
+  return [ new Table({
     width: { size: CONTENT_W, type: WidthType.DXA },
     columnWidths: [w1, w2, w3, w4],
     rows: [headRow, ...dataRows],
-  });
+  }), tableSpacer() ];
 }
 
 // ---------------------------------------------------------------------------
@@ -1548,13 +1559,15 @@ const mainSection = {
     },
   },
   footers: { default: footerWithPageNumber },
+  // .flat() — раскрывает [Table, tableSpacer()], которые возвращают
+  // table*-helpers, в плоский список children, ожидаемый Document.
   children: [
     ...toc,
     ...intro,
     ...alg1,  ...alg2,  ...alg3, ...alg4,  ...alg5,
     ...alg6,  ...alg7,  ...alg8, ...alg9,  ...alg10, ...alg11,
     ...appA, ...appB,
-  ],
+  ].flat(),
 };
 
 const doc = new Document({
