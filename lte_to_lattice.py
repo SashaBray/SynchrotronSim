@@ -304,75 +304,57 @@ def write_lattice_layout_csv(rows, path):
             ])
 
 
+def _straighten_run(rows, devices):
+    """Выпрямляет ОДИН прогон из n (2..5) слайсов диполь-семейства: размещает их НА ОДНОЙ ПРЯМОЙ
+    (касательная в геометрическом центре прогона), вместо арочного расположения. Расстояние между
+    соседями = L_i/2 + L_(i+1)/2 (по длинам магнитов), yaw у всех — общий (центра прогона)."""
+    n = len(rows)
+    L = [float(devices[r["_lte_name"]].get("L", 0.0)) for r in rows]
+    cum = 0.0; s = []                                    # s[k] — длина-центр слайса k от начала прогона
+    for k in range(n):
+        s.append(cum + L[k] / 2.0); cum += L[k]
+    if n % 2 == 1:                                        # нечёт: якорь = средний слайс (лежит на дуге)
+        c = n // 2
+        anchor_s = s[c]; cx, cy, cyaw = rows[c]["x"], rows[c]["y"], rows[c]["yaw"]
+    else:                                                # чёт: якорь = середина между двумя центральными
+        a, b = n // 2 - 1, n // 2
+        anchor_s = 0.5 * (s[a] + s[b])
+        cx = 0.5 * (rows[a]["x"] + rows[b]["x"]); cy = 0.5 * (rows[a]["y"] + rows[b]["y"])
+        cyaw = 0.5 * (rows[a]["yaw"] + rows[b]["yaw"])
+    tx, ty = math.cos(cyaw), math.sin(cyaw)
+    for k in range(n):
+        dk = s[k] - anchor_s                             # смещение вдоль касательной от якоря
+        rows[k]["x"] = cx + dk * tx; rows[k]["y"] = cy + dk * ty
+        rows[k]["z"] = 0.0; rows[k]["yaw"] = cyaw; rows[k]["pitch"] = 0.0; rows[k]["roll"] = 0.0
+
+
 def straighten_dljl_families(layout_rows, devices):
-    """Пост-обработка: для каждой группы 5 последовательных слайсов одного DL/JL
-    семейства (_1.._5) перепозиционирует элементы так, чтобы они лежали НА ОДНОЙ
-    ПРЯМОЙ (касательная в положении 3-го слайса), вместо арочного расположения.
-
-    Центральный (3-й) слайс остаётся на дуге (на опорной траектории).
-    Слайсы 1, 2, 4, 5 размещаются по касательной к ней, с расстоянием по длине
-    самих магнитов: L_i/2 + L_(i+1)/2 между соседями.
-
-    yaw всех 5 слайсов становится yaw'ом 3-го (центрального).
-    Возвращает количество модифицированных групп.
-    """
+    """Пост-обработка: ЛЮБАЯ линейка из 2..5 последовательных слайсов одного диполь-семейства (DL/JL,
+    напр. JL1E_2..JL1E_5) размещается НА ОДНОЙ ПРЯМОЙ, а не по дуге (реальный магнит прямой, разбит на
+    слайсы). Прогон детектируется по общему base-имени подряд идущих строк (номера слайсов и их порядок
+    роли не играют). Возвращает (число выпрямленных линеек, счётчик по длинам)."""
     groups_modified = 0
+    by_len = {}
     i = 0
-    while i + 4 < len(layout_rows):
-        nm0 = layout_rows[i].get("_lte_name", "")
-        m0 = DLJL_FAMILY_RE.match(nm0)
+    while i < len(layout_rows):
+        m0 = DLJL_FAMILY_RE.match(layout_rows[i].get("_lte_name", ""))
         if not m0:
             i += 1
             continue
         base = m0.group(1)
-        # Собираем slice-индексы 5 последовательных строк.
-        # Они могут идти в прямом (_1.._5) или обратном (_5.._1) порядке -- LTE
-        # допускает оба.
-        slice_idx = [int(m0.group(2))]
-        ok = True
-        for k in range(1, 5):
-            nm_k = layout_rows[i + k].get("_lte_name", "")
-            m_k = DLJL_FAMILY_RE.match(nm_k)
-            if not m_k or m_k.group(1) != base:
-                ok = False
+        j = i + 1                                        # расширяем прогон, пока то же семейство
+        while j < len(layout_rows):
+            mj = DLJL_FAMILY_RE.match(layout_rows[j].get("_lte_name", ""))
+            if not mj or mj.group(1) != base:
                 break
-            slice_idx.append(int(m_k.group(2)))
-        if not ok or sorted(slice_idx) != [1, 2, 3, 4, 5]:
-            i += 1
-            continue
-
-        # Центральный = слайс _3 (физический центр), независимо от порядка в layout.
-        central_pos = slice_idx.index(3)        # 0..4 -- позиция _3 в layout
-        central = layout_rows[i + central_pos]
-        cx, cy, cyaw = central["x"], central["y"], central["yaw"]
-        tx, ty = math.cos(cyaw), math.sin(cyaw)
-
-        # Длины слайсов В ПОРЯДКЕ их следования в layout.
-        L = [float(devices[layout_rows[i + k]["_lte_name"]].get("L", 0.0))
-             for k in range(5)]
-
-        # Смещения центров от центра central_pos (signed, по касательной).
-        d = [0.0] * 5
-        # Вперёд от центра (k > central_pos в layout)
-        for k in range(central_pos + 1, 5):
-            d[k] = d[k - 1] + L[k - 1] / 2.0 + L[k] / 2.0
-        # Назад от центра (k < central_pos)
-        for k in range(central_pos - 1, -1, -1):
-            d[k] = d[k + 1] - (L[k] / 2.0 + L[k + 1] / 2.0)
-
-        # Применяем: все слайсы вдоль касательной центрального, с его yaw.
-        for k in range(5):
-            r = layout_rows[i + k]
-            r["x"] = cx + d[k] * tx
-            r["y"] = cy + d[k] * ty
-            r["z"] = 0.0
-            r["yaw"] = cyaw
-            r["pitch"] = 0.0
-            r["roll"] = 0.0
-
-        groups_modified += 1
-        i += 5
-    return groups_modified
+            j += 1
+        n = j - i
+        if 2 <= n <= 5:
+            _straighten_run(layout_rows[i:j], devices)
+            groups_modified += 1
+            by_len[n] = by_len.get(n, 0) + 1
+        i = j
+    return groups_modified, by_len
 
 
 def is_sp_start(line_names, i):
@@ -578,9 +560,9 @@ def main():
         print(f"  {k:18s}  {hw_uses[k]:5d}")
 
     # Пост-обработка: выпрямление DL/JL 5-слайсовых семейств.
-    n_straightened = straighten_dljl_families(layout_rows, devices)
-    print(f"\nStraightened {n_straightened} DL/JL families "
-          f"(5 slices each, colinear at central slice position)")
+    n_straightened, by_len = straighten_dljl_families(layout_rows, devices)
+    brk = ", ".join(f"{n}-слайс.: {c}" for n, c in sorted(by_len.items()))
+    print(f"\nВыпрямлено линеек диполей на прямую: {n_straightened} ({brk or 'нет'})")
 
     # Удаляем технический ключ _lte_name перед записью.
     for r in layout_rows:

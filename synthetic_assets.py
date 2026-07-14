@@ -90,7 +90,8 @@ def gen_stl(ref, nid, new_eff, ref_row, col):
         dt = np.dtype([("n", "<f4", 3), ("v1", "<f4", 3), ("v2", "<f4", 3), ("v3", "<f4", 3), ("a", "<u2")])
         tris = np.frombuffer(raw, dtype=dt, count=n).copy()
         V = np.concatenate([tris["v1"], tris["v2"], tris["v3"]])
-        ax = int(np.argmax(V.max(0) - V.min(0)))               # длинная ось = макс размах bbox
+        ax = 0                                                 # ПРОДОЛЬНАЯ (пучковая) ось STL = X, как у полевых
+        # карт (из той же КД): у всех магнитов X-размах ≈ длине, Y/Z — поперечные (ярмо+катушки). НЕ argmax bbox.
         ctr = 0.5 * (V.max(0)[ax] + V.min(0)[ax])
         for key in ("v1", "v2", "v3"):
             arr = tris[key].copy()                             # поле как (n,3); правим и присваиваем ЦЕЛИКОМ
