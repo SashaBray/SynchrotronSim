@@ -14,7 +14,7 @@ import bip_matrix as bm
 
 TB = os.path.join("workspace", "tables")
 QP, BRHO = bm.QP, bm.BRHO
-J = json.load(open("workspace/bip_compare_newmaps/composite_fullrange.json", encoding="utf-8"))
+J = json.load(open("workspace/calibration/composite_fullrange.json", encoding="utf-8"))
 
 
 def prim(dev):
@@ -31,7 +31,7 @@ def _load_eff():
     tag2dev = {"QP_L": "QP_L_1A", "QP_sh": "QP_sh_1A", "SP_I1": "SP_I1_1A", "SP_I2": "SP_I2_1A",
                "OP": "OP_1A", "DQ_I1": "DQ_I1_1A", "DQ_I2": "DQ_I2_1A", "DQ_I3": "DQ_I3_1A",
                "DP_L": "DP_L_PM", "DP_sh": "DP_sh_PM"}
-    rows = csv.DictReader(open("workspace/matrix_eff_length/eff_length.csv", encoding="utf-8"), delimiter=";")
+    rows = csv.DictReader(open("workspace/calibration/eff_length.csv", encoding="utf-8-sig"), delimiter=";")
     e = {tag2dev[r["tag"]]: float(r["L_eff_fit_mm"]) / 1000.0 for r in rows if r["tag"] in tag2dev}
     e["corrector_I1_1A"] = 0.15; e["corrector_I2_1A"] = 0.15
     return e

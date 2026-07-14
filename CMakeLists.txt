@@ -13,8 +13,10 @@ find_package(OpenMP REQUIRED)
 # Все реализации в *.h, поэтому здесь только .cpp с main().
 add_executable(SynchrotronTracker   src/main.cpp)
 add_executable(SynchrotronOptimizer src/optimizer.cpp)
+add_executable(MatrixTracker        src/matrix_tracker_main.cpp)
+add_executable(MatrixOptimizer      src/matrix_optimizer_main.cpp)
 
-foreach(target SynchrotronTracker SynchrotronOptimizer)
+foreach(target SynchrotronTracker SynchrotronOptimizer MatrixTracker MatrixOptimizer)
     target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries     (${target} PUBLIC OpenMP::OpenMP_CXX)
 

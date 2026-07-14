@@ -1,0 +1,108 @@
+{
+  "_comment": [
+    "config 4 (SP1 + 50м drift, lattice 105) — НОВЫЙ режим LENS.",
+    "Окно скользит по ЛИНЗАМ (QP, DQ). Окно = lens_window_size линз + всё между",
+    "ними. В начало окна инжектируется СВЕЖИЙ ПРЯМОЙ пучок (центр на дизайн-орбите,",
+    "спутники ±inject_spread_m в локальной перпенд. плоскости, импульсы параллельны).",
+    "Старт из СЕРЕДИНЫ первой линзы окна; первое окно — из НАЧАЛА конфигурации,",
+    "последнее — финиш на ГЛОБАЛЬНОЙ плоскости. Loss локальный: position + parallelism",
+    "+ envelope_decay. Настройка — line-search в окрестности текущих токов линз.",
+    "Идея: каждая линза настраивается под прямой несжатый пучок (а не сжатый, который",
+    "линза не чувствует). Тюним токи QP и квад-обмотки DQ (DQ_I2); бенды/корректоры",
+    "не трогаем (они задают фикс. дизайн-орбиту). DQ в loss через I1 (I2/I3 искл.).",
+    "",
+    "Запуск:  python optimize.py workspace/optim_inputs/sp1_lens.json --method=lens"
+  ],
+  "experiment_id": 4,
+  "optimization_mode": "lens",
+  "lattice_id": 105,
+  "lattice_max_gid": 69,
+  "n_iterations": 20000,
+  "random_seed": 9001,
+  "kick_every": 0,
+  "kick_scale": 0.0,
+  "revert_after_kicks": 0,
+  "loss": {
+    "type": "orbit_avg",
+    "mode": "composite",
+    "magnet_sp_numbers": [
+      1
+    ],
+    "position_reference": "orbit",
+    "exclude_device_types": [
+      "SP_I2_1A"
+    ],
+    "extra_target_magnets": [],
+    "squared": true,
+    "comment": "LENS: локальный composite по магнитам окна = position(центры железа) + parallelism + envelope_decay. DQ через I1.",
+    "direction_loss": {
+      "reference": [
+        0.987688,
+        0.156434,
+        0.0
+      ],
+      "weight": 0.0
+    },
+    "envelope_loss": {
+      "_doc": "Старый betatron-envelope не используется (вместо него envelope_decay). Выключен.",
+      "weight": 0.0,
+      "polyline_mode": "arcs",
+      "arc_subdivide": 10
+    },
+    "max_weight": 0.0,
+    "interparticle_weight": 0.0,
+    "envelope_decay_weight": 1.0,
+    "parallelism_weight": 1.0
+  },
+  "parameter_groups": [],
+  "parameter_groups_per_position": [
+    {
+      "_comment": "ЛИНЗЫ (все фокусирующие): токи QP_L/QP_sh, квад-обмотки DQ (DQ_I2), секступоли SP_I1, октуполи OP. Бенды DP, DQ_I1, корректоры, замор. обмотки SP_I2/DQ_I3 НЕ тюним (фикс. дизайн-орбита).",
+      "enabled": true,
+      "file": "sp_elements.csv",
+      "sp_types": [
+        "standard"
+      ],
+      "include_device_types": [
+        "QP_L_1A",
+        "QP_sh_1A",
+        "DQ_I2_1A",
+        "SP_I1_1A",
+        "OP_1A"
+      ],
+      "value_column": "arg_val",
+      "step_abs": 0.05
+    }
+  ],
+  "plot_every": 1,
+  "per_element": {
+    "_doc": "LENS-режим: окно по линзам, свежий прямой пучок. Окна не по магнитам.",
+    "window_unit": "lens",
+    "lens_device_types": [
+      "QP",
+      "DQ",
+      "SP",
+      "OP"
+    ],
+    "lens_window_size": 4,
+    "inject_spread_m": 0.0002,
+    "loss_mode": "composite",
+    "search_mode": "line_search",
+    "line_search_points": 3,
+    "line_search_max_rounds": 12,
+    "line_search_min_rounds": 8,
+    "current_range": 100.0,
+    "coeff_range": 3.0,
+    "line_search_local_current": 10.0,
+    "line_search_local_coeff": 0.3,
+    "passes": 1,
+    "total_iters": 20000
+  },
+  "dynamic_loss": {
+    "_doc": "В line-search не применяется. Выключено.",
+    "enabled": false,
+    "amplitude": 0.7,
+    "period_iterations": 0
+  },
+  "max_particles": 0
+}

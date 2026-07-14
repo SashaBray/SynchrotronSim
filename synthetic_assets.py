@@ -20,13 +20,17 @@ FR = os.path.join("workspace", "fields_raw")
 HDR = 96                                                       # размер шапки .bin (как field_quality.HDR)
 
 
-def _write_bin(path, h, B):
-    """Запись карты в .bin формата проекта: <9d>(mnx..sz)+<3i>(nx,ny,nz), дополнено до HDR байт, + float64."""
+def _write_bin(path, h, B, nominal_arg=1.0):
+    """Запись карты в .bin формата C++ GridHeader (AnsysConverter.h), 96 байт:
+      <9d> minX,minY,minZ,maxX,maxY,maxZ,stepX,stepY,stepZ | <3i> nx,ny,nz | <4x> паддинг | <d> nominalArg.
+    КРИТИЧНО: nominalArg (ток снятия карты) на смещении 88 — C++ делит на него (currentScale=arg_val/
+    nominalArg); при 0 получается NaN. Для 1А-карт nominal_arg=1.0 (как у базовых)."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     mxy = h["mny"] + (h["ny"] - 1) * h["sy"]; mxz = h["mnz"] + (h["nz"] - 1) * h["sz"]
     hdr = (struct.pack("<9d", h["mnx"], h["mny"], h["mnz"], h["mxx"], mxy, mxz, h["sx"], h["sy"], h["sz"])
-           + struct.pack("<3i", int(h["nx"]), int(h["ny"]), int(h["nz"])))
-    hdr += b"\x00" * (HDR - len(hdr))                          # паддинг до HDR (96) байт
+           + struct.pack("<3i", int(h["nx"]), int(h["ny"]), int(h["nz"])))       # 84 байта
+    hdr += b"\x00" * (88 - len(hdr))                           # выравнивание double: паддинг до смещения 88
+    hdr += struct.pack("<d", float(nominal_arg))              # nominalArg на смещении 88 (как в C++ struct)
     with open(path, "wb") as f:
         f.write(hdr); f.write(np.ascontiguousarray(B, dtype="<f8").tobytes())
 
@@ -61,8 +65,19 @@ def gen_field_map(ref, nid, new_eff, ref_row, col):
         cb = 1.0 + dL / L_body if L_body > 1e-6 else 1.0
         cb = min(max(cb, 0.05), 20.0)
         h2, B2 = hy.resize(h, B, cb, 1.0, Xb)                  # тело ×c_body, фриндж сохранён
+        # ХРАНИМ ПОЛУКАРТОЙ X≥0 (как эталоны: use_symmetry=1). Карта симметрична относительно X=0
+        # (зеркалили полукарту → ресайз тела симметричен), поэтому C++ восстановит −половину зеркалом.
+        # Вдвое меньше диска и точное соответствие соглашению библиотеки.
+        xg2 = h2["mnx"] + np.arange(h2["nx"]) * h2["sx"]
+        k0 = int(np.searchsorted(xg2, -1e-9))                  # первый индекс X≥0
+        if 0 < k0 < h2["nx"]:
+            B2 = np.ascontiguousarray(B2[k0:, :, :, :])
+            h2 = dict(h2); h2["nx"] = B2.shape[0]
+            h2["mnx"] = float(xg2[k0]); h2["mxx"] = float(xg2[-1])
+        na = float(ref_row[col["nominal_arg"]]) if "nominal_arg" in col and ref_row[col["nominal_arg"]] \
+            not in ("", "-") else 1.0                          # ток снятия карты эталона (для currentScale)
         rel = f"synthetic/{nid}.bin"
-        _write_bin(os.path.join(FB, "synthetic", f"{nid}.bin"), h2, B2)
+        _write_bin(os.path.join(FB, "synthetic", f"{nid}.bin"), h2, B2, na)
         return rel
     except Exception as e:
         print(f"      [gen_field_map {nid}] пропуск: {type(e).__name__}: {e}")

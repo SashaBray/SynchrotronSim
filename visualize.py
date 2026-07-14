@@ -11,6 +11,10 @@ from collections import defaultdict
 # Единственная папка workspace лежит рядом с этим скриптом (в корне проекта).
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# [Прежняя .lte design-орбита (модуль design_orbit) в визуализаторе больше не
+#  используется -- опорной траекторией служит reference path (PATHPT, тёмно-серая
+#  линия). Импорт убран.]
+
 # Загрузка пользовательских настроек визуализатора (цвета, камера, прозрачность).
 VIZ_CONFIG_PATH = os.path.join(SCRIPT_DIR, "workspace", "configs", "visualizer.json")
 
@@ -46,6 +50,48 @@ def load_trajectories(bin_path):
     except Exception as e:
         print(f"Error reading binary file: {e}")
     return particles
+
+
+def load_reference_path_points(ws, exp_id):
+    """Читает PATHPT-точки опорного пути (composite_next) из .optimconfig того
+    эксперимента, чей experiment_id == exp_id. Это РОВНО те контрольные точки,
+    к которым оптимизатор подгонял траектории.
+
+    Возвращает ndarray (N,3) точек в ПУТЬ-ПОРЯДКЕ (сорт. по gid, затем по x вдоль
+    участка) -- чтобы их можно было соединить в линию-траекторию. Или None."""
+    import glob
+    inputs = os.path.join(ws, "optim_inputs")
+    for jpath in sorted(glob.glob(os.path.join(inputs, "*.json"))):
+        try:
+            with open(jpath, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception:
+            continue
+        if not isinstance(cfg, dict) or cfg.get("experiment_id") != exp_id:
+            continue
+        oc = jpath[:-5] + ".optimconfig"
+        if not os.path.exists(oc):
+            continue
+        rows = []  # (gid, x, y, z)
+        try:
+            with open(oc, encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("PATHPT "):
+                        p = line.split()
+                        # PATHPT <gid> <x> <y> <z> [weight]
+                        if len(p) >= 5:
+                            rows.append((int(p[1]), float(p[2]),
+                                         float(p[3]), float(p[4])))
+        except Exception as e:
+            print(f"  (reference path: ошибка чтения {oc}: {e})")
+            continue
+        if rows:
+            # Путь-порядок: gid возрастает вдоль орбиты; внутри gid точки идут
+            # по x (центр элемента, затем уплотнение сегмента после него).
+            rows.sort(key=lambda r: (r[0], r[1]))
+            return np.asarray([(x, y, z) for _g, x, y, z in rows],
+                              dtype=np.float64)
+    return None
 
 
 def build_combined_mesh(base, transforms_np):
@@ -202,6 +248,34 @@ def visualize(target_exp_id):
     print(f"  Built and added {len(grouped)} merged meshes "
           f"({total_polys:,} polygons total) in {time.time() - t0:.2f}s")
 
+    # 5.5 Опорный путь (reference path) -- ТЁМНО-СЕРАЯ линия -----------------
+    # Точки опорного пути (PATHPT) -- ровно те, к которым оптимизатор подгонял
+    # траектории (плотный путь: центры элементов + уплотнённые прямые + дрейф).
+    # Рисуем как ОПЦИОНАЛЬНУЮ тёмно-серую соединённую линию (точки в путь-порядке).
+    # Управляется секцией "reference_path" в visualizer.json (enabled/color/...).
+    # [Прежняя чёрная design-орбита из .lte больше не отображается -- не нужна.]
+    rp_cfg = VIZ_CFG.get("reference_path", {})
+    if rp_cfg.get("enabled", True):
+        t0 = time.time()
+        rpts = load_reference_path_points(ws, target_exp_id)
+        if rpts is not None and len(rpts) >= 2:
+            poly = pv.PolyData(np.asarray(rpts, dtype=np.float64))
+            n = len(rpts)
+            cells = np.full((1, n + 1), n, dtype=np.int_)
+            cells[0, 1:] = np.arange(n)
+            poly.lines = cells
+            plotter.add_mesh(
+                poly,
+                color=rp_cfg.get("color", "dimgray"),
+                line_width=int(rp_cfg.get("line_width", 3)),
+                opacity=float(rp_cfg.get("opacity", 0.9)),
+                label=f"Reference path ({n} pts)",
+            )
+            print(f"  Reference path: тёмно-серая линия {n} точек "
+                  f"в {time.time() - t0:.2f}s")
+        elif rpts is None:
+            print("  (reference path: PATHPT-точки не найдены в .optimconfig)")
+
     # 6. Траектории ------------------------------------------------------------
     t0 = time.time()
     bin_path = os.path.join(ws, "results", f"trajectories_exp{target_exp_id}.bin")
@@ -253,6 +327,8 @@ def visualize(target_exp_id):
     # Управляется "parallel_projection" в visualizer.json (default true).
     if cam.get("parallel_projection", True):
         plotter.enable_parallel_projection()
+        if cam.get("parallel_scale"):                     # полу-высота обзора (м); для вида всего кольца
+            plotter.camera.parallel_scale = float(cam["parallel_scale"])
 
     print(f"\nTotal scene preparation: {time.time() - t_start:.2f}s")
     print("--- Opening 3D window ---")

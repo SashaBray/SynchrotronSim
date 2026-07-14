@@ -4,31 +4,70 @@
     "Цвета и подписи 5 частиц должны соответствовать порядку строк в",
     "particle_groups.csv для активной экспериментальной группы (group_id)."
   ],
-
   "background": "white",
-
-  "particle_colors": ["magenta", "cyan", "lime", "yellow", "red"],
-  "particle_labels": ["P1 (ref)", "P2 (+Y)", "P3 (-Y)", "P4 (+Z)", "P5 (-Z)"],
-
+  "particle_colors": [
+    "magenta",
+    "cyan",
+    "lime",
+    "yellow",
+    "red"
+  ],
+  "particle_labels": [
+    "P1 (ref)",
+    "P2 (+Y)",
+    "P3 (-Y)",
+    "P4 (+Z)",
+    "P5 (-Z)"
+  ],
   "trajectory_line_width": 4,
-
   "lattice_opacity": {
     "EM": 0.25,
     "PM": 0.4
   },
-
+  "design_polyline": {
+    "_doc": [
+      "Опорная (расчётная) орбита -- собирается из БД сегментов",
+      "design_orbit_segments.csv, которая получается парсингом .lte",
+      "(скрипт lte_to_design_orbit.py). Это ИСТИННАЯ проектная траектория,",
+      "не зависит от геометрии железа в lattice_configs.csv.",
+      "points_per_segment: число точек на один элемент SP (drift/quadrupole/dipole).",
+      "                    Чем больше -- тем глаже дуги диполей.",
+      "enabled=false полностью отключает отрисовку."
+    ],
+    "enabled": true,
+    "points_per_segment": 10,
+    "color": "black",
+    "line_width": 2,
+    "opacity": 0.6
+  },
   "camera": {
     "_doc": "Начальная позиция камеры. focus = точка, на которую смотрит. position = откуда. up = направление вверх. Для верха обзора с +Z в плоскости X-Y лучше всего: up = [0, 1, 0]. parallel_projection=true отключает перспективное искажение (ортографическая проекция -- параллельные линии остаются параллельными).",
-    "focus":    [7.0, 0.5, 0.0],
-    "position": [7.0, 0.5, 15.0],
-    "up":       [0.0, 1.0, 0.0],
-    "parallel_projection": false
+    "_doc2": "Вид сверху на ВСЁ кольцо (плоскость X-Y, вниз вдоль Z). parallel_scale = полу-высота обзора в метрах (кольцо ~353м, центр Y=177). Для зума на инжекцию верни focus/position к [7,0.5,*] и parallel_scale ~2.",
+    "focus": [
+      0.0,
+      177.0,
+      0.0
+    ],
+    "position": [
+      0.0,
+      177.0,
+      120.0
+    ],
+    "up": [
+      0.0,
+      1.0,
+      0.0
+    ],
+    "parallel_projection": true,
+    "parallel_scale": 195.0
   },
-
   "live_visualizer": {
     "poll_interval_seconds": 0.5,
-    "loop_sleep_seconds":    0.05,
+    "loop_sleep_seconds": 0.05,
     "heartbeat_every_ticks": 60,
-    "manual_refresh_keys":   ["r", "u"]
+    "manual_refresh_keys": [
+      "r",
+      "u"
+    ]
   }
 }

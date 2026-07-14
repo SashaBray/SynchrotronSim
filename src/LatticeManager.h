@@ -178,6 +178,14 @@ private:
     // bucketGrid[bx * byN + by] = список индексов элементов
     std::vector<std::vector<int>> bucketGrid;
 
+    // Опциональная маска активных элементов. Используется per_element-режимом,
+    // чтобы временно «выключить» поле магнитов вне текущего окна без
+    // пересборки spatial index. Пустой вектор -> все элементы активны
+    // (старое поведение). Размер при использовании ДОЛЖЕН совпадать с
+    // elements.size(). НЕ thread-safe для записи; устанавливается ОДИН РАЗ
+    // перед параллельным циклом по частицам и сбрасывается ПОСЛЕ.
+    std::vector<bool> activeMask;
+
     static inline int floorDiv(double a, double b) {
         return (int)std::floor(a / b);
     }
@@ -249,9 +257,16 @@ public:
 
     void getTotalFields(const FieldVector& pos, FieldVector& B, FieldVector& E) const {
         B = {0,0,0}; E = {0,0,0};
+        const bool useMask = !activeMask.empty();
         if (!gridBuilt) {
             // Fallback: линейный цикл (для backward compat если индекс не построен).
-            for (const auto& el : elements) el.addContribution(pos, B, E);
+            if (useMask) {
+                for (size_t i = 0; i < elements.size(); ++i) {
+                    if (activeMask[i]) elements[i].addContribution(pos, B, E);
+                }
+            } else {
+                for (const auto& el : elements) el.addContribution(pos, B, E);
+            }
             return;
         }
         // Найти bucket текущей позиции.
@@ -259,10 +274,25 @@ public:
         int by = floorDiv(pos.y, bucketSize) - byMin;
         if (bx < 0 || bx >= bxN || by < 0 || by >= byN) return;
         const auto& bucket = bucketGrid[(size_t)bx * byN + by];
-        for (int idx : bucket) {
-            elements[idx].addContribution(pos, B, E);
+        if (useMask) {
+            for (int idx : bucket) {
+                if (activeMask[idx]) elements[idx].addContribution(pos, B, E);
+            }
+        } else {
+            for (int idx : bucket) elements[idx].addContribution(pos, B, E);
         }
     }
+
+    // ===== Управление маской активных элементов (для per_element-режима) =====
+    void setActiveMask(std::vector<bool> mask) {
+        if (!mask.empty() && mask.size() != elements.size()) {
+            // Несовпадение размера -> просто игнорируем (no-op), чтобы не падать.
+            return;
+        }
+        activeMask = std::move(mask);
+    }
+    void clearActiveMask() { activeMask.clear(); }
+    bool hasActiveMask() const { return !activeMask.empty(); }
 
     // Доступ к элементам для оптимизатора (мутирует currentScale/correctCoeff между итерациями).
     std::vector<MagneticElement>& elementsMut() { return elements; }

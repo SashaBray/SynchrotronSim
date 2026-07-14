@@ -60,3 +60,9 @@ ARCHITECTURE.md
 
 # Резервные копии вручную
 workspace/tables/sp_elements*копия*.csv
+
+# Локальный лабораторный журнал исследований (личные заметки)
+research_log/
+
+# Бэкапы БД (транзиентные)
+workspace/tables/backups/

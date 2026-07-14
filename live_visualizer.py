@@ -236,6 +236,8 @@ class LiveVisualizer:
         # Параллельная (ортографическая) проекция -- по умолчанию ВКЛ.
         if cam.get("parallel_projection", True):
             self.plotter.enable_parallel_projection()
+            if cam.get("parallel_scale"):                 # полу-высота обзора (м); вид всего кольца
+                self.plotter.camera.parallel_scale = float(cam["parallel_scale"])
 
         # 'r' в PyVista по умолчанию = "reset camera". Очищаем и вешаем своё.
         for key in MANUAL_KEYS:

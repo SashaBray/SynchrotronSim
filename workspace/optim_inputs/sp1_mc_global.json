@@ -1,0 +1,176 @@
+{
+  "_comment": [
+    "ГЛОБАЛЬНЫЙ MC (не окна): частицы летят всю конфиг, случайная оптимизация",
+    "каждого элемента, кики вкл. ±2мм спутники, 10к итераций, из нуля."
+  ],
+  "experiment_id": 4,
+  "optimization_mode": "global",
+  "global_search_mode": "line_search",
+  "gradient": {
+    "fd_method": "central",
+    "update_rule": "normalized_gd",
+    "n_iterations": 100,
+    "learning_rate": 0.1,
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_eps": 1e-08,
+    "fd_step_abs": 0.05,
+    "fd_step_percent": 0.005,
+    "max_halvings": 6
+  },
+  "n_iterations": 10000,
+  "random_seed": 9001,
+  "kick_every": 0,
+  "kick_scale": 0.0,
+  "revert_after_kicks": 0,
+  "lattice_max_gid": 69,
+  "loss": {
+    "type": "orbit_avg",
+    "mode": "composite",
+    "magnet_sp_numbers": [
+      1
+    ],
+    "position_reference": "orbit",
+    "exclude_device_types": [],
+    "extra_target_magnets": [
+      {
+        "_doc": "5 TARGET-точек вдоль 50м drift'а после SP1; шаг 10м, weight=30. Удерживают пучок на касательной yaw=9° до финиша."
+      },
+      {
+        "x": 37.498546,
+        "y": 3.738217,
+        "z": 0.0,
+        "weight": 1.0
+      },
+      {
+        "x": 47.37543,
+        "y": 5.302561,
+        "z": 0.0,
+        "weight": 1.0
+      },
+      {
+        "x": 57.252313,
+        "y": 6.866906,
+        "z": 0.0,
+        "weight": 1.0
+      },
+      {
+        "x": 67.129197,
+        "y": 8.431251,
+        "z": 0.0,
+        "weight": 1.0
+      },
+      {
+        "x": 77.00608,
+        "y": 9.995595,
+        "z": 0.0,
+        "weight": 1.0
+      }
+    ],
+    "squared": true,
+    "comment": "sum(d^2) по магнитам SP1: квадруполи QP, диполи DP_L_PM/DP_sh_PM, DQ (диполь-квадруполи, через обмотку I1; I2/I3 — дубли той же позиции, исключены чтобы не считать центр трижды), октуполи OP + 5 TARGET на drift'е. Все ненулевые веса = 1.",
+    "direction_loss": {
+      "_doc": [
+        "Угол между финальным импульсом и эталонным направлением.",
+        "reference = tangent при yaw=9° = (0.987688, 0.156434, 0).",
+        "weight=1 (раньше 1000)."
+      ],
+      "reference": [
+        0.987688,
+        0.156434,
+        0.0
+      ],
+      "weight": 1.0
+    },
+    "envelope_loss": {
+      "_doc": [
+        "Штраф за рост амплитуды бетатронных колебаний.",
+        "Loss_env = weight × Σ_спутников max(0, A_final - A_init)².",
+        "weight=1 (раньше 1e6)."
+      ],
+      "weight": 1.0,
+      "polyline_mode": "arcs",
+      "arc_subdivide": 10
+    },
+    "max_weight": 0.0
+  },
+  "parameter_groups": [],
+  "parameter_groups_per_position": [
+    {
+      "_comment": "Per-position ТОКИ (arg_val). Тюним квадруполи, секступоли, октуполи в SP1. Корректоры и DQ_I3, SP_I2 ЗАМОРОЖЕНЫ.",
+      "enabled": true,
+      "file": "sp_elements.csv",
+      "sp_types": [
+        "standard"
+      ],
+      "exclude_device_types": [
+        "DP_L_PM",
+        "DP_sh_PM",
+        "SP_I2_1A",
+        "DQ_I3_1A",
+        "corrector_I1_1A",
+        "corrector_I2_1A"
+      ],
+      "value_column": "arg_val",
+      "step_abs": 0.05
+    },
+    {
+      "_comment": "Постоянные магниты DP_L_PM, DP_sh_PM. У PM нет тока, тюним correct_coeff.",
+      "enabled": true,
+      "file": "sp_elements.csv",
+      "sp_types": [
+        "standard"
+      ],
+      "include_device_types": [
+        "DP_L_PM",
+        "DP_sh_PM"
+      ],
+      "value_column": "correct_coeff",
+      "step_percent": 0.025,
+      "name_suffix": "_coeff"
+    }
+  ],
+  "plot_every": 1,
+  "per_element": {
+    "_doc": [
+      "Скользящее окно по магнитам SP1. start_from_sp_start=true: пучок",
+      "стартует с (0,0,0) и проходит все магниты до окна (prefix-snapshot)."
+    ],
+    "window_size": 3,
+    "window_stride": 1,
+    "iters_per_window": 100,
+    "passes": 1,
+    "start_from_sp_start": true,
+    "path_only": false,
+    "path_weight": 0.0,
+    "path_sample_stride": 10,
+    "loss_mode": "composite_full",
+    "accumulate_groups": true,
+    "iters_per_param": 30,
+    "advance_mean_threshold_mm": 0.0,
+    "advance_max_iter_mult": 4,
+    "group_dipole_arrays": true,
+    "total_iters": 10000,
+    "iters_per_new": 100,
+    "line_search_points": 3,
+    "line_search_max_rounds": 12,
+    "line_search_local_current": 10.0,
+    "line_search_local_coeff": 0.3,
+    "current_range": 100.0,
+    "coeff_range": 3.0
+  },
+  "combined": {
+    "_doc": "Combined: чередование PE и MC.",
+    "cycles": 5,
+    "pe_passes_per_cycle": 2,
+    "mc_iters_per_cycle": 1000,
+    "mc_loss_mode": "composite"
+  },
+  "dynamic_loss": {
+    "_doc": "ВЫКЛ. В line-search не применяется (метод детерминирован).",
+    "enabled": false,
+    "amplitude": 0.7,
+    "period_iterations": 0
+  },
+  "max_particles": 0
+}

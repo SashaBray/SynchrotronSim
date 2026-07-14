@@ -138,6 +138,7 @@ int main(int argc, char* argv[]) {
     FieldVector fp1 = {5.0, -1.0, -1.0};
     FieldVector fp2 = {5.0,  1.0, -1.0};
     FieldVector fp3 = {5.0,  0.0,  1.0};
+    FieldVector fpDir = {0.0, 0.0, 0.0};   // направление пересечения (опц., колонки 15-17)
 
     for (auto& r : expData) {
         if (std::stoi(r[0]) == targetExpId) {
@@ -152,6 +153,9 @@ int main(int argc, char* argv[]) {
                 fp1 = {std::stod(r[6]),  std::stod(r[7]),  std::stod(r[8])};
                 fp2 = {std::stod(r[9]),  std::stod(r[10]), std::stod(r[11])};
                 fp3 = {std::stod(r[12]), std::stod(r[13]), std::stod(r[14])};
+            }
+            if (r.size() >= 18) {   // направление пересечения финиш-плоскости
+                fpDir = {std::stod(r[15]), std::stod(r[16]), std::stod(r[17])};
             }
             break;
         }
@@ -299,7 +303,7 @@ int main(int argc, char* argv[]) {
     // У каждой частицы СВОЯ FinishPlane (race-free, плюс per-particle skipSteps).
     std::vector<FinishPlane> planes(beam.size());
     for (size_t i = 0; i < beam.size(); ++i) {
-        planes[i].setup(fp1, fp2, fp3, startRef, maxTurns);
+        planes[i].setup(fp1, fp2, fp3, startRef, maxTurns, fpDir);
     }
     if (!planes.empty()) {
         std::cout << "Finish plane: p0=(" << planes[0].p0.x << "," << planes[0].p0.y << "," << planes[0].p0.z

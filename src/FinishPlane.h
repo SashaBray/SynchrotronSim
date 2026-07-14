@@ -26,9 +26,11 @@ struct FinishPlane {
     int callCount   = 0;
     double lastD    = 0.0;
     bool initialized = false;
+    bool forwardOnly = false;   // true -> срабатывать только при пересечении вдоль n
 
     void setup(const FieldVector& a, const FieldVector& b, const FieldVector& c,
-               const FieldVector& startPos, int skip = 0) {
+               const FieldVector& startPos, int skip = 0,
+               const FieldVector& dir = {0.0, 0.0, 0.0}) {
         p0 = a;
         double ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
         double vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
@@ -38,9 +40,20 @@ struct FinishPlane {
         double m  = std::sqrt(nx * nx + ny * ny + nz * nz);
         if (m > 1e-30) { nx /= m; ny /= m; nz /= m; }
         else           { nx = 1.0; ny = 0.0; nz = 0.0; }
-        // Нормаль выбирается так, чтобы startPos лежал на отрицательной стороне.
-        double sd = (startPos.x - a.x) * nx + (startPos.y - a.y) * ny + (startPos.z - a.z) * nz;
-        if (sd > 0.0) { nx = -nx; ny = -ny; nz = -nz; }
+        // Ориентация нормали:
+        //   dir задан  -> вдоль НАПРАВЛЕНИЯ пересечения (n·dir>0), forwardOnly=true:
+        //                 срабатываем ТОЛЬКО при прямом пересечении (вход в +полупр-во).
+        //   dir = 0    -> как раньше: startPos на отрицательной стороне, обе стороны.
+        double dmag2 = dir.x*dir.x + dir.y*dir.y + dir.z*dir.z;
+        if (dmag2 > 1e-30) {
+            double nd = nx*dir.x + ny*dir.y + nz*dir.z;
+            if (nd < 0.0) { nx = -nx; ny = -ny; nz = -nz; }
+            forwardOnly = true;
+        } else {
+            double sd = (startPos.x - a.x) * nx + (startPos.y - a.y) * ny + (startPos.z - a.z) * nz;
+            if (sd > 0.0) { nx = -nx; ny = -ny; nz = -nz; }
+            forwardOnly = false;
+        }
         n = {nx, ny, nz};
         skipSteps    = skip;
         callCount    = 0;
@@ -56,7 +69,9 @@ struct FinishPlane {
             lastD = d;
             return false;
         }
-        bool crossed = (lastD < 0.0 && d >= 0.0) || (lastD >= 0.0 && d < 0.0);
+        bool crossed = forwardOnly
+            ? (lastD < 0.0 && d >= 0.0)                                  // только прямое
+            : ((lastD < 0.0 && d >= 0.0) || (lastD >= 0.0 && d < 0.0));  // обе стороны
         lastD = d;
         return crossed;
     }
