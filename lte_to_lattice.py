@@ -37,6 +37,8 @@ import csv
 import json
 import math
 import sys
+import argparse
+import synthetic_library                     # авто-добавление синтетических элементов под L_eff из LTE
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WS = os.path.join(SCRIPT_DIR, "workspace")
@@ -386,6 +388,14 @@ def is_sp_start(line_names, i):
 # ---------------------------------------------------------------------------
 
 def main():
+    ap = argparse.ArgumentParser(description="LTE → таблицы решётки + авто-добавление синтетических элементов")
+    ap.add_argument("--tol-mm", type=float, default=1.0, help="допуск совпадения L_eff (мм); иначе создаётся синтетика")
+    ap.add_argument("--gen-assets", action="store_true", help="генерировать синтетические карты .fld и STL масштабированием эталона")
+    args = ap.parse_args()
+    lib = synthetic_library.LibraryManager(tol_m=args.tol_mm / 1000.0, gen_assets=args.gen_assets)
+    print(f"Библиотека элементов: допуск L_eff = {args.tol_mm} мм, "
+          f"генерация активов = {'ДА' if args.gen_assets else 'нет (флаг --gen-assets)'}")
+
     print(f"Reading {LTE_DESC}")
     devices = parse_desc(LTE_DESC)
     print(f"  parsed {len(devices)} device definitions")
@@ -504,6 +514,11 @@ def main():
         hw_list = map_to_hw(dev)
         if not hw_list:
             continue  # дрифт / BPM / skip
+        # Авто-добавление синтетических элементов под требуемую L_eff из LTE (столбец L элемента).
+        # Если в библиотеке нет элемента этого типа с такой L_eff — создаётся синтетический (масштаб эталона).
+        _refs = [h[0] for h in hw_list]
+        _actual = lib.resolve(_refs, dev.get("L", 0.0))
+        hw_list = list(zip(_actual, [h[1] for h in hw_list]))
 
         # Определяем тип SP по первому магниту в нём
         if current_sp_type is None:
@@ -576,6 +591,13 @@ def main():
           f"{len(sp_templates)} SP type(s))")
     write_lattice_layout_csv(layout_rows, OUT_LATTICE_LAYOUT)
     print(f"Wrote {OUT_LATTICE_LAYOUT}  ({len(layout_rows)} rows)")
+
+    n_syn = lib.save()
+    if n_syn:
+        print(f"\nБиблиотека: добавлено {n_syn} СИНТЕТИЧЕСКИХ элементов (synthetic=True) под L_eff из LTE.")
+        print(f"  Матричная модель работает по L_eff сразу; для дифф. модели/визуализации: перезапуск с --gen-assets.")
+    else:
+        print(f"\nБиблиотека: все элементы LTE совпали с существующими (синтетика не потребовалась).")
     print(f"\nNext: run assemble_lattice_configs.py to produce lattice_configs.csv")
 
 
