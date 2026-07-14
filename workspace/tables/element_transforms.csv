@@ -1,0 +1,14 @@
+device_type_id;kind;active_coeffs;model;n_slices;notes
+QP_L_1A;quad;k1;canonical;1;квадруполь длинный
+QP_sh_1A;quad;k1;canonical;1;квадруполь короткий
+SP_I1_1A;sext;k2;canonical;1;секступоль, обмотка I1
+SP_I2_1A;sext;k2;canonical;1;секступоль, обмотка I2
+OP_1A;oct;k3;canonical;1;октуполь
+DQ_I1_1A;dq;theta_y|k1|k2;composite;40;диполь-квадруполь combined, обмотка I1
+DQ_I2_1A;dq;theta_y|k1|k2;composite;40;диполь-квадруполь combined, обмотка I2
+DQ_I3_1A;dq;theta_y|k1|k2;composite;40;диполь-квадруполь combined, обмотка I3
+DP_L_PM;dipole;theta_y;canonical;1;поворотный ПМ длинный
+DP_sh_PM;dipole;theta_y;canonical;1;поворотный ПМ короткий
+corrector_I1_1A;kicker;kick_y;canonical;1;корректор гориз. (ЖДЁТ характеризации)
+corrector_I2_1A;kicker;kick_z;canonical;1;корректор верт. (ЖДЁТ характеризации)
+BPM;monitor;;none;1;датчик положения пучка: пропускает частицы без преобразования, регистрирует средний центроид
