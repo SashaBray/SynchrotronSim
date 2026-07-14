@@ -74,14 +74,16 @@ class LibraryManager:
         i = self.i; row = list(self.hw[ref]); row[0] = nid
         row[i["eff_length"]] = f"{new_eff:.4f}"
         row[i["phys_length"]] = f"{self.phys(ref) + (new_eff - self.eff(ref)):.4f}"
-        row[i["map_bin_path"]] = "-"
+        row[i["map_bin_path"]] = "-"; row[i["map_raw_path"]] = "-"   # без карты: матр. модель работает по L_eff
         row[i["synthetic"]] = "True"; row[i["scaled_from"]] = ref
-        if self.gen_assets:
+        if self.gen_assets:                              # флаг --gen-assets: синтетические карта .bin и STL
             import synthetic_assets as sa
-            row[i["map_raw_path"]] = sa.gen_field_map(ref, nid, new_eff, self.hw[ref], i) or "-"
-            row[i["stl_path"]] = sa.gen_stl(ref, nid, new_eff, self.hw[ref], i) or "-"
-        else:
-            row[i["map_raw_path"]] = "-"                  # без карты: матр. модель работает по L_eff
+            binp = sa.gen_field_map(ref, nid, new_eff, self.hw[ref], i)
+            if binp:
+                row[i["map_bin_path"]] = binp
+            stlp = sa.gen_stl(ref, nid, new_eff, self.hw[ref], i)
+            if stlp:
+                row[i["stl_path"]] = stlp                # синтетическая 3D-модель (иначе — STL эталона)
         self.hw[nid] = row; self.hw_rows.append(row)
         if ref in self.tr:                                # element_transforms: копия kind/model
             tr = list(self.tr[ref]); tr[0] = nid
