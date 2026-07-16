@@ -10,11 +10,15 @@
 Режим 2 гоняет пучок глобальным треком от плоскости инжекции и обратно в неё (полный круг), режим 1
 — C++ бинарником с финиш-плоскостью, поставленной в плоскость инжекции.
 
-Запуск:  python track3.py --mode kick-phys --lattice 101 --group 1
-         python track3.py --mode diff --lattice 101 --group 1 --exp 44
+Установка+пучок+финиш-плоскость берутся из experiments.csv[exp] (ЕДИНЫЙ конфиг эксперимента для обоих ядер).
+
+Запуск:  python track3.py --mode kick-phys --exp 44        (установка/пучок — из experiments.csv[44])
+         python track3.py --mode diff --exp 44
+         python track3.py --mode kick-phys --exp 99 --lattice 101 --group 1   (создать/переопределить эксперимент)
 """
 import os
 import sys
+import csv
 import argparse
 import subprocess
 import numpy as np
@@ -53,11 +57,11 @@ def run_kick(lattice, group, source, exp_id=None):
                 after=info["after_elem"], before=info["before_elem"])
 
 
-def setup_diff_experiment(lattice, group, exp_id, dt=1e-11, skip_steps=300000):
-    """Записать эксперимент для C++ диффур-трекера: финиш-плоскость = плоскость инжекции пучка.
-    skip_steps (колонка max_turns, перепрофилирована в C++ как «пропустить N шагов до проверки
-    плоскости») — пропускает старт (пучок на плоскости) и противоположное пересечение кольца,
-    ловит только ВОЗВРАТ (полный оборот ≈ 3.7e5 шагов при dt=1e-11)."""
+def author_experiment(lattice, group, exp_id, dt=1e-11, skip_steps=300000):
+    """АВТОРИНГ конфига эксперимента в experiments.csv (установка+пучок+финиш-плоскость) — ЕДИНЫЙ
+    источник, который читают ОБА ядра. Финиш-плоскость = плоскость инжекции пучка (полный оборот).
+    skip_steps (max_turns, перепрофилир. в C++ как «пропустить N шагов до проверки плоскости») —
+    пропускает старт и противоположное пересечение, ловит ВОЗВРАТ (≈3.7e5 шагов при dt=1e-11)."""
     plane, ordered, states, info = bi.inject(lattice, group)     # source не важен для геометрии плоскости
     c = plane.center; u = plane.uhat; v = plane.vhat; ax = plane.axis
     p1 = c + 1.0 * u + 1.0 * v; p2 = c - 1.0 * u + 1.0 * v; p3 = c + 0.0 * u - 1.0 * v  # 3 точки плоскости
@@ -76,9 +80,21 @@ def setup_diff_experiment(lattice, group, exp_id, dt=1e-11, skip_steps=300000):
     return info
 
 
+def load_experiment(exp_id):
+    """experiments.csv[exp_id] → (lattice_id, group_id) или (None, None). ЕДИНЫЙ конфиг эксперимента
+    (установка+пучок+финиш-плоскость), который читают ОБА ядра."""
+    path = os.path.join(TB, "experiments.csv")
+    if not os.path.exists(path):
+        return None, None
+    for r in csv.DictReader(open(path, encoding="utf-8"), delimiter=";"):
+        if r.get("exp_id") == str(exp_id):
+            return int(r["lattice_id"]), int(r["group_id"])
+    return None, None
+
+
 def run_diff(lattice, group, exp_id):
     """Режим 1: C++ диффур-трекер по картам поля, полный оборот до плоскости инжекции."""
-    info = setup_diff_experiment(lattice, group, exp_id)
+    info = author_experiment(lattice, group, exp_id)
     exe = os.path.join("build", "SynchrotronTracker.exe")
     if not os.path.exists(exe):
         exe = os.path.join("build", "Release", "SynchrotronTracker.exe")
@@ -113,19 +129,28 @@ def _load_trajs(path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", required=True, choices=["diff", "kick-phys"])
-    ap.add_argument("--lattice", type=int, default=101)
-    ap.add_argument("--group", type=int, default=1)
-    ap.add_argument("--exp", type=int, default=44)
+    ap.add_argument("--exp", type=int, required=True, help="id эксперимента в experiments.csv (установка+пучок+финиш-плоскость)")
+    ap.add_argument("--lattice", type=int, default=None, help="переопределить установку (иначе — из experiments.csv[exp])")
+    ap.add_argument("--group", type=int, default=None, help="переопределить пучок (иначе — из experiments.csv[exp])")
     a = ap.parse_args()
 
-    print(f"=== SynchrotronSim: трекинг, режим '{a.mode}', решётка {a.lattice}, группа {a.group} ===")
+    # ЕДИНЫЙ ИСТОЧНИК: установка+пучок берутся из experiments.csv[exp]; --lattice/--group переопределяют
+    # (и создают новую строку, если эксперимента ещё нет). Оба ядра стартуют из ОДНОГО конфига.
+    lat_db, grp_db = load_experiment(a.exp)
+    lattice = a.lattice if a.lattice is not None else lat_db
+    group = a.group if a.group is not None else grp_db
+    if lattice is None or group is None:
+        ap.error(f"эксперимент {a.exp} не найден в experiments.csv — задайте --lattice и --group, чтобы создать его")
+
+    print(f"=== SynchrotronSim: трекинг, режим '{a.mode}', эксперимент {a.exp} (установка {lattice}, пучок {group}) ===")
     if a.mode == "diff":
-        res = run_diff(a.lattice, a.group, a.exp)
+        res = run_diff(lattice, group, a.exp)
         s = res["survived"]
         print(f"\nРежим 1 (диффур): выжило {s if s is not None else '?'} частиц "
               f"(плоскость '{res['info']['after_elem']}'→'{res['info']['before_elem']}').")
     else:
-        res = run_kick(a.lattice, a.group, "physical", exp_id=a.exp)
+        author_experiment(lattice, group, a.exp)   # записать/обновить конфиг (плоскость=инжекция) — чтобы оба ядра читали одно
+        res = run_kick(lattice, group, "physical", exp_id=a.exp)
         rr = res["residuals"]
         print(f"\nРежим 2 ({a.mode}): выжило {res['survived']}/{res['n']} "
               f"частиц полный оборот.")
