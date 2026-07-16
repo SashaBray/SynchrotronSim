@@ -55,21 +55,41 @@ class MagnetEndpoints:
 # ---------------------------------------------------------------------------
 # Загрузка БД
 # ---------------------------------------------------------------------------
-def load_segments_db(ws: Path | None = None) -> dict[str, list[Segment]]:
-    """Читает workspace/tables/design_orbit_segments.csv."""
+def _main_lattice_id(ws: Path | None = None) -> int:
+    """lattice_id ГЛАВНОЙ конфигурации установки из lte_mapping.json (fallback 101)."""
+    ws = ws or workspace_dir()
+    p = ws / "configs" / "lte_mapping.json"
+    try:
+        return int(json.loads(p.read_text(encoding="utf-8")).get("lattice_id", 101))
+    except Exception:
+        return 101
+
+
+def load_segments_db(ws: Path | None = None, lattice_id: int | None = None) -> dict[str, list[Segment]]:
+    """Читает workspace/tables/design_orbit_segments.csv. Опорная орбита ПРИВЯЗАНА К УСТАНОВКЕ
+    (столбец lattice_id). Если задан lattice_id — берём сегменты ТОЙ установки; суб-решётки/произв.,
+    которых нет в таблице, падают на ГЛАВНУЮ конфигурацию (lte_mapping.lattice_id). Без lattice_id
+    или без столбца — все строки (обратная совместимость)."""
     ws = ws or workspace_dir()
     path = ws / "tables" / "design_orbit_segments.csv"
+    rows = list(csv.DictReader(open(path, encoding="utf-8"), delimiter=";"))
+    base = None
+    if lattice_id is not None and rows and "lattice_id" in rows[0]:
+        present = {int(r["lattice_id"]) for r in rows if (r.get("lattice_id") or "").strip()}
+        if present:
+            main = _main_lattice_id(ws)
+            base = lattice_id if lattice_id in present else (main if main in present else min(present))
     db: dict[str, list[tuple[int, Segment]]] = {}
-    with open(path, encoding="utf-8") as f:
-        reader = csv.DictReader(f, delimiter=";")
-        for row in reader:
-            sp_type = row["sp_type"].strip()
-            idx     = int(row["seg_idx"])
-            seg = Segment(kind=row["kind"].strip(),
-                          length=float(row["length"]),
-                          angle=float(row["angle"]),
-                          lte_name=row.get("lte_name", "").strip())
-            db.setdefault(sp_type, []).append((idx, seg))
+    for row in rows:
+        if base is not None and int((row.get("lattice_id") or "-1").strip() or "-1") != base:
+            continue
+        sp_type = row["sp_type"].strip()
+        idx     = int(row["seg_idx"])
+        seg = Segment(kind=row["kind"].strip(),
+                      length=float(row["length"]),
+                      angle=float(row["angle"]),
+                      lte_name=row.get("lte_name", "").strip())
+        db.setdefault(sp_type, []).append((idx, seg))
     # Сортируем по seg_idx, оставляем только сегменты
     return {t: [s for _, s in sorted(lst, key=lambda p: p[0])]
             for t, lst in db.items()}
@@ -205,7 +225,7 @@ def compute_magnet_endpoints(lattice_id: int,
     # для map_to_hw — которому close_scale неважен (он смотрит на L, K1, K2).
 
     seq = sp_sequence_for_lattice(lattice_id, ws)
-    db  = load_segments_db(ws)
+    db  = load_segments_db(ws, lattice_id)
 
     out: list[MagnetEndpoints] = []
     x, y, yaw = 0.0, 0.0, 0.0
@@ -279,7 +299,7 @@ def build_orbit_for_lattice(lattice_id: int,
     """Шорткат: загрузить БД + последовательность SP для lattice_id, собрать орбиту."""
     ws = workspace or workspace_dir()
     seq = sp_sequence_for_lattice(lattice_id, ws)
-    db  = load_segments_db(ws)
+    db  = load_segments_db(ws, lattice_id)
     return build_orbit(seq, db, points_per_segment=points_per_segment)
 
 

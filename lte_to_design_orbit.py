@@ -44,6 +44,7 @@ def main() -> None:
     desc_path = ws / "lte" / "SYLA_desc.lte"
     line_path = ws / "lte" / "SYLA_line.lte"
     out_path  = ws / "tables" / "design_orbit_segments.csv"
+    lattice_id = int(getattr(lte, "_CFG", {}).get("lattice_id", 101))   # опорная орбита ПРИВЯЗАНА к установке
 
     print(f"Reading {desc_path}")
     devices = lte.parse_desc(str(desc_path))
@@ -166,10 +167,10 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f, delimiter=";", lineterminator="\n")
-        w.writerow(["sp_type", "seg_idx", "kind", "length", "angle", "lte_name"])
+        w.writerow(["lattice_id", "sp_type", "seg_idx", "kind", "length", "angle", "lte_name"])
         for sp_type, segs in sp_segments.items():
             for idx, (kind, L, A, lte_name) in enumerate(segs):
-                w.writerow([sp_type, idx, kind, f"{L:.10f}", f"{A:.10f}", lte_name])
+                w.writerow([lattice_id, sp_type, idx, kind, f"{L:.10f}", f"{A:.10f}", lte_name])
     print(f"\nWrote {out_path}")
 
 
