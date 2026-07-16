@@ -175,7 +175,7 @@ def build_mapping(lattice_id=105, verbose=True):
     return res
 
 
-def build_mapping_full(lattice_id=101, verbose=True):
+def build_mapping_full(lattice_id=1, verbose=True):
     """Warm-start ВСЕГО кольца (реш. 101, 38 SP + junction): проектные K из полной линии .lte на каждую
     сгруппированную группу магнитов. Возвращает список dict по всем группам кольца (в порядке)."""
     desc = parse_desc(); eff = load_eff()

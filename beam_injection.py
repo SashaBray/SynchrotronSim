@@ -155,7 +155,7 @@ def track_turn(plane, ordered, states):
 
 if __name__ == "__main__":
     import sys
-    lat = int(sys.argv[1]) if len(sys.argv) > 1 else 101
+    lat = int(sys.argv[1]) if len(sys.argv) > 1 else 1
     gid = int(sys.argv[2]) if len(sys.argv) > 2 else 1
     plane, ordered, states, info = inject(lat, gid)
     print(f"Группа {gid}, решётка {lat}: {info['nparts']} частиц, плоскость КОМПЛАНАРНА ✓")

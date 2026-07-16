@@ -17,7 +17,7 @@ PLAN = {1: (23, 118, True),  2: (24, 108, False), 3: (25, 109, False), 4: (26, 1
         5: (27, 119, True),  6: (28, 120, True),  7: (29, 121, True),
         8: (30, 122, True),  9: (31, 123, True),  10: (32, 124, True)}
 
-eps, _ = do.compute_magnet_endpoints(101)
+eps, _ = do.compute_magnet_endpoints(1)
 by = {e.global_id: e for e in eps}
 tmpl = json.loads((WS / "optim_inputs" / "sp_3sp_drift.json").read_text(encoding="utf-8"))
 

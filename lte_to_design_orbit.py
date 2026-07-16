@@ -44,7 +44,7 @@ def main() -> None:
     desc_path = ws / "lte" / "SYLA_desc.lte"
     line_path = ws / "lte" / "SYLA_line.lte"
     out_path  = ws / "tables" / "design_orbit_segments.csv"
-    lattice_id = int(getattr(lte, "_CFG", {}).get("lattice_id", 101))   # опорная орбита ПРИВЯЗАНА к установке
+    lattice_id = int(getattr(lte, "_CFG", {}).get("lattice_id", 1))   # опорная орбита ПРИВЯЗАНА к установке
 
     print(f"Reading {desc_path}")
     devices = lte.parse_desc(str(desc_path))

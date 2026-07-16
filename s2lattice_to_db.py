@@ -11,7 +11,7 @@ import synthetic_assets as sa                                  # gen_stl: мас
 
 TB = os.path.join("workspace", "tables")
 LTE = os.path.join("workspace", "lte", "configuration_v3_syberia", "s2lattice.lte")
-LAT_ID, EXP_ID, GROUP = "200", "200", "1"
+LAT_ID, EXP_ID, GROUP = "2", "200", "1"
 PFX = "s2_"
 MAGKIND = {"KQUAD": "quad", "KSEXT": "sext", "KOCT": "oct", "CSBEND": "dipole"}
 ACTIVE = {"quad": "k1", "sext": "k2", "oct": "k3", "dipole": "theta_y"}
@@ -144,7 +144,7 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="импорт стороннего .lte (PyAT/elegant) → решётка БД")
     ap.add_argument("--lte", default=None, help="путь к .lte (по умолч. configuration_v3_syberia/s2lattice.lte)")
-    ap.add_argument("--lattice", default=None, help="id решётки (по умолч. 200)")
+    ap.add_argument("--lattice", default=None, help="id решётки (по умолч. 2)")
     ap.add_argument("--exp", default=None, help="id эксперимента (по умолч. = id решётки)")
     a = ap.parse_args()
     run(lte_path=a.lte, lat_id=a.lattice, exp_id=a.exp)

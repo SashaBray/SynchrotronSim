@@ -274,7 +274,7 @@ def record_bpm(lattice_id, particles, id_exp, source="physical", n_turns=1, conf
 
 if __name__ == "__main__":
     import sys
-    lat = int(sys.argv[1]) if len(sys.argv) > 1 else 101
+    lat = int(sys.argv[1]) if len(sys.argv) > 1 else 1
     lo = int(sys.argv[2]) if len(sys.argv) > 2 else 0
     hi = int(sys.argv[3]) if len(sys.argv) > 3 else 12
     src = sys.argv[4] if len(sys.argv) > 4 else "physical"     # physical | current

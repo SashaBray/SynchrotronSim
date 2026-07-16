@@ -31,9 +31,9 @@ CONFIG_PATH    = os.path.join(WS, "configs", "lte_mapping.json")
 
 def _load_lattice_id():
     if not os.path.exists(CONFIG_PATH):
-        return 101  # fallback для совместимости
+        return 1  # fallback для совместимости
     with open(CONFIG_PATH, encoding="utf-8") as f:
-        return int(json.load(f).get("lattice_id", 101))
+        return int(json.load(f).get("lattice_id", 1))
 
 LATTICE_ID = _load_lattice_id()
 

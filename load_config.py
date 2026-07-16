@@ -17,7 +17,7 @@
 Запуск:
   py -3.14 load_config.py --list
   py -3.14 load_config.py --config v1 [--gen-assets] [--force] [--parse-only]
-  py -3.14 load_config.py --config syberia [--lattice 200]
+  py -3.14 load_config.py --config syberia [--lattice 2]
 """
 import os, sys, csv, glob, json, re, shutil, subprocess, argparse
 
@@ -67,9 +67,9 @@ def resolve(name, configs):
 
 def sila_lattice_id():
     try:
-        return int(json.load(open(MAPPING, encoding="utf-8")).get("lattice_id", 101))
+        return int(json.load(open(MAPPING, encoding="utf-8")).get("lattice_id", 1))
     except (OSError, ValueError):
-        return 101
+        return 1
 
 
 def lattice_exists(lat_id):
@@ -118,7 +118,7 @@ def load(cfg, lattice, exp, gen_assets, parse_only, force):
         return lat
 
     # flat (PyAT/elegant) — self-contained one-shot
-    lat = str(lattice or 200)
+    lat = str(lattice or 2)
     ex = str(exp or lat)
     if lattice_exists(lat) and not force:
         raise SystemExit(f"[защита] решётка {lat} уже есть в БД. Повтори с --force для перезаписи.")

@@ -9,7 +9,7 @@ junction/инжектор — уникальные ручки на каждый 
         (вместо '|'-списка в ячейке; связь один-ко-многим нормализована).
 coeff ∈ G|S|O ; init — проектное значение из warm-start.
 
-Запуск: py -3.14 build_knobmap.py [lattice=101]
+Запуск: py -3.14 build_knobmap.py [lattice=1]
 """
 import os, sys, csv
 import matrix_tracker as mt
@@ -32,7 +32,7 @@ def _load_tune():
     return out
 
 
-def build_knobmap(lattice=101):
+def build_knobmap(lattice=1):
     grp = ws.grouped_magnets(lattice)
     mapping = ws.build_mapping_full(lattice, verbose=False)
     tune = _load_tune()
@@ -83,4 +83,4 @@ def build_knobmap(lattice=101):
 
 
 if __name__ == "__main__":
-    build_knobmap(int(sys.argv[1]) if len(sys.argv) > 1 else 101)
+    build_knobmap(int(sys.argv[1]) if len(sys.argv) > 1 else 1)

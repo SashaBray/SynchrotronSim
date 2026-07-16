@@ -7,7 +7,7 @@ lattice_layout: ключ (sp_type, sp_element_id) → (device_type_id, arg_val, 
 live_visualizer стартовал с актуальных (близких к проектным) токов, а не заглушек 1.0.
 
 Токи ОБЩИЕ на все SP ⇒ у всех инстансов одного (sp_type, sp_element_id) значения должны совпадать
-(проверяем; при расхождении берём медиану по arg_val и предупреждаем). Запуск: python sync_sp_elements.py [lattice=101]"""
+(проверяем; при расхождении берём медиану по arg_val и предупреждаем). Запуск: python sync_sp_elements.py [lattice=1]"""
 import os
 import sys
 import csv
@@ -17,7 +17,7 @@ from collections import defaultdict
 TB = os.path.join("workspace", "tables")
 
 
-def main(lattice=101):
+def main(lattice=1):
     layout = os.path.join(TB, "lattice_layout.csv")
     lc = os.path.join(TB, "lattice_configs.csv")
     sp = os.path.join(TB, "sp_elements.csv")
@@ -90,4 +90,4 @@ def main(lattice=101):
 
 
 if __name__ == "__main__":
-    main(int(sys.argv[1]) if len(sys.argv) > 1 else 101)
+    main(int(sys.argv[1]) if len(sys.argv) > 1 else 1)

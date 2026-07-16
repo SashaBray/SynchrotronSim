@@ -56,13 +56,13 @@ class MagnetEndpoints:
 # Загрузка БД
 # ---------------------------------------------------------------------------
 def _main_lattice_id(ws: Path | None = None) -> int:
-    """lattice_id ГЛАВНОЙ конфигурации установки из lte_mapping.json (fallback 101)."""
+    """lattice_id ГЛАВНОЙ конфигурации установки из lte_mapping.json (fallback 1)."""
     ws = ws or workspace_dir()
     p = ws / "configs" / "lte_mapping.json"
     try:
-        return int(json.loads(p.read_text(encoding="utf-8")).get("lattice_id", 101))
+        return int(json.loads(p.read_text(encoding="utf-8")).get("lattice_id", 1))
     except Exception:
-        return 101
+        return 1
 
 
 def load_segments_db(ws: Path | None = None, lattice_id: int | None = None) -> dict[str, list[Segment]]:
@@ -114,7 +114,7 @@ def sp_sequence_for_lattice(lattice_id: int,
                             ws: Path | None = None) -> list[tuple[int, str]]:
     """Возвращает [(sp_number, sp_type), ...] по lattice_layout.csv,
     отфильтровав по max_gid из sub_lattices.json (для sub-lattice).
-    Главный lattice = 101 не имеет ограничения -- берём все SP.
+    Главный lattice = 1 не имеет ограничения -- берём все SP.
     """
     ws = ws or workspace_dir()
     layout_path = ws / "tables" / "lattice_layout.csv"

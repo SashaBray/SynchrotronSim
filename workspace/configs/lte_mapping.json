@@ -5,7 +5,7 @@
     "в device_type_id из hardware_library.csv, а также параметры разбора кольца",
     "на супериоды и геометрию straightening для DL/JL семейств."
   ],
-  "lattice_id": 101,
+  "lattice_id": 1,
   "sp_type_by_first_element": {
     "_doc": "По имени первого магнита SP определяется sp_type. Fallback: имя самого элемента.",
     "QF1A": "standard",

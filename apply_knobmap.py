@@ -2,7 +2,7 @@
 """Применить настроенные C++-оптимизатором ручки (matrix_tune_result.csv) к mat_* решётки в
 lattice_configs. Читает knob-map (matrix_knobs + matrix_knob_members) и значения; для каждой
 ручки пишет mat_G/S/O в ПЕРВУЮ обмотку каждой управляемой группы. Изгибы (mat_B) не трогаются
-(заданы warm-start геометрией). Бэкап сохраняется. Запуск: py -3.14 apply_knobmap.py [lattice=101]"""
+(заданы warm-start геометрией). Бэкап сохраняется. Запуск: py -3.14 apply_knobmap.py [lattice=1]"""
 import os, sys, csv, shutil
 import matrix_tracker as mt
 import lte_warmstart as ws
@@ -11,7 +11,7 @@ TB = mt.TB
 MATCOL = {"G": "mat_G", "S": "mat_S", "O": "mat_O"}
 
 
-def apply(lattice=101):
+def apply(lattice=1):
     knobrows = list(csv.DictReader(open(os.path.join(TB, "matrix_knobs.csv"), encoding="utf-8"), delimiter=";"))
     members = {}                                          # дочерняя таблица: knob_id → [индексы магнитов]
     for r in csv.DictReader(open(os.path.join(TB, "matrix_knob_members.csv"), encoding="utf-8"), delimiter=";"):
@@ -39,4 +39,4 @@ def apply(lattice=101):
 
 
 if __name__ == "__main__":
-    apply(int(sys.argv[1]) if len(sys.argv) > 1 else 101)
+    apply(int(sys.argv[1]) if len(sys.argv) > 1 else 1)

@@ -14,7 +14,7 @@
 
 Запуск:  python track3.py --mode kick-phys --exp 44        (установка/пучок — из experiments.csv[44])
          python track3.py --mode diff --exp 44
-         python track3.py --mode kick-phys --exp 99 --lattice 101 --group 1   (создать/переопределить эксперимент)
+         python track3.py --mode kick-phys --exp 99 --lattice 1 --group 1   (создать/переопределить эксперимент)
 """
 import os
 import sys
