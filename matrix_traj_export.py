@@ -47,7 +47,7 @@ def body_global(m, st):
             st = mt._drift((x, px, y, py, t, d), ds_i / 2.0); s += ds_i / 2.0
             pts.append(_g(m, s, st[0], st[2]))
         return st, pts
-    N = m.nsl if m.model == "composite" else 40
+    N = m.nsl
     dsg = m.L / N; dsf = m.Leff / N; th, k1, k2, k3 = m.theta0, m.k1, m.k2, m.k3
     s = 0.0; pts = [_g(m, s, x, y)]; st = (x, px, y, py, t, d)
     for _ in range(N):

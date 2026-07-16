@@ -62,10 +62,10 @@ def main():
         hw_rows.append({"device_type_id": dev, "Active": "True", "field_type": "B",
                         "map_raw_path": "-", "map_bin_path": "-", "stl_path": stl,
                         "use_symmetry": "1", "nominal_arg": "-", "field_direction": "1",
-                        "correct_coeff": "1", "eff_length": f"{L:.5f}", "phys_length": f"{L:.5f}",
+                        "correct_coeff": "1", "eff_length": f"{L:.5f}",
                         "edge_ff": "0", "synthetic": "False", "scaled_from": ""})
         et_rows.append({"device_type_id": dev, "kind": kind, "active_coeffs": ACTIVE[kind],
-                        "model": "canonical", "n_slices": "1", "notes": f"s2lattice {e['type']}"})
+                        "n_slices": "40", "notes": f"s2lattice {e['type']}"})
     upsert_by(os.path.join(TB, "hardware_library.csv"), "device_type_id", hw_hdr, hw_rows)
     upsert_by(os.path.join(TB, "element_transforms.csv"), "device_type_id", et_hdr, et_rows)
 

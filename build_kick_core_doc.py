@@ -108,7 +108,7 @@ EQ(r"\Delta s_g=\frac{L_{\mathrm{phys}}}{N}\ (\text{металл, дрейф}),\
 P("Тогда суммарный изгиб/фокус равен k·L_eff (верный интеграл поля), а габарит «ящика» — L_phys "
   "(верная геометрия). Число киков на элемент:")
 bullet("Активные магниты (квадруполь, секступоль, октуполь, диполь, DQ, корректор): N = 40 киков.")
-bullet("Диполь-квадруполь (composite) задаёт N = 40 явно (n_slices).")
+bullet("Число срезов тела N = n_slices (единое, по умолчанию 40).")
 bullet("Выключенный элемент (все коэф. = 0) — один чистый дрейф на L_phys, киков нет.")
 bullet("Датчик BPM (monitor) — сквозной проход (дрейф L = 0), киков нет, фиксирует центроид пучка.")
 
@@ -211,19 +211,18 @@ for e in DATA["elements"]:
     H(f"{e['title']} ({dev})", 2)
     P(DESC.get(kind, ""))
     # базовые параметры
-    Nk = "0 (сквозной)" if kind == "monitor" else ("0 (дрейф)" if not any(abs(v) > 0 for v in e["coeffs"].values()) else str(e["nsl"] if e["model"] == "composite" else 40))
+    Nk = "0 (сквозной)" if kind == "monitor" else ("0 (дрейф)" if not any(abs(v) > 0 for v in e["coeffs"].values()) else str(e["nsl"]))
     table(["Параметр", "Значение"],
           [["Тип (kind)", KIND_RU.get(kind, kind)],
            ["Эффективная длина L_eff", f"{e['Leff']*1e3:.1f} мм"],
-           ["Геометрическая длина L_phys", f"{e['Lphys']*1e3:.1f} мм"],
-           ["Модель / число киков", f"{e['model']} / {Nk}"],
+           ["Эффективная длина L_eff", f"{e['Lphys']*1e3:.1f} мм"],
+           ["Число киков (срезов)", Nk],
            ["Тип аргумента", "ток [А]" if e["input_type"] == "current" else "коэф. поля"],
            ["Активные мультиполи", e["active"]]])
     # коэффициенты при рабочем аргументе
     c = e["coeffs"]; arg = "ток" if e["input_type"] == "current" else "коэф."
     parts = []
     if abs(c["theta0"]) > 1e-9: parts.append(f"θ₀ = {c['theta0']*1e3:+.3f} мрад")
-    if abs(c["thetaY"]) > 1e-9: parts.append(f"θ_y = {c['thetaY']*1e3:+.3f} мрад")
     if abs(c["k1"]) > 1e-9: parts.append(f"k₁ = {c['k1']:+.4f} м⁻²")
     if abs(c["k2"]) > 1e-9: parts.append(f"k₂ = {c['k2']:+.3g} м⁻³")
     if abs(c["k3"]) > 1e-9: parts.append(f"k₃ = {c['k3']:+.3g} м⁻⁴")

@@ -57,11 +57,10 @@ struct Magnet {
     Vec3 center, axis, uhat, vhat, entry, exit;
     double yaw = 0, Leff = 0, L = 0, edge1 = 0, edge2 = 0;   // edge1/edge2 — краевые углы E1/E2 (.lte); физика края — Фаза 3
     double theta0 = 0, k1 = 0, k1v = 0, k2 = 0, k3 = 0, kEdge = 0;   // k1v — верт. градиент (∂By/∂v≠∂Bz/∂u); kEdge — краевой фриндж
-    double thetaY = 0, k1s = 0, k2s = 0, k3s = 0;   // СКЬЮ + ВЕРТ.ИЗГИБ (Im Cₙ): верт.диполь, скью квад/секст/окт
     bool monitor = false;          // ДАТЧИК ПОЛОЖЕНИЯ ПУЧКА (BPM): пропускает частицы, регистрирует центроид
     std::string sensorId;          // = instance_id экземпляра датчика в решётке
-    int nsl = 40;
-    bool composite = false, nonzero = false;
+    int nsl = 40;                  // число срезов тела (drift-kick-drift)
+    bool nonzero = false;
     std::string dev, kind;         // kind — тип элемента (dipole/quad/dq/...) из lattice_configs
     std::vector<std::string> devs;   // типы устройств со-локованных обмоток
 };
@@ -104,17 +103,16 @@ inline void frame(double yaw, Vec3& axis, Vec3& uhat, Vec3& vhat) {
 
 // ---- база данных (те же таблицы) --------------------------------------------
 struct DB {
-    std::map<std::string, double> eff, phys, edgeff;            // Leff, Lметалл, форм-фактор края по типу
+    std::map<std::string, double> eff, edgeff;                  // Leff, форм-фактор края по типу (phys_length УДАЛЁН)
     std::map<std::string, std::vector<std::string>> trans;      // element_transforms строка
 };
 
 inline DB loadDB(const std::string& ws) {
     DB db;
     for (auto& r : readCSV(ws + "tables/hardware_library.csv"))
-        if (r.size() > 11) {
-            try { db.eff[r[0]]  = std::stod(r[10]); } catch (...) {}
-            try { db.phys[r[0]] = std::stod(r[11]); } catch (...) {}
-            if (r.size() > 12) { try { db.edgeff[r[0]] = std::stod(r[12]); } catch (...) {} }  // edge_ff (default 0)
+        if (r.size() > 10) {
+            try { db.eff[r[0]] = std::stod(r[10]); } catch (...) {}
+            if (r.size() > 11) { try { db.edgeff[r[0]] = std::stod(r[11]); } catch (...) {} }  // edge_ff ([11] после eff_length; default 0)
         }
     for (auto& r : readCSV(ws + "tables/element_transforms.csv"))
         if (r.size() > 4) db.trans[r[0]] = r;
@@ -124,8 +122,8 @@ inline DB loadDB(const std::string& ws) {
 // ---- сборка магнита из группы со-локованных обмоток --------------------------
 // group[i] = строка lattice_configs: [0]lattice_id [1]instance_id [2]device_type_id
 //   [3]x [4]y [5]z [6]yaw [7]pitch [8]roll [9]arg_val [10]correct_coeff
-//   [11]mat_B [12]mat_G [13]mat_S [14]mat_O [15]mat_Gv [16]mat_Bs [17]mat_Gs [18]mat_Ss [19]mat_Os
-//   [20]eff_length [21]kind [22]model [23]n_slices [24]edge1 [25]edge2   (структурные — ЕДИНЫЙ ИСТОЧНИК)
+//   [11]mat_B [12]mat_G [13]mat_S [14]mat_O [15]mat_Gv
+//   [16]eff_length [17]kind [18]n_slices [19]edge1 [20]edge2   (структурные — ЕДИНЫЙ ИСТОЧНИК)
 inline Magnet makeMagnet(const std::vector<std::vector<std::string>>& group,
                          const DB& db, const std::string& source) {
     Magnet m;
@@ -137,28 +135,23 @@ inline Magnet makeMagnet(const std::vector<std::vector<std::string>>& group,
     m.sensorId = (r0.size() > 1) ? r0[1] : "";              // instance_id (для датчиков BPM)
     // ЕДИНЫЙ ИСТОЧНИК — структурные метаданные из lattice_configs (eff_length/kind/model/n_slices/edge1/edge2).
     // Fallback на hardware_library/element_transforms — только для неполной БД (те же значения).
-    m.Leff = (r0.size() > 20 && !r0[20].empty()) ? parseOr0(r0, 20)
+    m.Leff = (r0.size() > 16 && !r0[16].empty()) ? parseOr0(r0, 16)
              : (db.eff.count(m.dev) ? db.eff.at(m.dev) : 0.0);   // эффективная (проектная .lte) длина
     m.L    = m.Leff;   // ОТКАЗ от металл-длины: кик работает ТОЛЬКО по L_eff
     m.entry = m.center - m.axis * (0.5 * m.L);
     m.exit  = m.center + m.axis * (0.5 * m.L);
-    std::string model;
-    if (r0.size() > 21 && !r0[21].empty()) {                 // из lattice_configs
-        m.kind = r0[21];
-        model  = (r0.size() > 22) ? r0[22] : "";
-        if (r0.size() > 23 && !r0[23].empty()) { try { m.nsl = std::stoi(r0[23]); } catch (...) {} }
-    } else if (db.trans.count(m.dev)) {                      // fallback: element_transforms [1]kind [3]model [4]n_slices
+    if (r0.size() > 17 && !r0[17].empty()) {                 // из lattice_configs
+        m.kind = r0[17];
+        if (r0.size() > 18 && !r0[18].empty()) { try { m.nsl = std::stoi(r0[18]); } catch (...) {} }
+    } else if (db.trans.count(m.dev)) {                      // fallback: element_transforms [1]kind [3]n_slices
         const auto& tr = db.trans.at(m.dev);
         m.kind = (tr.size() > 1) ? tr[1] : "";
-        model  = (tr.size() > 3) ? tr[3] : "";
-        if (tr.size() > 4) { try { m.nsl = std::stoi(tr[4]); } catch (...) {} }
+        if (tr.size() > 3) { try { m.nsl = std::stoi(tr[3]); } catch (...) {} }
     }
-    m.composite = (model == "composite");
-    m.monitor   = (m.kind == "monitor");                     // датчик положения пучка (BPM)
-    m.edge1 = (r0.size() > 24) ? parseOr0(r0, 24) : 0.0;     // краевые углы E1/E2 (.lte); физика края — Фаза 3
-    m.edge2 = (r0.size() > 25) ? parseOr0(r0, 25) : 0.0;
+    m.monitor = (m.kind == "monitor");                       // датчик положения пучка (BPM)
+    m.edge1 = (r0.size() > 19) ? parseOr0(r0, 19) : 0.0;     // краевые углы E1/E2 (.lte); физика края — Фаза 3
+    m.edge2 = (r0.size() > 20) ? parseOr0(r0, 20) : 0.0;
     double B = 0, G = 0, Gv = 0, S = 0, O = 0;               // Gv — ВЕРТ. градиент (∂By/∂v), отдельно от G
-    double Bs = 0, Gs = 0, Ss = 0, Os = 0;                   // СКЬЮ: верт.диполь(By), скью квад/секст/окт
     if (source != "physical")
         throw std::runtime_error("токовый режим матричного ядра архивирован — используйте source=\"physical\" "
                                  "(физкоэф. mat_* берутся из lattice_configs)");
@@ -170,23 +163,18 @@ inline Magnet makeMagnet(const std::vector<std::vector<std::string>>& group,
         if (r.size() > 15 && !r[15].empty()) { try { gvcol = std::stod(r[15]); } catch (...) {} }
         Gv += gvcol;
         S += parseOr0(r, 13); O += parseOr0(r, 14);
-        Bs += parseOr0(r, 16); Gs += parseOr0(r, 17);        // mat_Bs/Gs/Ss/Os (col 16-19); дефолт 0
-        Ss += parseOr0(r, 18); Os += parseOr0(r, 19);
     }
     // ДИПОЛЬ: mat_G/Gv/S/O заданы ОТНОСИТЕЛЬНО поля (доли mat_B) → в абсолютные (1/f=θ₀·g, готово к излучению)
     bool isDip = db.trans.count(m.dev) && db.trans.at(m.dev).size() > 1 && db.trans.at(m.dev)[1] == "dipole";
-    if (isDip) { G *= B; Gv *= B; S *= B; O *= B; Gs *= B; Ss *= B; Os *= B; }  // скью-град. тоже относит.; Bs — абс.
+    if (isDip) { G *= B; Gv *= B; S *= B; O *= B; }          // градиенты диполя заданы относительно поля
     // k1=k1u (гор. ∂Bz/∂u), k1v (верт. ∂By/∂v): неголоморфн. диполь Gu≠Gv ⇒ |f_x|≠|f_y|
     m.theta0 = QP * B * m.Leff; m.k1 = QP * G; m.k1v = QP * Gv; m.k2 = QP * S; m.k3 = QP * O;
-    // СКЬЮ + ВЕРТ.ИЗГИБ: thetaY — верт.изгиб (skew-диполь), k1s — скью-квад (связь плоскостей), k2s/k3s — скью секст/окт
-    m.thetaY = QP * Bs * m.Leff; m.k1s = QP * Gs; m.k2s = QP * Ss; m.k3s = QP * Os;
     // краевой (фриндж) верт. фокус 2-го порядка: 1/f_y = FE·θ₀²/L_eff (∝поле², offset/угол-независим).
     // = −(q/p)²∫Bz²ds·v (интеграл углового члена Δv'=−(q/p)u'v∂ₓBz по частям). Диполи: θ₀≠0.
     double FE = db.edgeff.count(m.dev) ? db.edgeff.at(m.dev) : 0.0;
     m.kEdge = (m.Leff > 0.0) ? FE * m.theta0 * m.theta0 / m.Leff : 0.0;
     m.nonzero = (std::abs(m.theta0) > 0 || std::abs(m.k1) > 0 || std::abs(m.k1v) > 0 ||
-                 std::abs(m.k2) > 0 || std::abs(m.k3) > 0 || std::abs(m.kEdge) > 0 ||
-                 std::abs(m.thetaY) > 0 || std::abs(m.k1s) > 0 || std::abs(m.k2s) > 0 || std::abs(m.k3s) > 0);
+                 std::abs(m.k2) > 0 || std::abs(m.k3) > 0 || std::abs(m.kEdge) > 0);
     return m;
 }
 
@@ -237,11 +225,9 @@ inline bool drift(State& s, double ell) {
 // ---- тело магнита: N срезов drift-kick-drift. false = потеряна ---------------
 inline bool body(const Magnet& m, State& s) {
     if (!m.nonzero) return drift(s, m.L);
-    int N = m.composite ? m.nsl : 40;
+    int N = m.nsl;
     double dsg = m.L / N, dsf = m.Leff / N;
     double th = m.theta0, k1 = m.k1, k1v = m.k1v, k2 = m.k2, k3 = m.k3, kE = m.kEdge;
-    double thy = m.thetaY, k1s = m.k1s, k2s = m.k2s, k3s = m.k3s;
-    bool skew = (thy || k1s || k2s || k3s);
     for (int i = 0; i < N; ++i) {
         if (!drift(s, dsg * 0.5)) return false;
         double x = s.x, y = s.y;
@@ -250,11 +236,6 @@ inline bool body(const Magnet& m, State& s) {
                 - (k3 / 6.0) * (x * x * x - 3.0 * x * y * y) * dsf;
         s.py += k1v * y * dsf + k2 * x * y * dsf
                 + (k3 / 6.0) * (3.0 * x * x * y - y * y * y) * dsf - (kE / N) * y;   // k1v — верт. градиент; kE — край
-        if (skew) {   // СКЬЮ + ВЕРТ.ИЗГИБ (Im Cₙ): верт.диполь θy, скью-квад (связь), скью секступоль/октуполь
-            s.px += k1s * y * dsf + k2s * x * y * dsf + (k3s / 6.0) * (3.0 * x * x * y - y * y * y) * dsf;
-            s.py += thy / N + k1s * x * dsf + 0.5 * k2s * (x * x - y * y) * dsf
-                    + (k3s / 6.0) * (x * x * x - 3.0 * x * y * y) * dsf;
-        }
         if (!drift(s, dsg * 0.5)) return false;
     }
     return true;

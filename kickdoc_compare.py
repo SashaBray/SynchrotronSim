@@ -58,19 +58,15 @@ def boris(field, half, u0, v0, ds=2e-4):
 def kick_probe(m, half, u0, v0):
     """Кик-ядро (matrix_tracker.Magnet) над зоной поля 2·half (для совпадения зоны с Boris);
     сила кика по Leff (реальная). Возврат s,u,v + финальные up,vp. Реплика Magnet.body по срезам."""
-    N = m.nsl if m.model == "composite" else 40
+    N = m.nsl
     ds_g = 2.0 * half / N; ds_f = m.Leff / N
     th, k1, k1v, k2, k3, kE = m.theta0, m.k1, m.k1v, m.k2, m.k3, m.kEdge
-    thy, k1s, k2s, k3s = m.thetaY, m.k1s, m.k2s, m.k3s
     st = (u0, 0.0, v0, 0.0, 0.0, 0.0); s = 0.0; S, U, Vv = [0.0], [u0], [v0]
     for _ in range(N):
         st = mt._drift(st, ds_g / 2.0); s += ds_g / 2.0
         x, px, y, py, t, d = st
         px += th / N - k1 * x * ds_f - 0.5 * k2 * (x * x - y * y) * ds_f - (k3 / 6.0) * (x**3 - 3 * x * y * y) * ds_f
         py += k1v * y * ds_f + k2 * x * y * ds_f + (k3 / 6.0) * (3 * x * x * y - y**3) * ds_f - (kE / N) * y
-        if k1s or k2s or k3s or thy:
-            px += k1s * y * ds_f + k2s * x * y * ds_f + (k3s / 6.0) * (3 * x * x * y - y**3) * ds_f
-            py += thy / N + k1s * x * ds_f + 0.5 * k2s * (x * x - y * y) * ds_f + (k3s / 6.0) * (x**3 - 3 * x * y * y) * ds_f
         st = mt._drift((x, px, y, py, t, d), ds_g / 2.0); s += ds_g / 2.0
         S.append(s); U.append(st[0]); Vv.append(st[2])
     return np.array(S), np.array(U), np.array(Vv), st[1], st[3]
@@ -126,9 +122,9 @@ def main():
         ax[1].set_xlabel("s, м"); ax[1].set_ylabel("v (верт.), мм"); ax[1].set_title("верт. (— диффур, -- кик)"); ax[1].grid(alpha=.3)
         fig.tight_layout(); fig.savefig(os.path.join(FIGS, f"{dev}.png")); plt.close(fig)
         data["elements"].append(dict(
-            dev=dev, title=title, val=val, kind=m.kind, model=m.model, nsl=m.nsl, Leff=m.Leff, Lphys=m.L,
+            dev=dev, title=title, val=val, kind=m.kind, nsl=m.nsl, Leff=m.Leff, Lphys=m.L,
             input_type=CM[dev].get("input_type"), active=TRANS[dev].get("active_coeffs"),
-            coeffs=dict(theta0=m.theta0, k1=m.k1, k2=m.k2, k3=m.k3, thetaY=m.thetaY, kEdge=m.kEdge),
+            coeffs=dict(theta0=m.theta0, k1=m.k1, k2=m.k2, k3=m.k3, kEdge=m.kEdge),
             metric=dict(max_dup_urad=max(met_up) * 1e6, max_dvp_urad=max(met_vp) * 1e6),
             coupling=coef_table(dev)))
         print(f"  {dev:16} kind={m.kind:7} θ0={m.theta0*1e3:+.3f}мрад k1={m.k1:+.3f} k2={m.k2:+.2f} "

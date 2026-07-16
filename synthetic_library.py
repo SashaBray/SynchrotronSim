@@ -47,9 +47,6 @@ class LibraryManager:
     def eff(self, did):
         return float(self.hw[did][self.i["eff_length"]])
 
-    def phys(self, did):
-        return float(self.hw[did][self.i["phys_length"]])
-
     def resolve(self, ref_ids, target_eff):
         """ref_ids — обмотки-эталоны (из map_to_hw); target_eff — L из LTE (м).
         Возврат: список фактических device_type_id (эталон, если совпал по L_eff; иначе синтетика)."""
@@ -73,7 +70,6 @@ class LibraryManager:
     def _create(self, ref, nid, new_eff, target_eff):
         i = self.i; row = list(self.hw[ref]); row[0] = nid
         row[i["eff_length"]] = f"{new_eff:.4f}"
-        row[i["phys_length"]] = f"{self.phys(ref) + (new_eff - self.eff(ref)):.4f}"
         row[i["map_bin_path"]] = "-"; row[i["map_raw_path"]] = "-"   # без карты: матр. модель работает по L_eff
         row[i["synthetic"]] = "True"; row[i["scaled_from"]] = ref
         if self.gen_assets:                              # флаг --gen-assets: синтетические карта .bin и STL

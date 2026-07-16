@@ -2,7 +2,7 @@
 """Расширение БД SynchrotronSim под матричную модель. Добавляет/создаёт:
   1) hardware_library.csv  — колонка eff_length (эфф. длина, м) каждому элементу;
   2) element_transforms.csv — какие матричные преобразования делает элемент библиотеки
-     (kind + активные физкоэффициенты + модель canonical|composite + число срезов);
+     (kind + активные физкоэффициенты + число срезов тела);
   3) coupling_matrix.csv   — матрица связи «входной ток/коэф. → ФИЗИЧЕСКИЕ коэффициенты»
      (на единицу входа; суперпозиция: у со-локованных обмоток вклады складываются);
   4) element_connectivity.csv — для каждого экземпляра решётки: предшественник и преемник.
@@ -39,36 +39,26 @@ def _load_eff():
 
 EFF = _load_eff()
 
-# --- физическая длина ПО МЕТАЛЛУ (габарит, для геометрии) — от пользователя, на магнит ---
-PHYS = {
-    "QP_L_1A": 0.3745, "QP_sh_1A": 0.2120,
-    "SP_I1_1A": 0.1660, "SP_I2_1A": 0.1660,
-    "OP_1A": 0.0900,
-    "DQ_I1_1A": 0.4000, "DQ_I2_1A": 0.4000, "DQ_I3_1A": 0.4000,
-    "DP_L_PM": 0.4100, "DP_sh_PM": 0.0400,
-    "corrector_I1_1A": 0.1080, "corrector_I2_1A": 0.1080,
-}
-
 # --- какие преобразования делает каждый элемент библиотеки ---
-# (kind, активные силы матрицы, модель, срезов, примечание)
+# (kind, активные силы матрицы, срезов тела, примечание)  [модель canonical/composite убрана]
 TRANSFORMS = {
-    "QP_L_1A":  ("quad", "k1", "canonical", 1, "квадруполь длинный"),
-    "QP_sh_1A": ("quad", "k1", "canonical", 1, "квадруполь короткий"),
-    "SP_I1_1A": ("sext", "k2", "canonical", 1, "секступоль, обмотка I1"),
-    "SP_I2_1A": ("sext", "k2", "canonical", 1, "секступоль, обмотка I2"),
-    "OP_1A":    ("oct",  "k3", "canonical", 1, "октуполь"),
-    "DQ_I1_1A": ("dq", "theta_y|k1|k2", "composite", 40, "диполь-квадруполь combined, обмотка I1"),
-    "DQ_I2_1A": ("dq", "theta_y|k1|k2", "composite", 40, "диполь-квадруполь combined, обмотка I2"),
-    "DQ_I3_1A": ("dq", "theta_y|k1|k2", "composite", 40, "диполь-квадруполь combined, обмотка I3"),
-    "DP_L_PM":  ("dipole", "theta_y", "canonical", 1, "поворотный ПМ длинный"),
-    "DP_sh_PM": ("dipole", "theta_y", "canonical", 1, "поворотный ПМ короткий"),
+    "QP_L_1A":  ("quad", "k1", 40, "квадруполь длинный"),
+    "QP_sh_1A": ("quad", "k1", 40, "квадруполь короткий"),
+    "SP_I1_1A": ("sext", "k2", 40, "секступоль, обмотка I1"),
+    "SP_I2_1A": ("sext", "k2", 40, "секступоль, обмотка I2"),
+    "OP_1A":    ("oct",  "k3", 40, "октуполь"),
+    "DQ_I1_1A": ("dq", "theta_y|k1|k2", 40, "диполь-квадруполь combined, обмотка I1"),
+    "DQ_I2_1A": ("dq", "theta_y|k1|k2", 40, "диполь-квадруполь combined, обмотка I2"),
+    "DQ_I3_1A": ("dq", "theta_y|k1|k2", 40, "диполь-квадруполь combined, обмотка I3"),
+    "DP_L_PM":  ("dipole", "theta_y", 40, "поворотный ПМ длинный"),
+    "DP_sh_PM": ("dipole", "theta_y", 40, "поворотный ПМ короткий"),
     # 5-обмоточный корректор (main + 4 корректирующие): каждая обмотка — со-локованный кикер,
     # H+V-эффект берётся из матрицы связи per_B/per_Bs (фит карт v3); суперпозиция как у DQ.
-    "corrector_main_100A": ("kicker", "kick_y|kick_z", "canonical", 1, "корректор 5-обм.: главная"),
-    "corrector_c1_100A": ("kicker", "kick_y|kick_z", "canonical", 1, "корректор 5-обм.: корр.1"),
-    "corrector_c2_100A": ("kicker", "kick_y|kick_z", "canonical", 1, "корректор 5-обм.: корр.2"),
-    "corrector_c3_100A": ("kicker", "kick_y|kick_z", "canonical", 1, "корректор 5-обм.: корр.3"),
-    "corrector_c4_100A": ("kicker", "kick_y|kick_z", "canonical", 1, "корректор 5-обм.: корр.4"),
+    "corrector_main_100A": ("kicker", "kick_y|kick_z", 40, "корректор 5-обм.: главная"),
+    "corrector_c1_100A": ("kicker", "kick_y|kick_z", 40, "корректор 5-обм.: корр.1"),
+    "corrector_c2_100A": ("kicker", "kick_y|kick_z", 40, "корректор 5-обм.: корр.2"),
+    "corrector_c3_100A": ("kicker", "kick_y|kick_z", 40, "корректор 5-обм.: корр.3"),
+    "corrector_c4_100A": ("kicker", "kick_y|kick_z", 40, "корректор 5-обм.: корр.4"),
 }
 
 
@@ -91,15 +81,15 @@ def coupling_rows():
 
 
 def add_lengths():
-    """Добавляет в hardware_library две длины: eff_length (полевая, для силы) и phys_length
-    (по металлу, для геометрии). Идемпотентно."""
+    """Добавляет в hardware_library эффективную длину eff_length (полевая, для силы И геометрии).
+    phys_length (по металлу) УБРАН — кик работает только по L_eff. Идемпотентно."""
     p = os.path.join(TB, "hardware_library.csv")
     rows = list(csv.reader(open(p, encoding="utf-8"), delimiter=";"))
     hdr = rows[0]
     os.makedirs(os.path.join(TB, "backups"), exist_ok=True)
     if "eff_length" not in hdr:
         shutil.copy(p, os.path.join(TB, "backups", "hardware_library_pre_lengths.csv"))
-    for col, data in (("eff_length", EFF), ("phys_length", PHYS)):
+    for col, data in (("eff_length", EFF),):
         if col not in hdr:
             hdr.append(col)
             for r in rows[1:]:
@@ -115,17 +105,16 @@ def add_lengths():
 
 def write_transforms():
     """СОХРАНЯЮЩЕ: обновляет/добавляет базовые (TRANSFORMS), но НЕ трогает прочие строки
-    (корректор, BPM, синтетика, добавленные вне шаблона)."""
+    (корректор, BPM, синтетика). Столбец model (canonical/composite) УБРАН; n_slices=40 у всех."""
     p = os.path.join(TB, "element_transforms.csv")
-    hdr = ["device_type_id", "kind", "active_coeffs", "model", "n_slices", "notes"]
+    hdr = ["device_type_id", "kind", "active_coeffs", "n_slices", "notes"]
     existing = {}
     if os.path.exists(p):
-        rd = list(csv.reader(open(p, encoding="utf-8"), delimiter=";"))
-        for r in rd[1:]:
-            if r:
-                existing[r[0]] = r
-    for dev, (kind, coeffs, model, ns, note) in TRANSFORMS.items():
-        existing[dev] = [dev, kind, coeffs, model, str(ns), note]
+        for r in csv.DictReader(open(p, encoding="utf-8"), delimiter=";"):   # по имени — устойчиво к старой схеме с model
+            existing[r["device_type_id"]] = [r["device_type_id"], r.get("kind") or "", r.get("active_coeffs") or "",
+                                             "40", r.get("notes") or ""]     # n_slices=40 всем
+    for dev, (kind, coeffs, ns, note) in TRANSFORMS.items():
+        existing[dev] = [dev, kind, coeffs, str(ns), note]
     with open(p, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=";"); w.writerow(hdr); w.writerows(existing.values())
     return p
@@ -181,11 +170,10 @@ def add_matrix_columns():
     from collections import OrderedDict
     p = os.path.join(TB, "lattice_configs.csv")
     data = list(csv.DictReader(open(p, encoding="utf-8"), delimiter=";"))
-    # СТРУКТУРНЫЕ столбцы (eff_length/kind/model/n_slices/edge1/edge2) держим В КОНЦЕ схемы, ПОСЛЕ mat_*
+    # СТРУКТУРНЫЕ столбцы (eff_length/kind/n_slices/edge1/edge2) держим В КОНЦЕ схемы, ПОСЛЕ mat_*
     # — их заполняет add_structural_columns(). Исключаем из base, чтобы не задвоить и не переставить.
-    STRUCT = ["eff_length", "kind", "model", "n_slices", "edge1", "edge2"]
+    STRUCT = ["eff_length", "kind", "n_slices", "edge1", "edge2"]
     base = [c for c in data[0].keys() if not c.startswith("mat_") and c not in STRUCT]
-    struct_present = [c for c in STRUCT if c in data[0].keys()]
     R = coupling_rows()
     os.makedirs(os.path.join(TB, "backups"), exist_ok=True)
     shutil.copy(p, os.path.join(TB, "backups", "lattice_configs_pre_matcols.csv"))
@@ -214,16 +202,16 @@ def add_matrix_columns():
                 B = bend / (QP * EFF[dev]); ndip += 1
             r["mat_B"] = f"{B:.6e}"; r["mat_G"] = f"{G:.6e}"; r["mat_S"] = f"{S:.6e}"; r["mat_O"] = f"{O:.6e}"
     with open(p, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=base + ["mat_B", "mat_G", "mat_S", "mat_O",
-                           "mat_Gv", "mat_Bs", "mat_Gs", "mat_Ss", "mat_Os"], delimiter=";")
+        w = csv.DictWriter(f, fieldnames=base + ["mat_B", "mat_G", "mat_S", "mat_O", "mat_Gv"],
+                           delimiter=";", extrasaction="ignore")   # дропает скью mat_*s и структурные (их добавит add_structural_columns)
         w.writeheader(); w.writerows(data)
     return p, ndip
 
 
 def add_structural_columns():
     """ЕДИНЫЙ ИСТОЧНИК: дописывает в КОНЕЦ схемы lattice_configs 6 СТРУКТУРНЫХ столбцов
-    (eff_length, kind, model, n_slices, edge1, edge2) — из них матричное ядро берёт ВСЮ per-элементную
-    геометрию/тип. Значения по device_type_id: eff_length из hardware_library, kind/model/n_slices из
+    (eff_length, kind, n_slices, edge1, edge2) — из них матричное ядро берёт ВСЮ per-элементную
+    геометрию/тип. Значения по device_type_id: eff_length из hardware_library, kind/n_slices из
     element_transforms; edge1/edge2 — краевые углы E1/E2 из .lte (Фаза 3, пока пусто/сохраняются).
     Идемпотентна: mat_* и прочие столбцы НЕ трогает, только эти 6 (фикс-порядок после mat_*).
     C++ ядро читает их по индексам [20..25]."""
@@ -235,26 +223,76 @@ def add_structural_columns():
         return {r["device_type_id"]: r for r in
                 csv.DictReader(open(os.path.join(TB, name), encoding="utf-8"), delimiter=";")}
     hw, tr = _tbl("hardware_library.csv"), _tbl("element_transforms.csv")
-    STRUCT = ["eff_length", "kind", "model", "n_slices", "edge1", "edge2"]
+    STRUCT = ["eff_length", "kind", "n_slices", "edge1", "edge2"]
+    DROP = ["mat_Bs", "mat_Gs", "mat_Ss", "mat_Os", "model"]   # СКЬЮ + model (canonical/composite) удалены — дропаем из схемы
     for r in data:
         dev = r["device_type_id"]; h = hw.get(dev, {}); t = tr.get(dev, {})
         r["eff_length"] = h.get("eff_length", "")
         r["kind"] = t.get("kind", "")
-        r["model"] = t.get("model", "")
-        r["n_slices"] = t.get("n_slices", "")
+        r["n_slices"] = t.get("n_slices") or "40"              # число срезов тела (единое 40; модель убрана)
         r["edge1"] = r.get("edge1", "")            # E1 из .lte — Фаза 3 (сохранить, если уже задан)
         r["edge2"] = r.get("edge2", "")            # E2 из .lte
-    base = [c for c in data[0].keys() if c not in STRUCT]
+    base = [c for c in data[0].keys() if c not in STRUCT and c not in DROP]
     os.makedirs(os.path.join(TB, "backups"), exist_ok=True)
     shutil.copy(p, os.path.join(TB, "backups", "lattice_configs_pre_structcols.csv"))
     with open(p, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=base + STRUCT, delimiter=";")
+        w = csv.DictWriter(f, fieldnames=base + STRUCT, delimiter=";", extrasaction="ignore")   # дропает скью mat_*s
         w.writeheader(); w.writerows(data)
     return p, len(data)
 
 
+def add_edge_angles():
+    """Заполняет edge1/edge2 в lattice_configs краевыми углами E1/E2 из .lte (per-instance, радианы).
+    Мост instance→.lte: design_orbit.compute_magnet_endpoints(lat) даёт список в порядке global_id
+    (== instance_id) с полем lte_name, выровненный 1:1 с insts (как в add_matrix_columns); E1/E2 берём
+    из lte_to_lattice.parse_desc(SYLA_desc.lte)[lte_name] (там уже float). У НЕизгибов (квад/секст/окт/
+    корректор/BPM) E1/E2 нет → пусто. Стойка DQ: все обмотки — один магнит, один lte_name, один E1/E2.
+    Ядро эти столбцы ПОКА игнорирует (Фаза 3a). close_scale их не масштабирует — значения дословно.
+    Идемпотентна, трогает только edge1/edge2 (после add_structural_columns, где они уже заведены)."""
+    import design_orbit as do
+    import lte_to_lattice as lte
+    from collections import OrderedDict
+    lte_path = os.path.join("workspace", "lte", "configuration_v1", "SYLA_desc.lte")
+    if not os.path.exists(lte_path):
+        lte_path = os.path.join("workspace", "lte", "SYLA_desc.lte")
+    devices = lte.parse_desc(lte_path) if os.path.exists(lte_path) else {}
+    p = os.path.join(TB, "lattice_configs.csv")
+    data = list(csv.DictReader(open(p, encoding="utf-8"), delimiter=";"))
+    if not data or "edge1" not in data[0]:
+        return p, 0                                          # столбцов нет — сначала add_structural_columns()
+    by_lat = OrderedDict()
+    for r in data:
+        by_lat.setdefault(r["lattice_id"], []).append(r)
+    nfill = 0
+    for lat, insts in by_lat.items():
+        insts.sort(key=lambda r: int(r["instance_id"]))
+        try:
+            eps, _ = do.compute_magnet_endpoints(int(lat))
+        except Exception:
+            eps = None
+        aligned = eps if (eps and len(eps) == len(insts)) else None
+        for j, r in enumerate(insts):
+            e1 = e2 = ""
+            if aligned is not None:
+                d = devices.get(getattr(aligned[j], "lte_name", "") or "", {})
+                if d.get("E1") is not None:
+                    e1 = f"{float(d['E1']):.12g}"
+                if d.get("E2") is not None:
+                    e2 = f"{float(d['E2']):.12g}"
+            r["edge1"], r["edge2"] = e1, e2
+            if e1 or e2:
+                nfill += 1
+    fields = list(data[0].keys())
+    os.makedirs(os.path.join(TB, "backups"), exist_ok=True)
+    shutil.copy(p, os.path.join(TB, "backups", "lattice_configs_pre_edges.csv"))
+    with open(p, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fields, delimiter=";")
+        w.writeheader(); w.writerows(data)
+    return p, nfill
+
+
 def main():
-    print("hardware_library + eff_length/phys_length:", add_lengths())
+    print("hardware_library + eff_length:", add_lengths())
     print("element_transforms:", write_transforms())
     print("coupling_matrix:", write_coupling())
     conn, nlat, nrows = write_connectivity()
@@ -262,7 +300,9 @@ def main():
     mp, ndip = add_matrix_columns()
     print(f"lattice_configs + mat_B/G/S/O: {mp}  (диполям B из проектного изгиба: {ndip} шт.)")
     sp, nr = add_structural_columns()
-    print(f"lattice_configs + структурные (eff_length/kind/model/n_slices/edge1/edge2): {sp}  ({nr} строк)")
+    print(f"lattice_configs + структурные (eff_length/kind/n_slices/edge1/edge2): {sp}  ({nr} строк)")
+    ep, ne = add_edge_angles()
+    print(f"lattice_configs + краевые углы E1/E2 из .lte: {ep}  (заполнено {ne} изгибающих экземпляров)")
 
 
 if __name__ == "__main__":

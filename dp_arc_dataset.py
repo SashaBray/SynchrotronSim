@@ -23,7 +23,7 @@ def setup_dp(dev):
     fd = float(HW[dev].get("field_direction") or 1)
     hwcc = float(HW[dev].get("correct_coeff") or 1)
     f = dsp._field_fn(h, B); half = float(h["mxx"])
-    da.HALF = half; da.LEFF = EFF[dev]; da.LPHYS = float(HW[dev]["phys_length"])
+    da.HALF = half; da.LEFF = EFF[dev]; da.LPHYS = da.LEFF          # phys убран → длина по L_eff
     da.LEAD = max(0.0, (2 * half - da.LPHYS) / 2.0); da.DS_G = da.LPHYS / da.N; da.DS_F = da.LEFF / da.N
     da.RMAX = min(min(abs(h["mny"]), abs(h["mny"] + (h["ny"] - 1) * h["sy"])),
                   min(abs(h["mnz"]), abs(h["mnz"] + (h["nz"] - 1) * h["sz"])))

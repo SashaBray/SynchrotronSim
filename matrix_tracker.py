@@ -27,7 +27,7 @@ def _read(name):
 def load_db():
     hw = _read("hardware_library.csv")
     eff = {r["device_type_id"]: float(r["eff_length"]) for r in hw}
-    phys = {r["device_type_id"]: float(r["phys_length"]) for r in hw}
+    phys = {}                                        # phys_length УДАЛЁН из библиотеки — кик работает ТОЛЬКО по L_eff
     coup = {r["device_type_id"]: r for r in _read("coupling_matrix.csv")}
     trans = {r["device_type_id"]: r for r in _read("element_transforms.csv")}
     return eff, phys, coup, trans
@@ -73,16 +73,15 @@ class Magnet:
         self.yaw = float(r0["yaw"])
         self.axis, self.uhat, self.vhat = frame(self.yaw)
         self.dev = r0["device_type_id"]
-        # ЕДИНЫЙ ИСТОЧНИК — структурные метаданные из lattice_configs (eff_length/kind/model/n_slices/
-        # edge1/edge2). Fallback на hardware_library/element_transforms — только для неполной БД (те же значения).
+        # ЕДИНЫЙ ИСТОЧНИК — структурные метаданные из lattice_configs (eff_length/kind/n_slices/edge1/edge2).
+        # Fallback на hardware_library/element_transforms — только для неполной БД (те же значения).
         self.Leff = float(r0.get("eff_length") or eff.get(self.dev) or 0.0)   # эффективная (проектная .lte) длина
         self.L = self.Leff                                     # ОТКАЗ от металл-длины: кик работает ТОЛЬКО по L_eff
         self.entry = self.center - 0.5 * self.L * self.axis
         self.exit = self.center + 0.5 * self.L * self.axis
         _tr = trans.get(self.dev, {})
         self.kind = r0.get("kind") or _tr.get("kind") or ""
-        self.model = r0.get("model") or _tr.get("model") or "canonical"
-        self.nsl = int(r0.get("n_slices") or _tr.get("n_slices") or 1)
+        self.nsl = int(r0.get("n_slices") or _tr.get("n_slices") or 40)   # число срезов тела (drift-kick-drift)
         self.edge1 = float(r0.get("edge1") or 0.0)             # краевые углы E1/E2 (.lte); физика края — Фаза 3
         self.edge2 = float(r0.get("edge2") or 0.0)
         self.devs = [r["device_type_id"] for r in insts]
@@ -92,7 +91,6 @@ class Magnet:
         # суммарные ФИЗКОЭФ. (суперпозиция обмоток). source: 'physical' — из mat_* столбцов БД;
         # 'current' — из токов через coupling_matrix (когда матрицы связи готовы/валидны).
         B = G = Gv = S = O = 0.0                          # Gv — ВЕРТ. градиент (∂By/∂v), отдельно от G=∂Bz/∂u
-        Bs = Gs = Ss = Os = 0.0                           # СКЬЮ мультиполи: верт.диполь(By на оси), скью квад/секст/окт
         if source != "physical":
             raise ValueError("токовый режим матричного ядра архивирован — используйте source='physical'; "
                              "физкоэф. mat_* берутся из lattice_configs (калибровки предвычисляются туда при сборке БД)")
@@ -100,25 +98,18 @@ class Magnet:
             B += float(r.get("mat_B") or 0); G += float(r.get("mat_G") or 0)
             Gv += float(r.get("mat_Gv") or r.get("mat_G") or 0)   # дефолт = mat_G ⇒ гармонич. (совместимо)
             S += float(r.get("mat_S") or 0); O += float(r.get("mat_O") or 0)
-            Bs += float(r.get("mat_Bs") or 0); Gs += float(r.get("mat_Gs") or 0)   # скью (дефолт 0)
-            Ss += float(r.get("mat_Ss") or 0); Os += float(r.get("mat_Os") or 0)
         # ДИПОЛЬ: mat_G/Gv/S/O заданы ОТНОСИТЕЛЬНО поля (доли mat_B, аппаратные константы) → в абсолютные.
         # Даёт 1/f = θ₀·g (фокус ∝ изгибу): при излучении θ₀ пересчит. по текущему p, отношения фиксированы.
         if self.kind == "dipole":
-            G *= B; Gv *= B; S *= B; O *= B; Gs *= B; Ss *= B; Os *= B   # скью-градиенты тоже относит.; Bs — абс. изгиб
+            G *= B; Gv *= B; S *= B; O *= B                              # градиенты диполя заданы относительно поля
         # силы по ОПОРНОЙ жёсткости (по L_eff — интеграл поля); δ-зависимость — в дрейфе.
         # k1=k1u (гор. фокус ∂Bz/∂u), k1v (верт. фокус ∂By/∂v): неголоморфн. диполь Gu≠Gv ⇒ |f_x|≠|f_y|.
         self.theta0 = QP * B * self.Leff
         self.k1 = QP * G; self.k1v = QP * Gv; self.k2 = QP * S; self.k3 = QP * O
-        # СКЬЮ + ВЕРТ.ИЗГИБ (универс. мультипольный элемент): thetaY — верт. изгиб (skew-диполь, поле By на оси),
-        # k1s — скью-квад (связь плоскостей), k2s/k3s — скью секступоль/октуполь. Мнимая часть Cₙ=bₙ+i·aₙ.
-        self.thetaY = QP * Bs * self.Leff
-        self.k1s = QP * Gs; self.k2s = QP * Ss; self.k3s = QP * Os
         # краевой (фриндж) верт. фокус 2-го порядка: 1/f_y = FE·θ₀²/L_eff (∝поле², offset/угол-независим).
         # Эквивалент углового члена Δv'=−(q/p)u'v∂ₓBz после ∫по частям = −(q/p)²∫Bz²ds·v. Диполи: θ₀≠0.
         self.kEdge = _edge_ff(self.dev) * self.theta0 ** 2 / self.Leff if self.Leff > 0 else 0.0
-        self.nonzero = any(abs(v) > 0 for v in (self.theta0, self.thetaY, self.k1, self.k1v, self.k2, self.k3,
-                                                self.k1s, self.k2s, self.k3s, self.kEdge))
+        self.nonzero = any(abs(v) > 0 for v in (self.theta0, self.k1, self.k1v, self.k2, self.k3, self.kEdge))
 
     def body(self, st):
         """Тело: N срезов drift-kick-drift по ЭФФЕКТИВНОЙ длине (ds_g=ds_f=L_eff/N) ⇒ полный изгиб/
@@ -127,8 +118,7 @@ class Magnet:
         if not self.nonzero:                                   # выключенный — дрейф (нулевой элемент)
             return _drift(st, self.L)
         th, k1, k1v, k2, k3, kE = self.theta0, self.k1, self.k1v, self.k2, self.k3, self.kEdge
-        thy, k1s, k2s, k3s = self.thetaY, self.k1s, self.k2s, self.k3s
-        N = self.nsl if self.model == "composite" else 40
+        N = self.nsl
         dsg = self.L / N; dsf = self.Leff / N
         for _ in range(N):
             st = _drift(st, dsg / 2.0)
@@ -136,10 +126,6 @@ class Magnet:
             # НОРМАЛЬНЫЕ мультиполи (Re Cₙ): изгиб θ0, квад −k1·x, секступоль, октуполь + краевая линза
             px += th / N - k1 * x * dsf - 0.5 * k2 * (x * x - y * y) * dsf - (k3 / 6.0) * (x ** 3 - 3 * x * y * y) * dsf
             py += k1v * y * dsf + k2 * x * y * dsf + (k3 / 6.0) * (3 * x * x * y - y ** 3) * dsf - (kE / N) * y
-            # СКЬЮ + ВЕРТ.ИЗГИБ (Im Cₙ): верт.диполь θy, скью-квад k1s (связь плоскостей), скью секступоль/октуполь
-            if k1s or k2s or k3s or thy:
-                px += k1s * y * dsf + k2s * x * y * dsf + (k3s / 6.0) * (3 * x * x * y - y ** 3) * dsf
-                py += thy / N + k1s * x * dsf + 0.5 * k2s * (x * x - y * y) * dsf + (k3s / 6.0) * (x ** 3 - 3 * x * y * y) * dsf
             st = _drift((x, px, y, py, t, d), dsg / 2.0)
         return st
 

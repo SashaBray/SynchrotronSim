@@ -8,8 +8,8 @@ import numpy as np
 import matrix_tracker as mt
 import corrector_experiment as ce
 
-MULT = ["per_B_Tl", "per_Bs_Tl", "per_G_Tlm", "per_Gs_Tlm", "per_S_Tlm2", "per_Ss_Tlm2", "per_O_Tlm3", "per_Os_Tlm3"]
-MATCOL = ["mat_B", "mat_Bs", "mat_G", "mat_Gs", "mat_S", "mat_Ss", "mat_O", "mat_Os"]
+MULT = ["per_B_Tl", "per_G_Tlm", "per_S_Tlm2", "per_O_Tlm3"]
+MATCOL = ["mat_B", "mat_G", "mat_S", "mat_O"]
 WIND = ["main", "c1", "c2", "c3", "c4"]
 LEFF, LMET = 0.1615, 0.108
 

@@ -90,9 +90,7 @@ def build_magnet(windings, coeffs):
         inst = {"device_type_id": dev0, "x": "0", "y": "0", "z": "0", "yaw": "0", "pitch": "0", "roll": "0",
                 "instance_id": "1", "arg_val": "0", "correct_coeff": "1",
                 "mat_B": str(coeffs.get("B", 0)), "mat_G": str(coeffs.get("G", 0)),
-                "mat_S": str(coeffs.get("S", 0)), "mat_O": str(coeffs.get("O", 0)),
-                "mat_Bs": str(coeffs.get("Bs", 0)), "mat_Gs": str(coeffs.get("Gs", 0)),   # скью-квад
-                "mat_Ss": str(coeffs.get("Ss", 0)), "mat_Os": str(coeffs.get("Os", 0))}   # скью секступ./октуп. + верт.диполь Bs
+                "mat_S": str(coeffs.get("S", 0)), "mat_O": str(coeffs.get("O", 0))}
         return mt.Magnet([inst], EFF, PHYS, COUP, TRANS, source="physical")
     insts = [{"device_type_id": d, "x": "0", "y": "0", "z": "0", "yaw": "0", "pitch": "0", "roll": "0",
               "instance_id": str(i + 1), "arg_val": str(c), "correct_coeff": "1"} for i, (d, c) in enumerate(windings.items())]
@@ -121,10 +119,9 @@ def track_diff(windings, entry, exit, probe):
 
 def track_kick(windings, coeffs, entry, exit, probe):
     m = build_magnet(windings, coeffs); half = _half(windings); u0, v0, up0, vp0 = probe
-    N = m.nsl if m.model == "composite" else 40
+    N = m.nsl
     dsg = m.L / N; dsf = m.Leff / N                          # РИНГ-ядро: дрейф по L_phys, кик по Leff
     th, k1, k1v, k2, k3 = m.theta0, m.k1, m.k1v, m.k2, m.k3
-    thy, k1s, k2s, k3s = m.thetaY, m.k1s, m.k2s, m.k3s       # верт.диполь + скью квад/секступ./октуп. (корректоры)
     lead = max(0.0, (2 * half - m.L) / 2)                    # центрируем физ.элемент (L_phys) в зоне поля 2·half
     pts = [(0.0, u0, v0)]; s = 0.0
     s, uu, vv = _drift(pts, s, u0, v0, up0, vp0, entry + lead); st = (uu, up0, vv, vp0, 0.0, 0.0)
@@ -133,9 +130,6 @@ def track_kick(windings, coeffs, entry, exit, probe):
         x, px, y, py, t, d = st
         px += th / N - k1 * x * dsf - 0.5 * k2 * (x * x - y * y) * dsf - (k3 / 6.0) * (x**3 - 3 * x * y * y) * dsf
         py += k1v * y * dsf + k2 * x * y * dsf + (k3 / 6.0) * (3 * x * x * y - y**3) * dsf
-        if k1s or k2s or k3s or thy:                         # Im Cₙ — как matrix_tracker.body
-            px += k1s * y * dsf + k2s * x * y * dsf + (k3s / 6.0) * (3 * x * x * y - y**3) * dsf
-            py += thy / N + k1s * x * dsf + 0.5 * k2s * (x * x - y * y) * dsf + (k3s / 6.0) * (x**3 - 3 * x * y * y) * dsf
         st = mt._drift((x, px, y, py, t, d), dsg / 2.0); s += dsg / 2.0
         pts.append((s, st[0], st[2]))
     _drift(pts, s, st[0], st[2], st[1], st[3], lead + exit)
@@ -176,11 +170,8 @@ def coeff_summary(windings, coeffs):
     """Сводка: элемент, токи обмоток и ФИЗКОЭФ. + кики, которыми отработали kick/elegant.
     Физкоэф. берутся из собранного Magnet (source=current → из матрицы связи; coeffs → заданные)."""
     m = build_magnet(windings, coeffs); Leff, L = m.Leff, m.L; QPl = QP * Leff
-    phys = {"B": (m.theta0 / QPl if QPl else 0.0), "Bs": (m.thetaY / QPl if QPl else 0.0),
-            "G": m.k1 / QP, "Gs": m.k1s / QP, "S": m.k2 / QP, "Ss": m.k2s / QP,
-            "O": m.k3 / QP, "Os": m.k3s / QP}
-    kick = {"θ0": m.theta0, "θy": m.thetaY, "k1": m.k1, "k1s": m.k1s,
-            "k2": m.k2, "k2s": m.k2s, "k3": m.k3, "k3s": m.k3s}
+    phys = {"B": (m.theta0 / QPl if QPl else 0.0), "G": m.k1 / QP, "S": m.k2 / QP, "O": m.k3 / QP}
+    kick = {"θ0": m.theta0, "k1": m.k1, "k2": m.k2, "k3": m.k3}
     dev0 = next(iter(windings)); kind = TRANS.get(dev0, {}).get("kind", "?")
     return dict(devices=list(windings), kind=kind, currents=windings, Leff=Leff, L=L,
                 phys=phys, kick=kick, src=("вручную (coeffs)" if coeffs else "матрица связи ← токи"))

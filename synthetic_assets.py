@@ -60,7 +60,7 @@ def gen_field_map(ref, nid, new_eff, ref_row, col):
             return None
         pos = np.where(xg >= 0)[0]; xp = xg[pos]; pp = prof[pos] / Gm
         Xb = next((xp[i] for i in range(len(pp)) if pp[i] < 0.9), xp[-1])    # полуширина тела по профилю
-        phys_ref = float(ref_row[col["phys_length"]])
+        phys_ref = float(ref_row[col["eff_length"]])          # phys_length убран → оценка длины тела по L_eff
         if Xb < 0.4 * phys_ref:                                 # профиль не выделил тело (combined-func) → по металлу
             Xb = 0.5 * phys_ref
         L_body = 2 * Xb
@@ -102,9 +102,9 @@ def gen_stl(ref, nid, new_eff, ref_row, col):
             src = cand[0] if cand else None
         if not src or not os.path.exists(src):
             return None
-        ref_eff = float(ref_row[col["eff_length"]]); ref_phys = float(ref_row[col["phys_length"]])
-        new_phys = ref_phys + (new_eff - ref_eff)              # сплайс тела (как в библиотеке)
-        ratio = new_phys / ref_phys if ref_phys > 1e-6 else 1.0
+        ref_eff = float(ref_row[col["eff_length"]])
+        new_phys = new_eff                                    # phys_length убран → длина по L_eff
+        ratio = new_phys / ref_eff if ref_eff > 1e-6 else 1.0
         with open(src, "rb") as f:
             head = f.read(80); n = struct.unpack("<I", f.read(4))[0]; raw = f.read(n * 50)
         dt = np.dtype([("n", "<f4", 3), ("v1", "<f4", 3), ("v2", "<f4", 3), ("v3", "<f4", 3), ("a", "<u2")])

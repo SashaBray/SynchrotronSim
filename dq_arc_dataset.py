@@ -51,7 +51,7 @@ ZMAX = min(abs(_h1["mnz"]), abs(_h1["mnz"] + (_h1["nz"] - 1) * _h1["sz"]))   # �
 RMAX = min(YMAX, ZMAX)                                                        # предел по |попереч| (пучок 2D)
 (f1, n1, _), (f2, n2, _), (f3, n3, _) = _M[DEV[0]], _M[DEV[1]], _M[DEV[2]]
 GDES = DESIGN["K1"] / QP
-LPHYS = {r["device_type_id"]: float(r["phys_length"]) for r in mt._read("hardware_library.csv")}[DEV[0]]
+LPHYS = {r["device_type_id"]: float(r["eff_length"]) for r in mt._read("hardware_library.csv")}[DEV[0]]   # phys убран → L_eff
 LEAD = max(0.0, (2.0 * HALF - LPHYS) / 2.0)       # поле-свободный отступ: физ.элемент L_phys по центру зоны 2·half
 DS_G = LPHYS / N; DS_F = LEFF / N                  # ДРЕЙФ по L_phys (как ring-ядро element_bench), КИК по Leff — НЕ 2·half!
 
