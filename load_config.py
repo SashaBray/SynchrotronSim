@@ -111,8 +111,7 @@ def load(cfg, lattice, exp, gen_assets, parse_only, force):
         lat = lattice or sila_lattice_id()
         if lattice_exists(lat) and not force:
             raise SystemExit(f"[защита] решётка {lat} уже есть в БД. Полная загрузка СБРОСИТ тюн "
-                             f"(coupling_matrix, mat_*). Повтори с --force (будут бэкапы) или используй --parse-only.")
-        _backup("workspace/tables/coupling_matrix.csv")     # build_matrix_db перезапишет откалиброванную связь
+                             f"(mat_*). Повтори с --force (будут бэкапы) или используй --parse-only.")
         sh(["assemble_lattice_configs.py"])
         sh(["build_matrix_db.py"])
         sh(["warmstart_ring.py", str(lat), "--lte-dir", cfg["dir"]])

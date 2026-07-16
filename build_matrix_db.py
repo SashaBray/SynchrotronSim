@@ -3,9 +3,7 @@
   1) hardware_library.csv  — колонка eff_length (эфф. длина, м) каждому элементу;
   2) element_transforms.csv — какие матричные преобразования делает элемент библиотеки
      (kind + активные физкоэффициенты + число срезов тела);
-  3) coupling_matrix.csv   — матрица связи «входной ток/коэф. → ФИЗИЧЕСКИЕ коэффициенты»
-     (на единицу входа; суперпозиция: у со-локованных обмоток вклады складываются);
-  4) element_connectivity.csv — для каждого экземпляра решётки: предшественник и преемник.
+  3) element_connectivity.csv — для каждого экземпляра решётки: предшественник и преемник.
 
 Источники: composite_fullrange.json (L_eff, первичные коэф.), bip_matrix (матрица связи DQ, q/p, Bρ).
 Физика: k1=(q/p)G, k2=(q/p)S, k3=(q/p)O, θy=(q/p)·B·L_eff ⇒ обратно G=k1/(q/p) и т.д."""
@@ -115,27 +113,6 @@ def write_transforms():
                                              "40", r.get("notes") or ""]     # n_slices=40 всем
     for dev, (kind, coeffs, ns, note) in TRANSFORMS.items():
         existing[dev] = [dev, kind, coeffs, str(ns), note]
-    with open(p, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f, delimiter=";"); w.writerow(hdr); w.writerows(existing.values())
-    return p
-
-
-def write_coupling():
-    """СОХРАНЯЮЩЕ: обновляет/добавляет базовые (TRANSFORMS), сохраняет прочие (корректор/синтетика)."""
-    p = os.path.join(TB, "coupling_matrix.csv"); R = coupling_rows()
-    hdr = ["device_type_id", "input_type", "per_B_Tl", "per_G_Tlm", "per_S_Tlm2", "per_O_Tlm3",
-           "per_Bs_Tl", "per_Gs_Tlm", "per_Ss_Tlm2", "per_Os_Tlm3", "notes"]
-    existing = {}
-    if os.path.exists(p):
-        rd = list(csv.reader(open(p, encoding="utf-8"), delimiter=";"))
-        for r in rd[1:]:
-            if r:
-                existing[r[0]] = r
-    for dev in R:                                            # ТОЛЬКО базовые из coupling_rows (QP/SP/OP/DQ/DP);
-        c = R[dev]                                           # корректоры (полный мультипольный фит v3) и
-        Bs, Gs, Ss, Os = (c.get(k, 0.0) for k in ("Bs", "Gs", "Ss", "Os"))   # синтетику НЕ трогаем — сохраняем existing
-        existing[dev] = [dev, c["itype"], f"{c['B']:.6e}", f"{c['G']:.6e}", f"{c['S']:.6e}", f"{c['O']:.6e}",
-                         f"{Bs:.6e}", f"{Gs:.6e}", f"{Ss:.6e}", f"{Os:.6e}", ""]
     with open(p, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=";"); w.writerow(hdr); w.writerows(existing.values())
     return p
@@ -294,7 +271,6 @@ def add_edge_angles():
 def main():
     print("hardware_library + eff_length:", add_lengths())
     print("element_transforms:", write_transforms())
-    print("coupling_matrix:", write_coupling())
     conn, nlat, nrows = write_connectivity()
     print(f"element_connectivity: {conn}  ({nlat} решёток, {nrows} экземпляров)")
     mp, ndip = add_matrix_columns()

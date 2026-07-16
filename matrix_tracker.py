@@ -28,7 +28,7 @@ def load_db():
     hw = _read("hardware_library.csv")
     eff = {r["device_type_id"]: float(r["eff_length"]) for r in hw}
     phys = {}                                        # phys_length УДАЛЁН из библиотеки — кик работает ТОЛЬКО по L_eff
-    coup = {r["device_type_id"]: r for r in _read("coupling_matrix.csv")}
+    coup = {}                                        # coupling_matrix УДАЛЁН (токовый режим вырезан) — ядро физрежима её не читает
     trans = {r["device_type_id"]: r for r in _read("element_transforms.csv")}
     return eff, phys, coup, trans
 

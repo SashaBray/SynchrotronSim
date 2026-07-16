@@ -27,21 +27,19 @@ def _write(name, header, rows):
 
 
 class LibraryManager:
-    """Загружает hardware_library / element_transforms / coupling_matrix, добавляет синтетические
+    """Загружает hardware_library / element_transforms, добавляет синтетические
     элементы под требуемые L_eff, сохраняет обратно (только если что-то добавлено)."""
 
     def __init__(self, tol_m=1e-3, gen_assets=False, verbose=True):
         self.tol = tol_m; self.gen_assets = gen_assets; self.verbose = verbose
         self.hw_head, self.hw_rows = _read("hardware_library.csv")
         self.tr_head, self.tr_rows = _read("element_transforms.csv")
-        self.cp_head, self.cp_rows = _read("coupling_matrix.csv")
         self.i = {c: k for k, c in enumerate(self.hw_head)}
         for req in ("synthetic", "scaled_from"):
             if req not in self.i:
                 raise RuntimeError(f"hardware_library.csv нет столбца {req} — добавьте synthetic/scaled_from")
         self.hw = {r[0]: r for r in self.hw_rows}
         self.tr = {r[0]: r for r in self.tr_rows}
-        self.cp = {r[0]: r for r in self.cp_rows}
         self.created = []; self.dirty = False
 
     def eff(self, did):
@@ -86,8 +84,6 @@ class LibraryManager:
             if len(tr) > 5:
                 tr[5] = f"синтетика L_eff={new_eff*1000:.0f}мм (масштаб от {ref})"
             self.tr[nid] = tr; self.tr_rows.append(tr)
-        if ref in self.cp:                                # coupling_matrix: per-амперные коэф. длино-независимы
-            cp = list(self.cp[ref]); cp[0] = nid; self.cp[nid] = cp; self.cp_rows.append(cp)
         self.created.append((nid, ref, new_eff)); self.dirty = True
         if self.verbose:
             asset = " +карта+STL" if self.gen_assets else ""
@@ -98,5 +94,4 @@ class LibraryManager:
             return 0
         _write("hardware_library.csv", self.hw_head, self.hw_rows)
         _write("element_transforms.csv", self.tr_head, self.tr_rows)
-        _write("coupling_matrix.csv", self.cp_head, self.cp_rows)
         return len(self.created)

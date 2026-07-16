@@ -198,8 +198,7 @@ DESC = {
 }
 PER_LABEL = [("per_B_Tl", "per_B", "Тл", "B"), ("per_G_Tlm", "per_G", "Тл/м", "G"),
              ("per_S_Tlm2", "per_S", "Тл/м²", "S"), ("per_O_Tlm3", "per_O", "Тл/м³", "O")]
-CM = {r["device_type_id"]: r for r in __import__("csv").DictReader(
-      open(os.path.join("workspace", "tables", "coupling_matrix.csv"), encoding="utf-8"), delimiter=";")}
+CM = {}                                  # coupling_matrix УДАЛЁН (токовый режим вырезан) — coupling-поля пусты
 
 
 def fmt(v, prec=4):

@@ -38,7 +38,6 @@ TB = os.path.join("workspace", "tables")
 BENCH = os.path.join("workspace", "research", "bench"); os.makedirs(BENCH, exist_ok=True)
 CFG_CSV = os.path.join(TB, "bench_experiments.csv")
 HW = {r["device_type_id"]: r for r in mt._read("hardware_library.csv")}
-CM = {r["device_type_id"]: r for r in mt._read("coupling_matrix.csv")}
 EFF, PHYS, COUP, TRANS = mt.load_db()
 CFG_COLS = ["exp_id", "name", "windings", "entry_m", "exit_m", "probes", "coeffs", "notes"]
 DEF_PROBES = [[0, 0, 0, 0], [2e-3, 0, 0, 0], [-2e-3, 0, 0, 0], [4e-3, 0, 0, 0], [-4e-3, 0, 0, 0]]

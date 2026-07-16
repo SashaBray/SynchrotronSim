@@ -16,7 +16,7 @@ OUT = os.path.join("workspace", "research", "kickdoc"); FIGS = os.path.join(OUT,
 os.makedirs(FIGS, exist_ok=True)
 plt.rcParams.update({"font.size": 10, "font.family": "DejaVu Sans", "figure.dpi": 130})
 HW = {r["device_type_id"]: r for r in mt._read("hardware_library.csv")}
-CM = {r["device_type_id"]: r for r in mt._read("coupling_matrix.csv")}
+CM = {}                                  # coupling_matrix УДАЛЁН (токовый режим вырезан) — coupling-колонки пусты
 EFF, PHYS, COUP, TRANS = mt.load_db()
 
 # (dev, значение-аргумента, подпись). Для current — ток [А]; для coeff (диполи) — correct_coeff.
@@ -36,7 +36,7 @@ PROBES = [(0.0, 0.0), (2e-3, 0.0), (-2e-3, 0.0), (0.0, 2e-3), (0.0, -2e-3)]  # (
 def scaled_field(dev, val):
     """Поле элемента при аргументе val (ток или коэф.), с корректными множителями. → field_fn, half."""
     h, B, nom = dsp._load_full(dev, HW[dev])
-    itype = CM[dev].get("input_type", "current")
+    itype = CM.get(dev, {}).get("input_type", "current")
     fd = float(HW[dev].get("field_direction") or 1)
     hwcc = float(HW[dev].get("correct_coeff") or 1)
     scale = (val / nom) if itype == "current" else (val * hwcc * fd)
@@ -73,7 +73,7 @@ def kick_probe(m, half, u0, v0):
 
 
 def make_magnet(dev, val):
-    itype = CM[dev].get("input_type", "current")
+    itype = CM.get(dev, {}).get("input_type", "current")
     inst = {"device_type_id": dev, "x": "0", "y": "0", "z": "0", "yaw": "0", "pitch": "0", "roll": "0",
             "instance_id": "1", "arg_val": str(val) if itype == "current" else "0",
             "correct_coeff": str(val) if itype == "coeff" else "1"}
@@ -82,7 +82,7 @@ def make_magnet(dev, val):
 
 def coef_table(dev):
     """Таблица ток→физкоэф. по матрице связи (5 значений тока)."""
-    c = CM[dev]; itype = c.get("input_type", "current")
+    c = CM.get(dev, {}); itype = c.get("input_type", "current")
     perB, perG, perS, perO = (float(c.get(k) or 0) for k in ("per_B_Tl", "per_G_Tlm", "per_S_Tlm2", "per_O_Tlm3"))
     vals = [-100, -50, 0, 50, 100] if itype == "current" else [-2, -1, 0, 1, 2]
     rows = []
@@ -123,7 +123,7 @@ def main():
         fig.tight_layout(); fig.savefig(os.path.join(FIGS, f"{dev}.png")); plt.close(fig)
         data["elements"].append(dict(
             dev=dev, title=title, val=val, kind=m.kind, nsl=m.nsl, Leff=m.Leff, Lphys=m.L,
-            input_type=CM[dev].get("input_type"), active=TRANS[dev].get("active_coeffs"),
+            input_type=CM.get(dev, {}).get("input_type") or "current", active=TRANS[dev].get("active_coeffs"),
             coeffs=dict(theta0=m.theta0, k1=m.k1, k2=m.k2, k3=m.k3, kEdge=m.kEdge),
             metric=dict(max_dup_urad=max(met_up) * 1e6, max_dvp_urad=max(met_vp) * 1e6),
             coupling=coef_table(dev)))
