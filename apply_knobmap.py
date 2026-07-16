@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Применить настроенные C++-оптимизатором ручки (matrix_tune_result.csv) к mat_* решётки в
-lattice_configs. Читает knob-map (matrix_knobs.csv: coeff + group_indices) и значения; для каждой
+lattice_configs. Читает knob-map (matrix_knobs + matrix_knob_members) и значения; для каждой
 ручки пишет mat_G/S/O в ПЕРВУЮ обмотку каждой управляемой группы. Изгибы (mat_B) не трогаются
 (заданы warm-start геометрией). Бэкап сохраняется. Запуск: py -3.14 apply_knobmap.py [lattice=101]"""
 import os, sys, csv, shutil
@@ -13,6 +13,9 @@ MATCOL = {"G": "mat_G", "S": "mat_S", "O": "mat_O"}
 
 def apply(lattice=101):
     knobrows = list(csv.DictReader(open(os.path.join(TB, "matrix_knobs.csv"), encoding="utf-8"), delimiter=";"))
+    members = {}                                          # дочерняя таблица: knob_id → [индексы магнитов]
+    for r in csv.DictReader(open(os.path.join(TB, "matrix_knob_members.csv"), encoding="utf-8"), delimiter=";"):
+        members.setdefault(r["knob_id"], []).append(int(r["magnet_index"]))
     tuned = {r["knob_id"]: float(r["value"])
              for r in csv.DictReader(open(os.path.join(TB, "matrix_tune_result.csv"), encoding="utf-8"), delimiter=";")}
     grp = ws.grouped_magnets(lattice)
@@ -25,8 +28,8 @@ def apply(lattice=101):
     n = 0
     for kr in knobrows:
         col = MATCOL[kr["coeff"]]; v = tuned[kr["knob_id"]]
-        for gi in kr["group_indices"].split("|"):
-            first = grp[int(gi)][0]["instance_id"]
+        for gi in members.get(kr["knob_id"], []):
+            first = grp[gi][0]["instance_id"]
             byid[first][col] = f"{v:.9g}"; n += 1
 
     shutil.copy(path, os.path.join(TB, "backups", "lattice_configs_pre_ringtune.csv"))

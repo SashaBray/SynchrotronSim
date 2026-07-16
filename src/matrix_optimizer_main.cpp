@@ -31,20 +31,24 @@ struct Knob { char coeff; double val; std::vector<int> idx; std::string sp_type;
 
 std::vector<Knob> readKnobs(const std::string& ws) {
     std::vector<Knob> ks;
+    // метаданные ручек: knob_id;coeff;init;sp_type;n_groups
     for (auto& r : readCSV(ws + "tables/matrix_knobs.csv")) {
-        if (r.size() < 6) continue;
+        if (r.size() < 4) continue;
         Knob k; k.coeff = r[1][0]; k.val = std::stod(r[2]); k.sp_type = r[3];
-        std::stringstream ss(r[5]); std::string tok;   // разделитель '|' (readCSV НЕ трогает; ',' → '.')
-        while (std::getline(ss, tok, '|')) if (!tok.empty()) k.idx.push_back(std::stoi(tok));
         ks.push_back(k);
+    }
+    // индексы управляемых магнитов — из ДОЧЕРНЕЙ таблицы matrix_knob_members (knob_id;magnet_index)
+    for (auto& r : readCSV(ws + "tables/matrix_knob_members.csv")) {
+        if (r.size() < 2) continue;
+        int kid = std::stoi(r[0]);
+        if (kid >= 0 && kid < (int)ks.size()) ks[kid].idx.push_back(std::stoi(r[1]));
     }
     return ks;
 }
 
 // ---- рабочий пучок ±1мм: опорная + полное кольцо радиуса 1мм в (x,y) + дисперсия = 11 частиц ----
 // (>2мм считаем неустойчивыми — оптимизируем только реальную рабочую область ±1мм)
-std::vector<State> makeBeam() {
-    const double r = 1e-3;
+std::vector<State> makeBeam(double r) {
     std::vector<State> P{ {0,0,0,0,0,0},
         { r,0,0,0,0,0}, {-r,0,0,0,0,0}, {0,0, r,0,0,0}, {0,0,-r,0,0,0},
         { r,0, r,0,0,0}, {-r,0, r,0,0,0}, { r,0,-r,0,0,0}, {-r,0,-r,0,0,0},
@@ -103,6 +107,7 @@ int main(int argc, char* argv[]) {
     int lattice = (argc > 1) ? std::stoi(argv[1]) : 101;
     int rounds  = (argc > 2) ? std::stoi(argv[2]) : 20;
     double aper = (argc > 3) ? std::stod(argv[3]) : 0.03;
+    double beamR = (argc > 4) ? std::stod(argv[4]) * 1e-3 : 1e-3;   // радиус пучка, мм → м
     std::string ws = findWorkspace(argv[0]);
     auto now = [] { return std::chrono::high_resolution_clock::now(); };
     auto sec = [](auto a, auto b) { return std::chrono::duration<double>(b - a).count(); };
@@ -110,7 +115,7 @@ int main(int argc, char* argv[]) {
     DB db = loadDB(ws);
     auto mags = buildLine(ws, db, lattice, -1, -1, "physical");
     auto knobs = readKnobs(ws);
-    auto beam = makeBeam();
+    auto beam = makeBeam(beamR);
     if (mags.empty() || knobs.empty()) { std::cout << "Нет магнитов/ручек — проверь БД/knob-map.\n"; return 1; }
     int total = (int)mags.size();
 
@@ -120,7 +125,8 @@ int main(int argc, char* argv[]) {
     applyKnobs(mags, knobs, val);
     int horizon, nlost; double best = lossOf(mags, beam, aper, horizon, nlost);
     std::cout << "Кольцо " << lattice << ": " << total << " магнитов, " << knobs.size()
-              << " ручек, пучок " << beam.size() << " частиц, апертура " << aper * 1e3 << "мм.\n";
+              << " ручек, пучок " << beam.size() << " частиц (радиус " << beamR * 1e3
+              << "мм), апертура " << aper * 1e3 << "мм.\n";
     std::cout << std::fixed << std::setprecision(2)
               << "Старт (warm-start .lte): loss=" << best * 1e3 << "мм  горизонт=" << horizon << "/" << total
               << "  потеряно=" << nlost << "\n";

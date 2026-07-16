@@ -4,7 +4,9 @@
 junction/инжектор — уникальные ручки на каждый магнит. Корректоры/диполи заморожены (без ручек).
 
 Индексы групп совпадают с порядком buildLine в C++ (группировка со-локованных по instance_id).
-Формат matrix_knobs.csv:  knob_id;coeff;init;n_groups;group_indices(comma)
+Формат: matrix_knobs.csv (knob_id;coeff;init;sp_type;n_groups) — метаданные ручек;
+        matrix_knob_members.csv (knob_id;magnet_index) — дочерняя таблица «ручка → индекс магнита»
+        (вместо '|'-списка в ячейке; связь один-ко-многим нормализована).
 coeff ∈ G|S|O ; init — проектное значение из warm-start.
 
 Запуск: py -3.14 build_knobmap.py [lattice=101]
@@ -57,16 +59,19 @@ def build_knobmap(lattice=101):
                 order.append(key)
             knobs[key]["indices"].append(i)
 
-    # запись
+    # запись: matrix_knobs (метаданные ручек) + matrix_knob_members (child: ручка → индекс магнита)
     path = os.path.join(TB, "matrix_knobs.csv")
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f, delimiter=";")
-        w.writerow(["knob_id", "coeff", "init", "sp_type", "n_groups", "group_indices"])
+    mem_path = os.path.join(TB, "matrix_knob_members.csv")
+    with open(path, "w", newline="", encoding="utf-8") as f, \
+         open(mem_path, "w", newline="", encoding="utf-8") as fm:
+        w = csv.writer(f, delimiter=";"); wm = csv.writer(fm, delimiter=";")
+        w.writerow(["knob_id", "coeff", "init", "sp_type", "n_groups"])
+        wm.writerow(["knob_id", "magnet_index"])
         for kid, key in enumerate(order):
             k = knobs[key]
-            # разделитель индексов — '|', НЕ ',' (C++ readCSV конвертирует ',' → '.' для EU-десятичных)
-            w.writerow([kid, k["coeff"], f"{k['init']:.9g}", k["sp_type"],
-                        len(k["indices"]), "|".join(str(x) for x in k["indices"])])
+            w.writerow([kid, k["coeff"], f"{k['init']:.9g}", k["sp_type"], len(k["indices"])])
+            for idx in k["indices"]:
+                wm.writerow([kid, idx])
 
     nstd = sum(1 for key in order if key[0][0] == "std")
     njunc = len(order) - nstd
