@@ -315,20 +315,35 @@ def visualize(target_exp_id):
     except Exception:
         pass
 
-    # Камера из visualizer.json (раздел camera).
+    # Камера НАД точкой старта пучка (первая точка опорной частицы) — авто-центр на инжекции
+    # для ЛЮБОГО эксперимента. ПЕРСПЕКТИВА по умолчанию (при вращении сцена выглядит объёмной);
+    # parallel_projection=true в visualizer.json → ортографическая. above_start=false → ручная позиция.
     cam = VIZ_CFG.get("camera", {})
-    plotter.camera_position = [
-        tuple(cam.get("position", [7.0, 0.5, 15.0])),
-        tuple(cam.get("focus",    [7.0, 0.5,  0.0])),
-        tuple(cam.get("up",       [0.0, 1.0,  0.0])),
-    ]
-    # Параллельная (ортографическая) проекция -- параллельные линии
-    # остаются параллельными, без перспективного схождения.
-    # Управляется "parallel_projection" в visualizer.json (default true).
-    if cam.get("parallel_projection", True):
+    up = tuple(cam.get("up", [0.0, 1.0, 0.0]))
+    ortho = bool(cam.get("parallel_projection", False))   # по умолчанию — ПЕРСПЕКТИВА
+    va = float(cam.get("view_angle", 30.0))
+    if cam.get("above_start", True) and particles and len(particles[0]) > 0:
+        s = np.asarray(particles[0][0], dtype=float)      # старт опорной частицы (X,Y,Z)
+        scale = float(cam.get("start_scale", 4.0))        # желаемая полу-высота кадра у старта, м
+        # высота камеры: ortho — фикс. (зум задаёт parallel_scale); перспектива — из угла обзора (кадр ≈ ±scale)
+        h = float(cam.get("start_height", 60.0)) if ortho else scale / float(np.tan(np.radians(va / 2.0)))
+        plotter.camera_position = [(s[0], s[1], s[2] + h), (s[0], s[1], s[2]), up]
+        pscale = scale
+        print(f"  Камера над стартом пучка ({s[0]:.2f}, {s[1]:.2f}, {s[2]:.2f}), обзор ±{scale} м, "
+              f"{'ортографич.' if ortho else 'перспектива'}")
+    else:
+        plotter.camera_position = [
+            tuple(cam.get("position", [7.0, 0.5, 15.0])),
+            tuple(cam.get("focus",    [7.0, 0.5,  0.0])),
+            up,
+        ]
+        pscale = float(cam["parallel_scale"]) if cam.get("parallel_scale") else None
+    if ortho:
         plotter.enable_parallel_projection()
-        if cam.get("parallel_scale"):                     # полу-высота обзора (м); для вида всего кольца
-            plotter.camera.parallel_scale = float(cam["parallel_scale"])
+        if pscale:
+            plotter.camera.parallel_scale = pscale
+    else:
+        plotter.camera.view_angle = va                    # ПЕРСПЕКТИВА (parallel projection НЕ включаем)
 
     print(f"\nTotal scene preparation: {time.time() - t_start:.2f}s")
     print("--- Opening 3D window ---")

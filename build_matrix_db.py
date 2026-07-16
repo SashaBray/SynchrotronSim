@@ -62,8 +62,13 @@ TRANSFORMS = {
     "DQ_I3_1A": ("dq", "theta_y|k1|k2", "composite", 40, "диполь-квадруполь combined, обмотка I3"),
     "DP_L_PM":  ("dipole", "theta_y", "canonical", 1, "поворотный ПМ длинный"),
     "DP_sh_PM": ("dipole", "theta_y", "canonical", 1, "поворотный ПМ короткий"),
-    "corrector_I1_1A": ("kicker", "kick_y", "canonical", 1, "корректор гориз. (ЖДЁТ характеризации)"),
-    "corrector_I2_1A": ("kicker", "kick_z", "canonical", 1, "корректор верт. (ЖДЁТ характеризации)"),
+    # 5-обмоточный корректор (main + 4 корректирующие): каждая обмотка — со-локованный кикер,
+    # H+V-эффект берётся из матрицы связи per_B/per_Bs (фит карт v3); суперпозиция как у DQ.
+    "corrector_main_100A": ("kicker", "kick_y|kick_z", "canonical", 1, "корректор 5-обм.: главная"),
+    "corrector_c1_100A": ("kicker", "kick_y|kick_z", "canonical", 1, "корректор 5-обм.: корр.1"),
+    "corrector_c2_100A": ("kicker", "kick_y|kick_z", "canonical", 1, "корректор 5-обм.: корр.2"),
+    "corrector_c3_100A": ("kicker", "kick_y|kick_z", "canonical", 1, "корректор 5-обм.: корр.3"),
+    "corrector_c4_100A": ("kicker", "kick_y|kick_z", "canonical", 1, "корректор 5-обм.: корр.4"),
 }
 
 
@@ -80,8 +85,8 @@ def coupling_rows():
         R[dev] = dict(B=bm.DQ_COUPLING_B[j], G=bm.DQ_COUPLING_G[j], S=bm.DQ_COUPLING_S[j], O=0, itype="current")
     for dev in ("DP_L_PM", "DP_sh_PM"):
         ty, _, isc = prim(dev); R[dev] = dict(B=ty / (QP * EFF[dev]), G=0, S=0, O=0, itype="coeff")  # B=θy/((q/p)L)
-    for dev in ("corrector_I1_1A", "corrector_I2_1A"):
-        R[dev] = dict(B=0, G=0, S=0, O=0, itype="current")                    # ЖДЁТ характеризации
+    # 5-обмоточный корректор (corrector_main/c1..c4_100A) — per_* уже в coupling_matrix (фит карт v3),
+    # write_coupling их СОХРАНЯЕТ (не трогаем здесь). Старые corrector_I1/I2 удалены из библиотеки.
     return R
 
 
@@ -137,12 +142,11 @@ def write_coupling():
         for r in rd[1:]:
             if r:
                 existing[r[0]] = r
-    for dev in TRANSFORMS:
-        c = R.get(dev, dict(B=0, G=0, S=0, O=0, itype="current"))
-        Bs, Gs, Ss, Os = (c.get(k, 0.0) for k in ("Bs", "Gs", "Ss", "Os"))
-        note = "ждёт характеризации" if dev.startswith("corrector") else ""
+    for dev in R:                                            # ТОЛЬКО базовые из coupling_rows (QP/SP/OP/DQ/DP);
+        c = R[dev]                                           # корректоры (полный мультипольный фит v3) и
+        Bs, Gs, Ss, Os = (c.get(k, 0.0) for k in ("Bs", "Gs", "Ss", "Os"))   # синтетику НЕ трогаем — сохраняем existing
         existing[dev] = [dev, c["itype"], f"{c['B']:.6e}", f"{c['G']:.6e}", f"{c['S']:.6e}", f"{c['O']:.6e}",
-                         f"{Bs:.6e}", f"{Gs:.6e}", f"{Ss:.6e}", f"{Os:.6e}", note]
+                         f"{Bs:.6e}", f"{Gs:.6e}", f"{Ss:.6e}", f"{Os:.6e}", ""]
     with open(p, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=";"); w.writerow(hdr); w.writerows(existing.values())
     return p

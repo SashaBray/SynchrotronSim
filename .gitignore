@@ -15,10 +15,16 @@ venv/
 
 # Данные и результаты (большие бинарные)
 workspace/fields_bin/
-workspace/fields_raw/*.fld
-workspace/fields_raw/*.txt
+workspace/fields_raw/
 workspace/results/
 *.bak
+
+# Research-выходы (датасеты/отчёты/фигуры — регенерируются кодом, ~72М)
+workspace/research/
+
+# Транзиентные бэкапы БД (варианты .bak_* / .pre_*)
+*.bak_*
+*.pre_*
 
 # Сгенерированные из LTE таблицы (восстанавливаются через lte_to_lattice.py
 # и assemble_lattice_configs.py)

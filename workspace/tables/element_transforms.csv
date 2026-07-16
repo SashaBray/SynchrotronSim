@@ -9,12 +9,8 @@ DQ_I2_1A;dq;theta_y|k1|k2;composite;40;диполь-квадруполь combine
 DQ_I3_1A;dq;theta_y|k1|k2;composite;40;диполь-квадруполь combined, обмотка I3
 DP_L_PM;dipole;theta_y;canonical;1;поворотный ПМ длинный
 DP_sh_PM;dipole;theta_y;canonical;1;поворотный ПМ короткий
-corrector_I1_1A;kicker;kick_y;canonical;1;корректор гориз. (ЖДЁТ характеризации)
-corrector_I2_1A;kicker;kick_z;canonical;1;корректор верт. (ЖДЁТ характеризации)
 BPM;monitor;;none;1;датчик положения пучка: пропускает частицы без преобразования, регистрирует средний центроид
 QP_L_1A_L295;quad;k1;canonical;1;синтетика L_eff=295мм (масштаб от QP_L_1A)
-corrector_I1_1A_L100;kicker;kick_y;canonical;1;синтетика L_eff=100мм (масштаб от corrector_I1_1A)
-corrector_I2_1A_L100;kicker;kick_z;canonical;1;синтетика L_eff=100мм (масштаб от corrector_I2_1A)
 QP_sh_1A_L162;quad;k1;canonical;1;синтетика L_eff=162мм (масштаб от QP_sh_1A)
 DP_L_PM_L418;dipole;theta_y;canonical;1;синтетика L_eff=418мм (масштаб от DP_L_PM)
 QP_sh_1A_L212;quad;k1;canonical;1;синтетика L_eff=212мм (масштаб от QP_sh_1A)
@@ -32,3 +28,23 @@ DQ_I1_1A_L400;dq;theta_y|k1|k2;composite;40;синтетика L_eff=400мм (м
 DQ_I2_1A_L400;dq;theta_y|k1|k2;composite;40;синтетика L_eff=404мм (масштаб от DQ_I2_1A)
 DQ_I3_1A_L400;dq;theta_y|k1|k2;composite;40;синтетика L_eff=410мм (масштаб от DQ_I3_1A)
 DP_sh_PM_L49;dipole;theta_y;canonical;1;синтетика L_eff=49мм (масштаб от DP_sh_PM)
+corrector_main_100A;kicker;kick_y|kick_z;canonical;1;корректор 5-обм.: главная
+corrector_c1_100A;kicker;kick_y|kick_z;canonical;1;корректор 5-обм.: корр.1
+corrector_c2_100A;kicker;kick_y|kick_z;canonical;1;корректор 5-обм.: корр.2
+corrector_c3_100A;kicker;kick_y|kick_z;canonical;1;корректор 5-обм.: корр.3
+corrector_c4_100A;kicker;kick_y|kick_z;canonical;1;корректор 5-обм.: корр.4
+corrector_main_100A_L100;kicker;kick_y|kick_z;canonical;1;синтетика L_eff=100мм (масштаб от corrector_main_100A)
+corrector_c1_100A_L100;kicker;kick_y|kick_z;canonical;1;синтетика L_eff=100мм (масштаб от corrector_c1_100A)
+corrector_c2_100A_L100;kicker;kick_y|kick_z;canonical;1;синтетика L_eff=100мм (масштаб от corrector_c2_100A)
+corrector_c3_100A_L100;kicker;kick_y|kick_z;canonical;1;синтетика L_eff=100мм (масштаб от corrector_c3_100A)
+corrector_c4_100A_L100;kicker;kick_y|kick_z;canonical;1;синтетика L_eff=100мм (масштаб от corrector_c4_100A)
+s2_QF1;quad;k1;canonical;1;s2lattice KQUAD
+s2_QD1;quad;k1;canonical;1;s2lattice KQUAD
+s2_QF2;quad;k1;canonical;1;s2lattice KQUAD
+s2_QD2;quad;k1;canonical;1;s2lattice KQUAD
+s2_QF3;quad;k1;canonical;1;s2lattice KQUAD
+s2_QD3;quad;k1;canonical;1;s2lattice KQUAD
+s2_SX;sext;k2;canonical;1;s2lattice KSEXT
+s2_SZ;sext;k2;canonical;1;s2lattice KSEXT
+s2_Bq;dipole;theta_y;canonical;1;s2lattice CSBEND
+s2_BM;dipole;theta_y;canonical;1;s2lattice CSBEND

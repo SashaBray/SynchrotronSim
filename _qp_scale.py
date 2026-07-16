@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 from field_quality import load
 
 MAP = r"C:/Sasha/Work/SILA/ansis approximations/KD/QP_sh/QP_sh_100A_full_v3.fld"
-OUT = os.path.join("workspace", "qp_scale"); os.makedirs(OUT, exist_ok=True)
+OUT = os.path.join("workspace", "research", "qp_scale"); os.makedirs(OUT, exist_ok=True)
 QE, ME, CL = 1.602176634e-19, 9.1093837015e-31, 299792458.0
 V0 = 2.967e8; G0 = 1 / math.sqrt(1 - (V0 / CL) ** 2); P0 = G0 * ME * V0
 

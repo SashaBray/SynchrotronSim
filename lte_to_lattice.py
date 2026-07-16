@@ -51,6 +51,27 @@ OUT_GROUPS         = os.path.join(WS, "lte",    "groups.csv")
 OUT_SP_ELEMENTS    = os.path.join(WS, "tables", "sp_elements.csv")
 OUT_LATTICE_LAYOUT = os.path.join(WS, "tables", "lattice_layout.csv")
 
+
+def _find_desc_line(lte_dir):
+    """Ищет *_desc.lte и *_line.lte в папке конфигурации (fallback SYLA_*)."""
+    import glob as _glob
+    def pick(patterns, fallback):
+        for pat in patterns:
+            hits = sorted(_glob.glob(os.path.join(lte_dir, pat)))
+            if hits:
+                return hits[0]
+        return os.path.join(lte_dir, fallback)
+    return (pick(["*_desc.lte", "*desc*.lte"], "SYLA_desc.lte"),
+            pick(["*_line.lte", "*line*.lte"], "SYLA_line.lte"))
+
+
+def _set_paths(lte_dir):
+    """Перенастраивает вход (.lte) и выход (devices/groups) на папку конфигурации — БЕЗ копий в корень."""
+    global LTE_DESC, LTE_LINE, OUT_DEVICES, OUT_GROUPS
+    LTE_DESC, LTE_LINE = _find_desc_line(lte_dir)
+    OUT_DEVICES = os.path.join(lte_dir, "devices.csv")
+    OUT_GROUPS = os.path.join(lte_dir, "groups.csv")
+
 # ----------------------------------------------------------------------------
 # Конфиг -- все маппинги, пороги и паттерны парсинга вынесены в workspace/configs
 # ----------------------------------------------------------------------------
@@ -369,14 +390,12 @@ def is_sp_start(line_names, i):
 # Главная программа
 # ---------------------------------------------------------------------------
 
-def main():
-    ap = argparse.ArgumentParser(description="LTE → таблицы решётки + авто-добавление синтетических элементов")
-    ap.add_argument("--tol-mm", type=float, default=1.0, help="допуск совпадения L_eff (мм); иначе создаётся синтетика")
-    ap.add_argument("--gen-assets", action="store_true", help="генерировать синтетические карты .fld и STL масштабированием эталона")
-    args = ap.parse_args()
-    lib = synthetic_library.LibraryManager(tol_m=args.tol_mm / 1000.0, gen_assets=args.gen_assets)
-    print(f"Библиотека элементов: допуск L_eff = {args.tol_mm} мм, "
-          f"генерация активов = {'ДА' if args.gen_assets else 'нет (флаг --gen-assets)'}")
+def run(lte_dir=None, tol_mm=1.0, gen_assets=False):
+    if lte_dir:
+        _set_paths(lte_dir)
+    lib = synthetic_library.LibraryManager(tol_m=tol_mm / 1000.0, gen_assets=gen_assets)
+    print(f"Библиотека элементов: допуск L_eff = {tol_mm} мм, "
+          f"генерация активов = {'ДА' if gen_assets else 'нет (флаг --gen-assets)'}")
 
     print(f"Reading {LTE_DESC}")
     devices = parse_desc(LTE_DESC)
@@ -581,6 +600,15 @@ def main():
     else:
         print(f"\nБиблиотека: все элементы LTE совпали с существующими (синтетика не потребовалась).")
     print(f"\nNext: run assemble_lattice_configs.py to produce lattice_configs.csv")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="LTE → таблицы решётки + авто-добавление синтетических элементов")
+    ap.add_argument("--lte-dir", default=None, help="папка с *_desc.lte/*_line.lte (по умолч. workspace/lte)")
+    ap.add_argument("--tol-mm", type=float, default=1.0, help="допуск совпадения L_eff (мм); иначе создаётся синтетика")
+    ap.add_argument("--gen-assets", action="store_true", help="генерировать синтетические карты .fld и STL масштабированием эталона")
+    args = ap.parse_args()
+    run(lte_dir=args.lte_dir, tol_mm=args.tol_mm, gen_assets=args.gen_assets)
 
 
 if __name__ == "__main__":

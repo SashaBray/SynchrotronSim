@@ -10,7 +10,9 @@ TB = mt.TB
 QP = mt.QP
 
 
-def write_warmstart(lattice=101):
+def write_warmstart(lattice=101, lte_dir=None):
+    if lte_dir:
+        ws.set_lte_dir(lte_dir)                              # читать .lte из папки конфигурации (без копий в корень)
     mapping = ws.build_mapping_full(lattice, verbose=False)
     grp = ws.grouped_magnets(lattice)
     eff = mt.load_db()[0]
@@ -42,4 +44,9 @@ def write_warmstart(lattice=101):
 
 
 if __name__ == "__main__":
-    write_warmstart(int(sys.argv[1]) if len(sys.argv) > 1 else 101)
+    import argparse
+    ap = argparse.ArgumentParser(description="warm-start проектными K из .lte в mat_* кольца")
+    ap.add_argument("lattice", nargs="?", type=int, default=101)
+    ap.add_argument("--lte-dir", default=None, help="папка с *_desc.lte/*_line.lte (по умолч. workspace/lte)")
+    a = ap.parse_args()
+    write_warmstart(a.lattice, a.lte_dir)

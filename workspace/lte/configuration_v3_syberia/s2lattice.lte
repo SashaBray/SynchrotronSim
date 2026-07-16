@@ -1,0 +1,83 @@
+! Converted by PyAT from in_file=<unknown>, use='<unknown>'
+
+
+D1        : DRIF      , L=1.365
+D2        : DRIF      , L=0.0685
+D3        : DRIF      , L=0.047
+D4        : DRIF      , L=0.307
+D5        : DRIF      , L=0.047
+D6        : DRIF      , L=0.1115
+D7        : DRIF      , L=0.15
+DB        : DRIF      , L=0.052
+D8        : DRIF      , L=0.3515
+D9        : DRIF      , L=0.1
+D10       : DRIF      , L=0.2025
+D11       : DRIF      , L=0.289
+D12       : DRIF      , L=0.399
+D13       : DRIF      , L=0.125
+D14       : DRIF      , L=1.3795
+
+QF1       : KQUAD     , L=0.293, K1=2.620186083
+QD1       : KQUAD     , L=0.293, K1=-3.09985402
+QF2       : KQUAD     , L=0.327, K1=2.800061558
+QD2       : KQUAD     , L=0.291, K1=-3.70903229
+QF3       : KQUAD     , L=0.391, K1=4.074779089
+QD3       : KQUAD     , L=0.291, K1=-3.51956346
+
+SX        : KSEXT     , L=0.113
+SZ        : KSEXT     , L=0.113
+
+Bq        : CSBEND    , L=0.175, ANGLE=0.008906818473665824, E1=0.0, E2=0.0
+BM        : CSBEND    , L=1.2422, ANGLE=0.25289256932530413, E1=0.0, E2=0.0
+
+BPM1      : MARK      
+BPM2      : MONI      , L=0.0
+BPM3      : MONI      , L=0.0
+BPM4      : MARK      
+BPM5      : MARK      
+BPM6      : MONI      , L=0.0
+BPM7      : MONI      , L=0.0
+BPM8      : MARK      
+
+ring      : LINE=( &
+  D1      , BPM1    , D2      , SX      , D3      , QF1     , D4      , QD1     , D5      , SZ      , &
+  D6      , BPM2    , D7      , Bq      , DB      , BM      , D8      , QF2     , D8      , BM      , &
+  DB      , Bq      , D9      , BPM3    , D10     , QD2     , D11     , QF3     , D12     , QD3     , &
+  D13     , BPM4    , D14     , D14     , BPM5    , D13     , QD3     , D12     , QF3     , D11     , &
+  QD2     , D10     , BPM6    , D9      , Bq      , DB      , BM      , D8      , QF2     , D8      , &
+  BM      , DB      , Bq      , D7      , BPM7    , D6      , SZ      , D5      , QD1     , D4      , &
+  QF1     , D3      , SX      , D2      , BPM8    , D1      , D1      , BPM1    , D2      , SX      , &
+  D3      , QF1     , D4      , QD1     , D5      , SZ      , D6      , BPM2    , D7      , Bq      , &
+  DB      , BM      , D8      , QF2     , D8      , BM      , DB      , Bq      , D9      , BPM3    , &
+  D10     , QD2     , D11     , QF3     , D12     , QD3     , D13     , BPM4    , D14     , D14     , &
+  BPM5    , D13     , QD3     , D12     , QF3     , D11     , QD2     , D10     , BPM6    , D9      , &
+  Bq      , DB      , BM      , D8      , QF2     , D8      , BM      , DB      , Bq      , D7      , &
+  BPM7    , D6      , SZ      , D5      , QD1     , D4      , QF1     , D3      , SX      , D2      , &
+  BPM8    , D1      , D1      , BPM1    , D2      , SX      , D3      , QF1     , D4      , QD1     , &
+  D5      , SZ      , D6      , BPM2    , D7      , Bq      , DB      , BM      , D8      , QF2     , &
+  D8      , BM      , DB      , Bq      , D9      , BPM3    , D10     , QD2     , D11     , QF3     , &
+  D12     , QD3     , D13     , BPM4    , D14     , D14     , BPM5    , D13     , QD3     , D12     , &
+  QF3     , D11     , QD2     , D10     , BPM6    , D9      , Bq      , DB      , BM      , D8      , &
+  QF2     , D8      , BM      , DB      , Bq      , D7      , BPM7    , D6      , SZ      , D5      , &
+  QD1     , D4      , QF1     , D3      , SX      , D2      , BPM8    , D1      , D1      , BPM1    , &
+  D2      , SX      , D3      , QF1     , D4      , QD1     , D5      , SZ      , D6      , BPM2    , &
+  D7      , Bq      , DB      , BM      , D8      , QF2     , D8      , BM      , DB      , Bq      , &
+  D9      , BPM3    , D10     , QD2     , D11     , QF3     , D12     , QD3     , D13     , BPM4    , &
+  D14     , D14     , BPM5    , D13     , QD3     , D12     , QF3     , D11     , QD2     , D10     , &
+  BPM6    , D9      , Bq      , DB      , BM      , D8      , QF2     , D8      , BM      , DB      , &
+  Bq      , D7      , BPM7    , D6      , SZ      , D5      , QD1     , D4      , QF1     , D3      , &
+  SX      , D2      , BPM8    , D1      , D1      , BPM1    , D2      , SX      , D3      , QF1     , &
+  D4      , QD1     , D5      , SZ      , D6      , BPM2    , D7      , Bq      , DB      , BM      , &
+  D8      , QF2     , D8      , BM      , DB      , Bq      , D9      , BPM3    , D10     , QD2     , &
+  D11     , QF3     , D12     , QD3     , D13     , BPM4    , D14     , D14     , BPM5    , D13     , &
+  QD3     , D12     , QF3     , D11     , QD2     , D10     , BPM6    , D9      , Bq      , DB      , &
+  BM      , D8      , QF2     , D8      , BM      , DB      , Bq      , D7      , BPM7    , D6      , &
+  SZ      , D5      , QD1     , D4      , QF1     , D3      , SX      , D2      , BPM8    , D1      , &
+  D1      , BPM1    , D2      , SX      , D3      , QF1     , D4      , QD1     , D5      , SZ      , &
+  D6      , BPM2    , D7      , Bq      , DB      , BM      , D8      , QF2     , D8      , BM      , &
+  DB      , Bq      , D9      , BPM3    , D10     , QD2     , D11     , QF3     , D12     , QD3     , &
+  D13     , BPM4    , D14     , D14     , BPM5    , D13     , QD3     , D12     , QF3     , D11     , &
+  QD2     , D10     , BPM6    , D9      , Bq      , DB      , BM      , D8      , QF2     , D8      , &
+  BM      , DB      , Bq      , D7      , BPM7    , D6      , SZ      , D5      , QD1     , D4      , &
+  QF1     , D3      , SX      , D2      , BPM8    , D1      )
+

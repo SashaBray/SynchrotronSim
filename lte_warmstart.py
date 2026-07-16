@@ -16,12 +16,25 @@ import bip_matrix as bm
 QP = bm.QP
 LTE = os.path.join("workspace", "lte")
 TB = os.path.join("workspace", "tables")
+_DESC_NAME = "SYLA_desc.lte"
+_LINE_NAME = "SYLA_line.lte"
+
+
+def set_lte_dir(path):
+    """Переключить источник .lte на папку конфигурации (ищет *_desc.lte/*_line.lte). Без копий в корень."""
+    global LTE, _DESC_NAME, _LINE_NAME
+    import glob as _glob
+    LTE = path
+    for pat, var in (("*_desc.lte", "_DESC_NAME"), ("*_line.lte", "_LINE_NAME")):
+        hits = sorted(_glob.glob(os.path.join(path, pat)))
+        if hits:
+            globals()[var] = os.path.basename(hits[0])
 
 
 # ---------------- разбор .lte ----------------
 def parse_desc():
     """SYLA_desc.lte → {name: {kind, K1, K2, K3, angle, L}}. kind ∈ quad|sext|oct|dq|dipole."""
-    txt = open(os.path.join(LTE, "SYLA_desc.lte"), encoding="utf-8").read()
+    txt = open(os.path.join(LTE, _DESC_NAME), encoding="utf-8").read()
     out = {}
     for m in re.finditer(r"^([A-Za-z0-9_]+)\s*:\s*([A-Za-z_]+)\s*,(.*)$", txt, re.M):
         name, typ, rest = m.group(1), m.group(2).upper(), m.group(3)
@@ -45,7 +58,7 @@ def parse_desc():
 
 def parse_line_superperiod():
     """SYLA_line.lte → список имён магнитов ОДНОГО стандартного супериода (до первого повтора QF1A)."""
-    txt = open(os.path.join(LTE, "SYLA_line.lte"), encoding="utf-8").read()
+    txt = open(os.path.join(LTE, _LINE_NAME), encoding="utf-8").read()
     names = [t.strip() for t in txt.replace("\n", ",").split(",") if t.strip()]
     # супериод = от первого QF1A до следующего QF1A (не включая)
     i0 = names.index("QF1A")
@@ -57,7 +70,7 @@ def parse_line_superperiod():
 
 def parse_line_full():
     """SYLA_line.lte → список ВСЕХ магнитов ПОЛНОГО кольца по порядку (38 SP + junction)."""
-    txt = open(os.path.join(LTE, "SYLA_line.lte"), encoding="utf-8").read()
+    txt = open(os.path.join(LTE, _LINE_NAME), encoding="utf-8").read()
     names = [t.strip() for t in txt.replace("\n", ",").split(",") if t.strip()]
     return [n for n in names if not (n.startswith("DR_") or n == "BPM" or n.startswith("MARK"))]
 

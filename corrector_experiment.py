@@ -18,7 +18,7 @@ from _ct_asym_track import make_field, ME, QE, V, GAMMA0, C
 KD = r"C:/Sasha/Work/SILA/ansis approximations/KD/corrector"
 WINDINGS = ["main", "correct_1", "correct_2", "correct_3", "correct_4"]
 MAPS = [f"corrector_{w}_100A_v3.fld" for w in WINDINGS]
-OUT = os.path.join("workspace", "corrector_edge")
+OUT = os.path.join("workspace", "research", "corrector_edge")
 os.makedirs(OUT, exist_ok=True)
 
 P0 = GAMMA0 * ME * V; BRHO = P0 / abs(QE); QP = QE / P0

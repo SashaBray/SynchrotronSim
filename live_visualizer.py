@@ -227,17 +227,31 @@ class LiveVisualizer:
         try: self.plotter.add_legend(bcolor=None)
         except Exception: pass
 
+        # Камера НАД точкой старта пучка; ПЕРСПЕКТИВА по умолчанию (parallel_projection=true → ортограф.).
         cam = VIZ_CFG.get("camera", {})
-        self.plotter.camera_position = [
-            tuple(cam.get("position", [7.0, 0.5, 15.0])),
-            tuple(cam.get("focus",    [7.0, 0.5,  0.0])),
-            tuple(cam.get("up",       [0.0, 1.0,  0.0])),
-        ]
-        # Параллельная (ортографическая) проекция -- по умолчанию ВКЛ.
-        if cam.get("parallel_projection", True):
+        up = tuple(cam.get("up", [0.0, 1.0, 0.0]))
+        ortho = bool(cam.get("parallel_projection", False))   # по умолчанию — ПЕРСПЕКТИВА
+        va = float(cam.get("view_angle", 30.0))
+        parts = load_trajectories(str(self.traj_bin))
+        if cam.get("above_start", True) and parts and len(parts[0]) > 0:
+            s = np.asarray(parts[0][0], dtype=float)
+            scale = float(cam.get("start_scale", 4.0))
+            h = float(cam.get("start_height", 60.0)) if ortho else scale / float(np.tan(np.radians(va / 2.0)))
+            self.plotter.camera_position = [(s[0], s[1], s[2] + h), (s[0], s[1], s[2]), up]
+            pscale = scale
+        else:
+            self.plotter.camera_position = [
+                tuple(cam.get("position", [7.0, 0.5, 15.0])),
+                tuple(cam.get("focus",    [7.0, 0.5,  0.0])),
+                up,
+            ]
+            pscale = float(cam["parallel_scale"]) if cam.get("parallel_scale") else None
+        if ortho:
             self.plotter.enable_parallel_projection()
-            if cam.get("parallel_scale"):                 # полу-высота обзора (м); вид всего кольца
-                self.plotter.camera.parallel_scale = float(cam["parallel_scale"])
+            if pscale:
+                self.plotter.camera.parallel_scale = pscale
+        else:
+            self.plotter.camera.view_angle = va               # ПЕРСПЕКТИВА (parallel НЕ включаем)
 
         # 'r' в PyVista по умолчанию = "reset camera". Очищаем и вешаем своё.
         for key in MANUAL_KEYS:

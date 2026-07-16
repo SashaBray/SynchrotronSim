@@ -39,8 +39,13 @@ def gen_field_map(ref, nid, new_eff, ref_row, col):
     """Карта поля синтетического элемента: гибридный ресайз тела карты эталона под L_eff=new_eff.
     Возврат: путь .bin (относит. fields_bin) для map_bin_path, либо None."""
     try:
-        raw = ref_row[col["map_raw_path"]]
-        src = os.path.join(FR, os.path.basename(raw)) if raw not in ("-", "") else None
+        # ОЧИЩЕННАЯ карта эталона из fields_bin (map_bin_path, симметризов./сглаж.), НЕ сырой .fld —
+        # чтобы синтетические карты наследовали чистое поле. Фолбэк на сырой map_raw_path, если .bin нет.
+        binp = ref_row[col["map_bin_path"]]
+        src = os.path.join(FB, binp) if binp not in ("-", "") and os.path.exists(os.path.join(FB, binp)) else None
+        if src is None:
+            raw = ref_row[col["map_raw_path"]]                # полный путь (может быть подпапка corrector/…)
+            src = os.path.join(FR, raw) if raw not in ("-", "") else None
         if not src or not os.path.exists(src):
             return None
         h, B = load(src)
