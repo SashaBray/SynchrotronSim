@@ -55,14 +55,14 @@ struct State { double x = 0, px = 0, y = 0, py = 0, t = 0, d = 0; };
 // ---- магнит ------------------------------------------------------------------
 struct Magnet {
     Vec3 center, axis, uhat, vhat, entry, exit;
-    double yaw = 0, Leff = 0, L = 0;
+    double yaw = 0, Leff = 0, L = 0, edge1 = 0, edge2 = 0;   // edge1/edge2 — краевые углы E1/E2 (.lte); физика края — Фаза 3
     double theta0 = 0, k1 = 0, k1v = 0, k2 = 0, k3 = 0, kEdge = 0;   // k1v — верт. градиент (∂By/∂v≠∂Bz/∂u); kEdge — краевой фриндж
     double thetaY = 0, k1s = 0, k2s = 0, k3s = 0;   // СКЬЮ + ВЕРТ.ИЗГИБ (Im Cₙ): верт.диполь, скью квад/секст/окт
     bool monitor = false;          // ДАТЧИК ПОЛОЖЕНИЯ ПУЧКА (BPM): пропускает частицы, регистрирует центроид
     std::string sensorId;          // = instance_id экземпляра датчика в решётке
     int nsl = 40;
     bool composite = false, nonzero = false;
-    std::string dev;
+    std::string dev, kind;         // kind — тип элемента (dipole/quad/dq/...) из lattice_configs
     std::vector<std::string> devs;   // типы устройств со-локованных обмоток
 };
 
@@ -106,7 +106,6 @@ inline void frame(double yaw, Vec3& axis, Vec3& uhat, Vec3& vhat) {
 struct DB {
     std::map<std::string, double> eff, phys, edgeff;            // Leff, Lметалл, форм-фактор края по типу
     std::map<std::string, std::vector<std::string>> trans;      // element_transforms строка
-    std::map<std::string, std::vector<std::string>> coup;       // coupling_matrix строка
 };
 
 inline DB loadDB(const std::string& ws) {
@@ -119,15 +118,14 @@ inline DB loadDB(const std::string& ws) {
         }
     for (auto& r : readCSV(ws + "tables/element_transforms.csv"))
         if (r.size() > 4) db.trans[r[0]] = r;
-    for (auto& r : readCSV(ws + "tables/coupling_matrix.csv"))
-        if (r.size() >= 6) db.coup[r[0]] = r;
     return db;
 }
 
 // ---- сборка магнита из группы со-локованных обмоток --------------------------
 // group[i] = строка lattice_configs: [0]lattice_id [1]instance_id [2]device_type_id
 //   [3]x [4]y [5]z [6]yaw [7]pitch [8]roll [9]arg_val [10]correct_coeff
-//   [11]mat_B [12]mat_G [13]mat_S [14]mat_O
+//   [11]mat_B [12]mat_G [13]mat_S [14]mat_O [15]mat_Gv [16]mat_Bs [17]mat_Gs [18]mat_Ss [19]mat_Os
+//   [20]eff_length [21]kind [22]model [23]n_slices [24]edge1 [25]edge2   (структурные — ЕДИНЫЙ ИСТОЧНИК)
 inline Magnet makeMagnet(const std::vector<std::vector<std::string>>& group,
                          const DB& db, const std::string& source) {
     Magnet m;
@@ -137,44 +135,47 @@ inline Magnet makeMagnet(const std::vector<std::vector<std::string>>& group,
     frame(m.yaw, m.axis, m.uhat, m.vhat);
     m.dev  = r0[2];
     m.sensorId = (r0.size() > 1) ? r0[1] : "";              // instance_id (для датчиков BPM)
-    m.Leff = db.eff.count(m.dev) ? db.eff.at(m.dev) : 0.0;   // сила (интеграл поля)
-    m.L    = db.phys.count(m.dev) ? db.phys.at(m.dev) : 0.0; // геометрия (металл)
+    // ЕДИНЫЙ ИСТОЧНИК — структурные метаданные из lattice_configs (eff_length/kind/model/n_slices/edge1/edge2).
+    // Fallback на hardware_library/element_transforms — только для неполной БД (те же значения).
+    m.Leff = (r0.size() > 20 && !r0[20].empty()) ? parseOr0(r0, 20)
+             : (db.eff.count(m.dev) ? db.eff.at(m.dev) : 0.0);   // эффективная (проектная .lte) длина
+    m.L    = m.Leff;   // ОТКАЗ от металл-длины: кик работает ТОЛЬКО по L_eff
     m.entry = m.center - m.axis * (0.5 * m.L);
     m.exit  = m.center + m.axis * (0.5 * m.L);
-    if (db.trans.count(m.dev)) {
-        const auto& tr = db.trans.at(m.dev);                 // [1]kind [3]model [4]n_slices
-        m.composite = (tr.size() > 3 && tr[3] == "composite");
+    std::string model;
+    if (r0.size() > 21 && !r0[21].empty()) {                 // из lattice_configs
+        m.kind = r0[21];
+        model  = (r0.size() > 22) ? r0[22] : "";
+        if (r0.size() > 23 && !r0[23].empty()) { try { m.nsl = std::stoi(r0[23]); } catch (...) {} }
+    } else if (db.trans.count(m.dev)) {                      // fallback: element_transforms [1]kind [3]model [4]n_slices
+        const auto& tr = db.trans.at(m.dev);
+        m.kind = (tr.size() > 1) ? tr[1] : "";
+        model  = (tr.size() > 3) ? tr[3] : "";
         if (tr.size() > 4) { try { m.nsl = std::stoi(tr[4]); } catch (...) {} }
-        m.monitor = (tr.size() > 1 && tr[1] == "monitor");   // датчик положения пучка (BPM)
     }
+    m.composite = (model == "composite");
+    m.monitor   = (m.kind == "monitor");                     // датчик положения пучка (BPM)
+    m.edge1 = (r0.size() > 24) ? parseOr0(r0, 24) : 0.0;     // краевые углы E1/E2 (.lte); физика края — Фаза 3
+    m.edge2 = (r0.size() > 25) ? parseOr0(r0, 25) : 0.0;
     double B = 0, G = 0, Gv = 0, S = 0, O = 0;               // Gv — ВЕРТ. градиент (∂By/∂v), отдельно от G
     double Bs = 0, Gs = 0, Ss = 0, Os = 0;                   // СКЬЮ: верт.диполь(By), скью квад/секст/окт
+    if (source != "physical")
+        throw std::runtime_error("токовый режим матричного ядра архивирован — используйте source=\"physical\" "
+                                 "(физкоэф. mat_* берутся из lattice_configs)");
     for (const auto& r : group) {
-        m.devs.push_back(r[2]);
-        if (source == "physical") {                          // из mat_* столбцов
-            double gcol = parseOr0(r, 12);                   // mat_G (гор. градиент)
-            B += parseOr0(r, 11); G += gcol;
-            double gvcol = gcol;                             // mat_Gv (col 15); дефолт = mat_G ⇒ гармонич.
-            if (r.size() > 15 && !r[15].empty()) { try { gvcol = std::stod(r[15]); } catch (...) {} }
-            Gv += gvcol;
-            S += parseOr0(r, 13); O += parseOr0(r, 14);
-            Bs += parseOr0(r, 16); Gs += parseOr0(r, 17);    // mat_Bs/Gs/Ss/Os (col 16-19); дефолт 0 ⇒ старое поведение
-            Ss += parseOr0(r, 18); Os += parseOr0(r, 19);
-        } else if (db.coup.count(r[2])) {                    // из токов через coupling
-            const auto& c = db.coup.at(r[2]);
-            double inp = (c[1] == "current") ? parseOr0(r, 9) : parseOr0(r, 10);
-            double gcoef = std::stod(c[3]) * inp;
-            B += std::stod(c[2]) * inp; G += gcoef; Gv += gcoef;   // current-source: гармонич. (Gv=G)
-            S += std::stod(c[4]) * inp; O += std::stod(c[5]) * inp;
-            if (c.size() > 9) {                              // per_Bs/Gs/Ss/Os (col 6-9); скью из матрицы связи
-                Bs += std::stod(c[6]) * inp; Gs += std::stod(c[7]) * inp;
-                Ss += std::stod(c[8]) * inp; Os += std::stod(c[9]) * inp;
-            }
-        }
+        m.devs.push_back(r[2]);                              // из mat_* столбцов lattice_configs
+        double gcol = parseOr0(r, 12);                       // mat_G (гор. градиент)
+        B += parseOr0(r, 11); G += gcol;
+        double gvcol = gcol;                                 // mat_Gv (col 15); дефолт = mat_G ⇒ гармонич.
+        if (r.size() > 15 && !r[15].empty()) { try { gvcol = std::stod(r[15]); } catch (...) {} }
+        Gv += gvcol;
+        S += parseOr0(r, 13); O += parseOr0(r, 14);
+        Bs += parseOr0(r, 16); Gs += parseOr0(r, 17);        // mat_Bs/Gs/Ss/Os (col 16-19); дефолт 0
+        Ss += parseOr0(r, 18); Os += parseOr0(r, 19);
     }
     // ДИПОЛЬ: mat_G/Gv/S/O заданы ОТНОСИТЕЛЬНО поля (доли mat_B) → в абсолютные (1/f=θ₀·g, готово к излучению)
     bool isDip = db.trans.count(m.dev) && db.trans.at(m.dev).size() > 1 && db.trans.at(m.dev)[1] == "dipole";
-    if (isDip && source == "physical") { G *= B; Gv *= B; S *= B; O *= B; Gs *= B; Ss *= B; Os *= B; }  // скью-град. тоже относит.; Bs — абс.
+    if (isDip) { G *= B; Gv *= B; S *= B; O *= B; Gs *= B; Ss *= B; Os *= B; }  // скью-град. тоже относит.; Bs — абс.
     // k1=k1u (гор. ∂Bz/∂u), k1v (верт. ∂By/∂v): неголоморфн. диполь Gu≠Gv ⇒ |f_x|≠|f_y|
     m.theta0 = QP * B * m.Leff; m.k1 = QP * G; m.k1v = QP * Gv; m.k2 = QP * S; m.k3 = QP * O;
     // СКЬЮ + ВЕРТ.ИЗГИБ: thetaY — верт.изгиб (skew-диполь), k1s — скью-квад (связь плоскостей), k2s/k3s — скью секст/окт

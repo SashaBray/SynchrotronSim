@@ -3,7 +3,7 @@
 // Порт matrix_tracker.py: собирает кольцо из тех же CSV, трекает тест-пучок,
 // печатает финальные состояния (для сверки с Python) и замеряет время оборота.
 //
-// Запуск:  MatrixTracker.exe [lattice=107] [source=physical|current] [reps=200]
+// Запуск:  MatrixTracker.exe [lattice=107] [reps=200]   (источник — всегда physical: mat_* из lattice_configs)
 // ==========================================================================
 #include <iostream>
 #include <vector>
@@ -26,8 +26,7 @@ int main(int argc, char* argv[]) {
     SetConsoleOutputCP(CP_UTF8);
 #endif
     int lattice     = (argc > 1) ? std::stoi(argv[1]) : 107;
-    std::string src = (argc > 2) ? std::string(argv[2]) : "physical";
-    int reps        = (argc > 3) ? std::stoi(argv[3]) : 200;
+    int reps        = (argc > 2) ? std::stoi(argv[2]) : 200;
 
     std::string ws = findWorkspace(argv[0]);
     auto tc = [](std::chrono::high_resolution_clock::time_point a) {
@@ -36,10 +35,10 @@ int main(int argc, char* argv[]) {
 
     auto t0 = std::chrono::high_resolution_clock::now();
     DB db = loadDB(ws);
-    auto mags = buildLine(ws, db, lattice, -1, -1, src);
+    auto mags = buildLine(ws, db, lattice, -1, -1, "physical");
     double tBuild = tc(t0);
 
-    std::cout << "Решётка " << lattice << ", источник='" << src << "', q/p0=" << std::fixed
+    std::cout << "Решётка " << lattice << ", q/p0=" << std::fixed
               << std::setprecision(4) << QP << ". Магнитов: " << mags.size()
               << " (сборка " << std::setprecision(3) << tBuild * 1e3 << " мс)\n";
     if (mags.empty()) { std::cout << "Пусто — проверь lattice_id/connectivity.\n"; return 1; }

@@ -78,7 +78,7 @@ def build_scene(plotter, exp_id, hi_mag=None):
 
 def mag_entry(mag_idx):
     import beam_injection as bi
-    plane, ordered, states, info = bi.inject(101, 1, source="current")
+    plane, ordered, states, info = bi.inject(101, 1, source="physical")
     m = ordered[mag_idx]
     return np.array(m.entry, float), getattr(m, "dev", "?"), getattr(m, "kind", "?")
 
@@ -105,7 +105,7 @@ def main():
     build_scene(pl, a.exp, hi_mag=a.mag)
     # ЗЕЛЁНАЯ проектная орбита (входы магнитов) + маркеры DQ для сравнения
     import beam_injection as bi
-    plane, ordered, states, info = bi.inject(101, 1, source="current")
+    plane, ordered, states, info = bi.inject(101, 1, source="physical")
     ents = np.array([m.entry for m in ordered], float)
     poly = pv.PolyData(ents[:120]); n = 120
     cc = np.full((1, n + 1), n, dtype=np.int_); cc[0, 1:] = np.arange(n); poly.lines = cc

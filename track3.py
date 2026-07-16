@@ -3,15 +3,14 @@
 
   --mode diff          режим 1: ДИФФУРНОЕ ядро (Boris по 3D-картам поля). Аргументы — токи (arg_val)
                        и коэф. диполей (correct_coeff) из lattice_configs. C++ SynchrotronTracker.exe.
-  --mode kick-phys     режим 2: КИКОВОЕ ядро, аргументы — проектные ФИЗКОЭФ. (mat_* из LTE/тюна).
-  --mode kick-current  режим 3: КИКОВОЕ ядро, аргументы — ТОКИ (arg_val/correct_coeff) → через матрицы
-                       связи (coupling_matrix) → физкоэф.
+  --mode kick-phys     режим 2: КИКОВОЕ (матричное) ядро, аргументы — проектные ФИЗКОЭФ. (mat_* из
+                       lattice_configs — заполнены из LTE/тюна). ЕДИНСТВЕННЫЙ режим кика (токовый
+                       архивирован: калибровки ток→физкоэф. предвычисляются в mat_* при сборке БД).
 
-Режимы 2/3 гоняют пучок глобальным треком от плоскости инжекции и обратно в неё (полный круг), режим 1
-— C++ бинарником с финиш-плоскостью, поставленной в плоскость инжекции. Для согласованности режимов 1/3
-токи в lattice_configs должны быть получены из mat_* конвертером phys_to_current.py.
+Режим 2 гоняет пучок глобальным треком от плоскости инжекции и обратно в неё (полный круг), режим 1
+— C++ бинарником с финиш-плоскостью, поставленной в плоскость инжекции.
 
-Запуск:  python track3.py --mode kick-current --lattice 101 --group 1
+Запуск:  python track3.py --mode kick-phys --lattice 101 --group 1
          python track3.py --mode diff --lattice 101 --group 1 --exp 44
 """
 import os
@@ -113,7 +112,7 @@ def _load_trajs(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", required=True, choices=["diff", "kick-phys", "kick-current"])
+    ap.add_argument("--mode", required=True, choices=["diff", "kick-phys"])
     ap.add_argument("--lattice", type=int, default=101)
     ap.add_argument("--group", type=int, default=1)
     ap.add_argument("--exp", type=int, default=44)
@@ -126,10 +125,9 @@ def main():
         print(f"\nРежим 1 (диффур): выжило {s if s is not None else '?'} частиц "
               f"(плоскость '{res['info']['after_elem']}'→'{res['info']['before_elem']}').")
     else:
-        source = "physical" if a.mode == "kick-phys" else "current"
-        res = run_kick(a.lattice, a.group, source, exp_id=a.exp)
+        res = run_kick(a.lattice, a.group, "physical", exp_id=a.exp)
         rr = res["residuals"]
-        print(f"\nРежим {'2' if source=='physical' else '3'} ({a.mode}): выжило {res['survived']}/{res['n']} "
+        print(f"\nРежим 2 ({a.mode}): выжило {res['survived']}/{res['n']} "
               f"частиц полный оборот.")
         print(f"  плоскость инжекции: '{res['after']}' → '{res['before']}'")
         if rr:

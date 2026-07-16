@@ -18,25 +18,10 @@ import bip_matrix as bm
 
 TB = os.path.join("workspace", "tables")
 QP = bm.QP                                   # q/p₀ (опорная жёсткость)
-# СЕКТОРНЫЙ режим DQ (мультиполи вдоль изогнутой орбиты, dq_sector). Киковая форма валидирована
-# (dq_sector_kick 0.65мм ≡ диффур), но перенос в ринг-геометрию ещё требует разбора рамки/масштаба —
-# по умолчанию ВЫКЛ (осевой DQ, режимы 2/3 работают). Вкл: SECTOR_DQ=True или env SS_SECTOR_DQ=1.
-SECTOR_DQ = os.environ.get("SS_SECTOR_DQ", "") == "1"
 
 
 def _read(name):
     return list(csv.DictReader(open(os.path.join(TB, name), encoding="utf-8"), delimiter=";"))
-
-
-_HW = None
-
-
-def _hw_rows():
-    """hardware_library по устройству (кэш) — для секторного профиля DQ (пути карт, nominal_arg)."""
-    global _HW
-    if _HW is None:
-        _HW = {r["device_type_id"]: r for r in _read("hardware_library.csv")}
-    return _HW
 
 
 def load_db():
@@ -88,12 +73,18 @@ class Magnet:
         self.yaw = float(r0["yaw"])
         self.axis, self.uhat, self.vhat = frame(self.yaw)
         self.dev = r0["device_type_id"]
-        self.Leff = eff[self.dev]                              # полевая (сила: кики по L_eff)
-        self.L = phys[self.dev]                                # по металлу (геометрия ящика)
+        # ЕДИНЫЙ ИСТОЧНИК — структурные метаданные из lattice_configs (eff_length/kind/model/n_slices/
+        # edge1/edge2). Fallback на hardware_library/element_transforms — только для неполной БД (те же значения).
+        self.Leff = float(r0.get("eff_length") or eff.get(self.dev) or 0.0)   # эффективная (проектная .lte) длина
+        self.L = self.Leff                                     # ОТКАЗ от металл-длины: кик работает ТОЛЬКО по L_eff
         self.entry = self.center - 0.5 * self.L * self.axis
         self.exit = self.center + 0.5 * self.L * self.axis
-        self.kind = trans[self.dev]["kind"]; self.model = trans[self.dev]["model"]
-        self.nsl = int(trans[self.dev]["n_slices"])
+        _tr = trans.get(self.dev, {})
+        self.kind = r0.get("kind") or _tr.get("kind") or ""
+        self.model = r0.get("model") or _tr.get("model") or "canonical"
+        self.nsl = int(r0.get("n_slices") or _tr.get("n_slices") or 1)
+        self.edge1 = float(r0.get("edge1") or 0.0)             # краевые углы E1/E2 (.lte); физика края — Фаза 3
+        self.edge2 = float(r0.get("edge2") or 0.0)
         self.devs = [r["device_type_id"] for r in insts]
         # ДАТЧИК ПОЛОЖЕНИЯ ПУЧКА (BPM): не преобразует частицы (пропускает как дрейф L=0),
         # регистрирует центроид пучка. sensor_id = instance_id экземпляра в решётке.
@@ -102,24 +93,18 @@ class Magnet:
         # 'current' — из токов через coupling_matrix (когда матрицы связи готовы/валидны).
         B = G = Gv = S = O = 0.0                          # Gv — ВЕРТ. градиент (∂By/∂v), отдельно от G=∂Bz/∂u
         Bs = Gs = Ss = Os = 0.0                           # СКЬЮ мультиполи: верт.диполь(By на оси), скью квад/секст/окт
+        if source != "physical":
+            raise ValueError("токовый режим матричного ядра архивирован — используйте source='physical'; "
+                             "физкоэф. mat_* берутся из lattice_configs (калибровки предвычисляются туда при сборке БД)")
         for r in insts:
-            if source == "physical":
-                B += float(r.get("mat_B") or 0); G += float(r.get("mat_G") or 0)
-                Gv += float(r.get("mat_Gv") or r.get("mat_G") or 0)   # дефолт = mat_G ⇒ гармонич. (совместимо)
-                S += float(r.get("mat_S") or 0); O += float(r.get("mat_O") or 0)
-                Bs += float(r.get("mat_Bs") or 0); Gs += float(r.get("mat_Gs") or 0)   # скью (дефолт 0 ⇒ старое поведение)
-                Ss += float(r.get("mat_Ss") or 0); Os += float(r.get("mat_Os") or 0)
-            else:
-                c = coup[r["device_type_id"]]
-                inp = float(r["arg_val"] or 0) if c["input_type"] == "current" else float(r["correct_coeff"] or 0)
-                gcoef = float(c["per_G_Tlm"]) * inp
-                B += float(c["per_B_Tl"]) * inp; G += gcoef; Gv += gcoef   # current-source: гармонич. (Gv=G)
-                S += float(c["per_S_Tlm2"]) * inp; O += float(c["per_O_Tlm3"]) * inp
-                Bs += float(c.get("per_Bs_Tl") or 0) * inp; Gs += float(c.get("per_Gs_Tlm") or 0) * inp   # скью из матрицы связи
-                Ss += float(c.get("per_Ss_Tlm2") or 0) * inp; Os += float(c.get("per_Os_Tlm3") or 0) * inp
+            B += float(r.get("mat_B") or 0); G += float(r.get("mat_G") or 0)
+            Gv += float(r.get("mat_Gv") or r.get("mat_G") or 0)   # дефолт = mat_G ⇒ гармонич. (совместимо)
+            S += float(r.get("mat_S") or 0); O += float(r.get("mat_O") or 0)
+            Bs += float(r.get("mat_Bs") or 0); Gs += float(r.get("mat_Gs") or 0)   # скью (дефолт 0)
+            Ss += float(r.get("mat_Ss") or 0); Os += float(r.get("mat_Os") or 0)
         # ДИПОЛЬ: mat_G/Gv/S/O заданы ОТНОСИТЕЛЬНО поля (доли mat_B, аппаратные константы) → в абсолютные.
         # Даёт 1/f = θ₀·g (фокус ∝ изгибу): при излучении θ₀ пересчит. по текущему p, отношения фиксированы.
-        if self.kind == "dipole" and source == "physical":
+        if self.kind == "dipole":
             G *= B; Gv *= B; S *= B; O *= B; Gs *= B; Ss *= B; Os *= B   # скью-градиенты тоже относит.; Bs — абс. изгиб
         # силы по ОПОРНОЙ жёсткости (по L_eff — интеграл поля); δ-зависимость — в дрейфе.
         # k1=k1u (гор. фокус ∂Bz/∂u), k1v (верт. фокус ∂By/∂v): неголоморфн. диполь Gu≠Gv ⇒ |f_x|≠|f_y|.
@@ -134,28 +119,12 @@ class Magnet:
         self.kEdge = _edge_ff(self.dev) * self.theta0 ** 2 / self.Leff if self.Leff > 0 else 0.0
         self.nonzero = any(abs(v) > 0 for v in (self.theta0, self.thetaY, self.k1, self.k1v, self.k2, self.k3,
                                                 self.k1s, self.k2s, self.k3s, self.kEdge))
-        # СЕКТОРНЫЙ режим для combined-function DQ в ТОКОВОМ режиме: осевые мультиполи неверны на
-        # сагитте (пучок на изогнутой дуге). Профиль b0(X),Gu(X),Gv(X),S(X) ВДОЛЬ орбиты из карт×токи
-        # (dq_sector, 0.65мм ≡ диффур vs 4.3мм осевые). В физкоэф.-режиме карт/токов нет → осевой.
-        self.sector = False; self.sec = None
-        if SECTOR_DQ and self.kind == "dq" and source == "current":
-            try:
-                import dq_sector_profile as _dsp
-                cur = [float(r.get("arg_val") or 0) for r in insts]
-                if any(abs(c) > 1e-9 for c in cur):
-                    self.sec = _dsp.build(self.devs, cur, _hw_rows())
-                    self.sector = True
-                    self.sec_xref = self._sector_ref()          # опорная дуга в сжатом железе L (для du)
-            except Exception:
-                self.sector = False
 
     def body(self, st):
-        """Тело: N срезов drift-kick-drift. ДРЕЙФ по геометрии (металл, ds_g=phys/N), КИКИ по полю
-        (ds_f=eff/N) ⇒ полный изгиб/фокус = k·L_eff (верно), а ящик = металл (верно). Чистый диполь =
-        только кик изгиба (без фокусировки); квадруполь/секступоль/октуполь — линейн./нелин. кики."""
-        if self.sector:                                        # combined-function DQ вдоль изогнутой орбиты
-            return self._body_sector(st)
-        if not self.nonzero:                                   # выключенный — дрейф по металлу
+        """Тело: N срезов drift-kick-drift по ЭФФЕКТИВНОЙ длине (ds_g=ds_f=L_eff/N) ⇒ полный изгиб/
+        фокус = k·L_eff (совпадает с .lte). Чистый диполь = только кик изгиба (без фокусировки);
+        квадруполь/секступоль/октуполь — линейн./нелин. кики."""
+        if not self.nonzero:                                   # выключенный — дрейф (нулевой элемент)
             return _drift(st, self.L)
         th, k1, k1v, k2, k3, kE = self.theta0, self.k1, self.k1v, self.k2, self.k3, self.kEdge
         thy, k1s, k2s, k3s = self.thetaY, self.k1s, self.k2s, self.k3s
@@ -173,41 +142,6 @@ class Magnet:
                 py += thy / N + k1s * x * dsf + 0.5 * k2s * (x * x - y * y) * dsf + (k3s / 6.0) * (x ** 3 - 3 * x * y * y) * dsf
             st = _drift((x, px, y, py, t, d), dsg / 2.0)
         return st
-
-    def _body_sector(self, st):
-        """СЕКТОРНОЕ тело DQ: всё (дрейфы+кики) укладывается в ЖЕЛЕЗО L (карта поля — габарит диффур-
-        модели, к кику отношения не имеет). Поле карты (зона 2·half) СЖИМАЕТСЯ в L с сохранением
-        интеграла: дрейф ds_i=L/N, но кик по ds_f=2·half/N ⇒ ∫кик = ∫поля (изгиб/фокус эквивалентны).
-        Мультиполи ВДОЛЬ орбиты (du=x−x_ref, x_ref — самосогласованная дуга в сжатом L). Форма
-        валидирована dq_sector_kick (0.65мм ≡ диффур). x≡u гор., y≡v верт."""
-        p = self.sec; half = p["half"]; Xg, b0, Gu, Gv, S = p["Xg"], p["b0"], p["Gu"], p["Gv"], p["S"]
-        xref = self.sec_xref; N = len(xref)
-        ds_i = self.L / N; ds_f = 2.0 * half / N               # дрейф по железу L, кик по зоне поля 2·half
-        for i in range(N):
-            st = _drift(st, ds_i / 2.0)
-            x, px, y, py, t, d = st
-            Xf = -half + (i + 0.5) * ds_f                       # позиция в профиле (полная зона поля)
-            du = x - xref[i]                                    # отклонение от изогнутой орбиты (в сжатом L)
-            b = np.interp(Xf, Xg, b0); gu = np.interp(Xf, Xg, Gu)
-            gv = np.interp(Xf, Xg, Gv); s = np.interp(Xf, Xg, S)
-            Bz = b + gu * du + s * (du * du - y * y); By = gv * y + 2 * s * du * y
-            px += -QP * Bz * ds_f; py += QP * By * ds_f        # кик по полю (интеграл сохранён), знаки matrix_tracker
-            st = _drift((x, px, y, py, t, d), ds_i / 2.0)
-        return st
-
-    def _sector_ref(self):
-        """Опорная дуга x_ref[i] осевой частицы (старт x=0,px=0) в СЖАТОМ железе L: видит только
-        диполь b0 (du=0). x_ref[i] — позиция в точке кика среза i (для du=x−x_ref в _body_sector)."""
-        p = self.sec; half = p["half"]; Xg, b0 = p["Xg"], p["b0"]
-        N = max(self.nsl if self.model == "composite" else 40, 60)
-        ds_i = self.L / N; ds_f = 2.0 * half / N
-        xr = 0.0; pxr = 0.0; out = []
-        for i in range(N):
-            ps = math.sqrt(max(1e-12, 1.0 - pxr * pxr)); xr += pxr * ds_i / (2.0 * ps)
-            out.append(xr)                                     # позиция опорной частицы в точке кика
-            pxr += -QP * float(np.interp(-half + (i + 0.5) * ds_f, Xg, b0)) * ds_f
-            ps = math.sqrt(max(1e-12, 1.0 - pxr * pxr)); xr += pxr * ds_i / (2.0 * ps)
-        return np.array(out)
 
 
 def build_line(lattice_id, eff, phys, coup, trans, lo=None, hi=None, source="physical"):

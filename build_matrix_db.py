@@ -181,7 +181,11 @@ def add_matrix_columns():
     from collections import OrderedDict
     p = os.path.join(TB, "lattice_configs.csv")
     data = list(csv.DictReader(open(p, encoding="utf-8"), delimiter=";"))
-    base = [c for c in data[0].keys() if not c.startswith("mat_")]
+    # СТРУКТУРНЫЕ столбцы (eff_length/kind/model/n_slices/edge1/edge2) держим В КОНЦЕ схемы, ПОСЛЕ mat_*
+    # — их заполняет add_structural_columns(). Исключаем из base, чтобы не задвоить и не переставить.
+    STRUCT = ["eff_length", "kind", "model", "n_slices", "edge1", "edge2"]
+    base = [c for c in data[0].keys() if not c.startswith("mat_") and c not in STRUCT]
+    struct_present = [c for c in STRUCT if c in data[0].keys()]
     R = coupling_rows()
     os.makedirs(os.path.join(TB, "backups"), exist_ok=True)
     shutil.copy(p, os.path.join(TB, "backups", "lattice_configs_pre_matcols.csv"))
@@ -216,6 +220,39 @@ def add_matrix_columns():
     return p, ndip
 
 
+def add_structural_columns():
+    """ЕДИНЫЙ ИСТОЧНИК: дописывает в КОНЕЦ схемы lattice_configs 6 СТРУКТУРНЫХ столбцов
+    (eff_length, kind, model, n_slices, edge1, edge2) — из них матричное ядро берёт ВСЮ per-элементную
+    геометрию/тип. Значения по device_type_id: eff_length из hardware_library, kind/model/n_slices из
+    element_transforms; edge1/edge2 — краевые углы E1/E2 из .lte (Фаза 3, пока пусто/сохраняются).
+    Идемпотентна: mat_* и прочие столбцы НЕ трогает, только эти 6 (фикс-порядок после mat_*).
+    C++ ядро читает их по индексам [20..25]."""
+    p = os.path.join(TB, "lattice_configs.csv")
+    data = list(csv.DictReader(open(p, encoding="utf-8"), delimiter=";"))
+    if not data:
+        return p, 0
+    def _tbl(name):
+        return {r["device_type_id"]: r for r in
+                csv.DictReader(open(os.path.join(TB, name), encoding="utf-8"), delimiter=";")}
+    hw, tr = _tbl("hardware_library.csv"), _tbl("element_transforms.csv")
+    STRUCT = ["eff_length", "kind", "model", "n_slices", "edge1", "edge2"]
+    for r in data:
+        dev = r["device_type_id"]; h = hw.get(dev, {}); t = tr.get(dev, {})
+        r["eff_length"] = h.get("eff_length", "")
+        r["kind"] = t.get("kind", "")
+        r["model"] = t.get("model", "")
+        r["n_slices"] = t.get("n_slices", "")
+        r["edge1"] = r.get("edge1", "")            # E1 из .lte — Фаза 3 (сохранить, если уже задан)
+        r["edge2"] = r.get("edge2", "")            # E2 из .lte
+    base = [c for c in data[0].keys() if c not in STRUCT]
+    os.makedirs(os.path.join(TB, "backups"), exist_ok=True)
+    shutil.copy(p, os.path.join(TB, "backups", "lattice_configs_pre_structcols.csv"))
+    with open(p, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=base + STRUCT, delimiter=";")
+        w.writeheader(); w.writerows(data)
+    return p, len(data)
+
+
 def main():
     print("hardware_library + eff_length/phys_length:", add_lengths())
     print("element_transforms:", write_transforms())
@@ -224,6 +261,8 @@ def main():
     print(f"element_connectivity: {conn}  ({nlat} решёток, {nrows} экземпляров)")
     mp, ndip = add_matrix_columns()
     print(f"lattice_configs + mat_B/G/S/O: {mp}  (диполям B из проектного изгиба: {ndip} шт.)")
+    sp, nr = add_structural_columns()
+    print(f"lattice_configs + структурные (eff_length/kind/model/n_slices/edge1/edge2): {sp}  ({nr} строк)")
 
 
 if __name__ == "__main__":
