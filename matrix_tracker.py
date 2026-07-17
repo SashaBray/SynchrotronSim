@@ -142,7 +142,7 @@ class Magnet:
         return st
 
 
-def build_line(lattice_id, eff, phys, coup, trans, lo=None, hi=None, source="physical"):
+def build_line(lattice_id, eff, phys, coup, trans, lo=None, hi=None, source="physical", loss_radius=None):
     conf = {(r["lattice_id"], r["instance_id"]): r for r in _read("lattice_configs.csv")}
     conn = [r for r in _read("element_connectivity.csv") if r["lattice_id"] == str(lattice_id)]
     conn.sort(key=lambda r: int(r["instance_id"]))
@@ -157,7 +157,7 @@ def build_line(lattice_id, eff, phys, coup, trans, lo=None, hi=None, source="phy
                 break
         mags.append(Magnet(group, eff, phys, coup, trans, source)); i += 1
     out = mags[lo:hi] if lo is not None else mags
-    check_junctions(out)                      # стыки плоскостей: снап совпадающих + контроль клиновых
+    check_junctions(out, loss_radius=loss_radius)   # стыки: снап совпадающих + контроль клиновых по порогу опыта
     return out
 
 
@@ -168,7 +168,8 @@ def build_line(lattice_id, eff, phys, coup, trans, lo=None, hi=None, source="phy
 # вырожденную зону (для одних частиц вход B уже позади выхода A) — это ошибка геометрии.
 PLANE_SAME_TOL   = 1e-4      # м: плоскости ближе этого ⇒ считаем ОДНОЙ (переход без пролёта)
 PLANE_PARA_TOL   = 1e-9      # |axis_A × axis_B| ниже ⇒ нормали параллельны
-BEAM_LOSS_RADIUS = 0.012     # м: дальше этого от опорной пучок считается потерянным (порог проекта, 12 мм)
+BEAM_LOSS_RADIUS = 0.012     # м: ДЕФОЛТ порога потери пучка. Рабочее значение — параметр ЭКСПЕРИМЕНТА
+                             # (experiments.csv.loss_radius_mm), пробрасывается сюда через build_line.
 
 
 def _plane_relation(A, B):
@@ -185,23 +186,27 @@ def _plane_relation(A, B):
     return "wedge", float(np.linalg.norm(w - (w @ d) * d)), gap
 
 
-def check_junctions(mags, verbose=False):
+def check_junctions(mags, loss_radius=None, verbose=False):
     """Проверка стыков ПРИ СБОРКЕ. Совпадающие плоскости помечаются как одна (пролёт не нужен).
-    Клин с линией пересечения ближе BEAM_LOSS_RADIUS к опорной — ОШИБКА. Возврат: список проблем."""
+    Клин с линией пересечения ближе порога потери к опорной — ОШИБКА. Возврат: список проблем.
+    loss_radius (м) — порог потери пучка ДАННОГО эксперимента (experiments.csv.loss_radius_mm);
+    None ⇒ дефолт BEAM_LOSS_RADIUS."""
+    lr = BEAM_LOSS_RADIUS if loss_radius is None else float(loss_radius)
     problems = []; n = {"same": 0, "parallel": 0, "wedge": 0}
     for j in range(1, len(mags)):
         A, B = mags[j - 1], mags[j]
         kind, apex, gap = _plane_relation(A, B)
         n[kind] += 1
         B.same_plane_as_prev = (kind == "same")                # снап: переход без пролёта
-        if kind == "wedge" and apex < BEAM_LOSS_RADIUS:
+        if kind == "wedge" and apex < lr:
             problems.append((j, A.dev, B.dev, apex, gap))
     if verbose:
         print(f"  стыки плоскостей: {n['same']} совмещённых (без пролёта), "
-              f"{n['parallel']} параллельных с зазором, {n['wedge']} клиновых")
+              f"{n['parallel']} параллельных с зазором, {n['wedge']} клиновых "
+              f"(порог потери {lr * 1e3:.1f} мм)")
     for j, da, db, apex, gap in problems:
         print(f"  [ОШИБКА СТЫКА] #{j} {da} → {db}: линия пересечения плоскостей в {apex * 1e3:.2f} мм "
-              f"от опорной — ближе порога потери {BEAM_LOSS_RADIUS * 1e3:.0f} мм (зазор {gap * 1e3:.3f} мм). "
+              f"от опорной — ближе порога потери {lr * 1e3:.1f} мм (зазор {gap * 1e3:.3f} мм). "
               f"Часть пучка попадёт в вырожденную зону.")
     return problems
 

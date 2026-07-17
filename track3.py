@@ -30,11 +30,11 @@ TB = os.path.join("workspace", "tables")
 RESULTS = os.path.join("workspace", "results")
 
 
-def run_kick(lattice, group, source, exp_id=None, n_turns=1, thin_eps=0.0):
+def run_kick(lattice, group, source, exp_id=None, n_turns=1, thin_eps=0.0, loss_radius=None):
     """Режим 2: глобальный трек инжектированного пучка старт→финиш, n_turns оборотов. Возврат сводки.
     Замкнут (финиш=старт) ⇒ оборот(ы) + невязка; открыт (финиш≠старт) ⇒ путь до конца сегмента (n_turns=1).
     thin_eps>0 (м) ⇒ потоковое прореживание траектории по кривизне (лёгкие длинные многооборотные треки)."""
-    plane, ordered, states, info = bi.inject(lattice, group, source=source)
+    plane, ordered, states, info = bi.inject(lattice, group, source=source, loss_radius=loss_radius)
     finish = info.get("finish", plane); closed = info.get("closed", True)
     if n_turns > 1 and not closed:
         n_turns = 1                                        # открытый сегмент не зациклить
@@ -64,7 +64,7 @@ def run_kick(lattice, group, source, exp_id=None, n_turns=1, thin_eps=0.0):
                 after=info["after_elem"], before=info["before_elem"])
 
 
-def author_experiment(lattice, group, exp_id, dt=1e-11, skip_steps=300000):
+def author_experiment(lattice, group, exp_id, dt=1e-11, skip_steps=300000, loss_mm=12.0):
     """АВТОРИНГ конфига эксперимента в experiments.csv (установка+пучок+финиш-плоскость) — ЕДИНЫЙ
     источник, который читают ОБА ядра. Финиш-плоскость = плоскость инжекции пучка (полный оборот).
     skip_steps (max_turns, перепрофилир. в C++ как «пропустить N шагов до проверки плоскости») —
@@ -80,6 +80,7 @@ def author_experiment(lattice, group, exp_id, dt=1e-11, skip_steps=300000):
             f"{p2[0]:.6f}", f"{p2[1]:.6f}", f"{p2[2]:.6f}",
             f"{p3[0]:.6f}", f"{p3[1]:.6f}", f"{p3[2]:.6f}"]
     row += [f"{ax[0]:.6f}", f"{ax[1]:.6f}", f"{ax[2]:.6f}"]        # направление пересечения = ось пучка
+    row += [f"{loss_mm:.1f}"]                                      # ПОРОГ ПОТЕРИ ПУЧКА (мм) — параметр опыта
     import csv
     path = os.path.join(TB, "experiments.csv")
     rows = list(csv.reader(open(path, encoding="utf-8"), delimiter=";")); head = rows[0]
@@ -91,15 +92,17 @@ def author_experiment(lattice, group, exp_id, dt=1e-11, skip_steps=300000):
 
 
 def load_experiment(exp_id):
-    """experiments.csv[exp_id] → (lattice_id, group_id) или (None, None). ЕДИНЫЙ конфиг эксперимента
-    (установка+пучок+финиш-плоскость), который читают ОБА ядра."""
+    """experiments.csv[exp_id] → (lattice_id, group_id, loss_radius_m) или (None, None, None).
+    ЕДИНЫЙ конфиг эксперимента (установка+пучок+финиш-плоскость+порог потери), который читают ОБА ядра.
+    loss_radius_m — из столбца loss_radius_mm (мм→м); None ⇒ ядро возьмёт свой дефолт."""
     path = os.path.join(TB, "experiments.csv")
     if not os.path.exists(path):
-        return None, None
+        return None, None, None
     for r in csv.DictReader(open(path, encoding="utf-8"), delimiter=";"):
         if r.get("exp_id") == str(exp_id):
-            return int(r["lattice_id"]), int(r["group_id"])
-    return None, None
+            lr = (r.get("loss_radius_mm") or "").strip()
+            return int(r["lattice_id"]), int(r["group_id"]), (float(lr) / 1e3 if lr else None)
+    return None, None, None
 
 
 def run_diff(lattice, group, exp_id):
@@ -144,13 +147,15 @@ def main():
     ap.add_argument("--group", type=int, default=None, help="переопределить пучок (иначе — из experiments.csv[exp])")
     ap.add_argument("--turns", type=int, default=1, help="число оборотов (kick-phys, только замкнутый; >1 ⇒ авто-прореживание)")
     ap.add_argument("--thin", type=float, default=0.0, help="прореживание траектории по кривизне, ε в мм (0=авто: выкл для 1 об., 0.5мм для многих)")
+    ap.add_argument("--loss-mm", type=float, default=None, help="порог потери пучка (мм); иначе из experiments.csv[loss_radius_mm]")
     a = ap.parse_args()
 
     # ЕДИНЫЙ ИСТОЧНИК: установка+пучок берутся из experiments.csv[exp]; --lattice/--group переопределяют
     # (и создают новую строку, если эксперимента ещё нет). Оба ядра стартуют из ОДНОГО конфига.
-    lat_db, grp_db = load_experiment(a.exp)
+    lat_db, grp_db, lr_db = load_experiment(a.exp)
     lattice = a.lattice if a.lattice is not None else lat_db
     group = a.group if a.group is not None else grp_db
+    loss_r = (a.loss_mm / 1e3) if a.loss_mm is not None else lr_db   # порог потери: CLI > БД > дефолт ядра
     if lattice is None or group is None:
         ap.error(f"эксперимент {a.exp} не найден в experiments.csv — задайте --lattice и --group, чтобы создать его")
 
@@ -163,8 +168,10 @@ def main():
     else:
         turns = max(1, a.turns)
         thin_eps = (a.thin * 1e-3) if a.thin > 0 else (5e-4 if turns > 1 else 0.0)   # мм→м; авто 0.5мм для многооборота
-        author_experiment(lattice, group, a.exp)   # записать/обновить конфиг (старт+финиш-плоскость) — чтобы оба ядра читали одно
-        res = run_kick(lattice, group, "physical", exp_id=a.exp, n_turns=turns, thin_eps=thin_eps)
+        # записать/обновить конфиг (старт+финиш-плоскость+порог потери) — чтобы оба ядра читали одно
+        author_experiment(lattice, group, a.exp, loss_mm=(loss_r * 1e3 if loss_r else 12.0))
+        res = run_kick(lattice, group, "physical", exp_id=a.exp, n_turns=turns, thin_eps=thin_eps,
+                       loss_radius=loss_r)
         kind = "замкнут" if res["closed"] else "ОТКРЫТ (старт→финиш сегмента)"
         print(f"\nРежим 2 ({a.mode}): {res['turns']} об., выжило {res['survived']}/{res['n']} частиц — путь {kind}.")
         print(f"  плоскость старта: '{res['after']}' → '{res['before']}'")
