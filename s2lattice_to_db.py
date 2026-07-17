@@ -8,6 +8,7 @@ KQUAD/KSEXT/CSBEND. Физкоэф. из .lte: mat_G=K1/QP, mat_S=K2/QP, mat_O=K
 import re, math, csv, os
 from bip_matrix import QP
 import synthetic_assets as sa                                  # gen_stl: масштаб STL под длину
+import lte_to_lattice as _geom                                  # ЕДИНСТВЕННЫЙ источник конвенции знака (step)
 
 TB = os.path.join("workspace", "tables")
 LTE = os.path.join("workspace", "lte", "configuration_v3_syberia", "s2lattice.lte")
@@ -34,12 +35,18 @@ def parse():
 
 
 def mat_of(kind, e, L):
+    """K из .lte → физкоэф. БД. ЗНАК ИЗГИБА: положительный ANGLE = поворот ВПРАВО (общая конвенция
+    проекта, см. lte_to_lattice.step) ⇒ θ0 = −ANGLE, значит mat_B = −ANGLE/(QP·L). Мультиполи знака
+    не меняют: кик ∝xⁿ переживает отражение при нечётном n (квадруполь x¹, октуполь x³), а чётные
+    (диполь x⁰, секступоль x²) — нет; секступолю переворот не нужен именно потому, что геометрия
+    уложена НЕ зеркально. Раньше здесь было +ANGLE и th+=ang — решётка выходила зеркальной, и
+    секступоли получали неверный знак (та же ошибка, что чинилась у СИЛЫ, коммит c97742a)."""
     m = dict(mat_B=0.0, mat_G=0.0, mat_S=0.0, mat_O=0.0)
     if kind == "quad":   m["mat_G"] = e.get("K1", 0.0) / QP
     elif kind == "sext": m["mat_S"] = e.get("K2", 0.0) / QP
     elif kind == "oct":  m["mat_O"] = e.get("K3", 0.0) / QP
     elif kind == "dipole":
-        m["mat_B"] = e.get("ANGLE", 0.0) / (QP * L) if L else 0.0
+        m["mat_B"] = -e.get("ANGLE", 0.0) / (QP * L) if L else 0.0
         if e.get("K1"): m["mat_G"] = e["K1"] / QP           # комбинир.-функц. диполь
     return m
 
@@ -75,18 +82,20 @@ def main():
     for nm in seq:
         e = elems.get(nm)
         if not e: continue
-        L = e.get("L", 0.0); ang = e.get("ANGLE", 0.0); mid = th + ang / 2
-        xc, yc = x + L / 2 * math.cos(mid), y + L / 2 * math.sin(mid)
+        L = e.get("L", 0.0); ang = e.get("ANGLE", 0.0)
+        # ГЕОМЕТРИЯ — через lte_to_lattice.step: ЕДИНСТВЕННЫЙ источник конвенции знака (ANGLE>0 =
+        # поворот вправо) и точной дуги. Своя формула здесь клала хорду по СРЕДНЕМУ направлению
+        # (приближение) и крутила th += ang (зеркально) — решётка выходила несогласованной с СИЛОЙ.
+        xc, yc, yaw_c, x, y, th = _geom.step(x, y, th, L, ang)
         if nm in devs:
             iid += 1; kind = MAGKIND[e["type"]]
             r = {c: "" for c in lc_hdr}
             r.update(lattice_id=LAT_ID, instance_id=str(iid), device_type_id=PFX + nm,
-                     x=f"{xc:.6f}", y=f"{yc:.6f}", z="0", yaw=f"{mid:.6f}", pitch="0", roll="0",
+                     x=f"{xc:.6f}", y=f"{yc:.6f}", z="0", yaw=f"{yaw_c:.6f}", pitch="0", roll="0",
                      arg_val="0", correct_coeff="1")
             for k, v in mat_of(kind, e, L).items():
                 r[k] = f"{v:.9g}"
             lc_rows.append(r)
-        x += L * math.cos(mid); y += L * math.sin(mid); th += ang
     upsert_lattice(os.path.join(TB, "lattice_configs.csv"), lc_hdr, LAT_ID, lc_rows)
 
     # element_connectivity — ПОРЯДОК инстансов кольца (build_line читает ЕГО, не lattice_configs напрямую)

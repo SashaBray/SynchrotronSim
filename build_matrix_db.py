@@ -166,7 +166,7 @@ def write_connectivity():
     return out, len(by_lat) + nkeep, len(rows) + len(keep)
 
 
-def add_matrix_columns():
+def add_matrix_columns(only_lattices=None):
     """Добавляет в lattice_configs физ-параметры для матриц (mat_B/G/S/O) — ВТОРОЙ вход рядом с
     токами/коэффициентами. По умолчанию = coupling×вход; диполям mat_B = из ПРОЕКТНОГО изгиба
     (θ из compute_magnet_endpoints), т.к. инжекционный B ≠ coeff×per_B. Трекер берёт либо эти
@@ -187,6 +187,11 @@ def add_matrix_columns():
         by_lat.setdefault(r["lattice_id"], []).append(r)
     ndip = 0
     for lat, insts in by_lat.items():
+        # ЧУЖИЕ РЕШЁТКИ НЕ ТРОГАЕМ: их mat_* записал собственный импортёр (s2lattice_to_db —
+        # прямо из их .lte), а здесь они были бы пересчитаны как coupling×arg_val и уничтожены.
+        # only_lattices=None ⇒ прежнее поведение (все) — для ручных прогонов без аргумента.
+        if only_lattices is not None and lat not in only_lattices:
+            continue
         insts.sort(key=lambda r: int(r["instance_id"]))
         try:
             eps, _ = do.compute_magnet_endpoints(int(lat))
@@ -246,7 +251,7 @@ def add_structural_columns():
     return p, len(data)
 
 
-def add_edge_angles():
+def add_edge_angles(only_lattices=None):
     """Заполняет edge1/edge2 в lattice_configs КАК ЯЩИК: краевой угол = (θ0_полн + δ_полн)/2 на ВНЕШНИХ
     гранях сгруппированного диполя (внутренние грани срезов = 0, они гасятся), знак — по .lte-краю.
     θ0 = ANGLE из .lte; δ из hardware_library.edge_delta (по device_type). Группа = подряд идущие изгибы
@@ -281,6 +286,8 @@ def add_edge_angles():
         by_lat.setdefault(r["lattice_id"], []).append(r)
     nfill = 0
     for lat, insts in by_lat.items():
+        if only_lattices is not None and lat not in only_lattices:
+            continue                                         # чужая решётка — её края не наши
         insts.sort(key=lambda r: int(r["instance_id"]))
         for r in insts:
             r["edge1"] = r["edge2"] = ""                     # сброс (идемпотентность)
@@ -377,16 +384,18 @@ def add_edge_delta():
     return p, n, dev_delta
 
 
-def main():
+def main(only_lattices=None):
+    """only_lattices — множество id решёток, которые МОЖНО перезаписывать (None = все, как раньше).
+    Чужие установки живут в тех же таблицах и их mat_*/края трогать нельзя."""
     print("hardware_library + eff_length:", add_lengths())
     print("element_transforms:", write_transforms())
     conn, nlat, nrows = write_connectivity()
     print(f"element_connectivity: {conn}  ({nlat} решёток, {nrows} экземпляров)")
-    mp, ndip = add_matrix_columns()
+    mp, ndip = add_matrix_columns(only_lattices)
     print(f"lattice_configs + mat_B/G/S/O: {mp}  (диполям B из проектного изгиба: {ndip} шт.)")
     sp, nr = add_structural_columns()
     print(f"lattice_configs + структурные (eff_length/kind/n_slices/edge1/edge2): {sp}  ({nr} строк)")
-    ep, ne = add_edge_angles()
+    ep, ne = add_edge_angles(only_lattices)
     print(f"lattice_configs + краевые углы E1/E2 из .lte: {ep}  (заполнено {ne} изгибающих экземпляров)")
     dp, nd, dd = add_edge_delta()
     print(f"hardware_library + edge_delta (δ из .lte): {dp}  ({nd} типов: {dict((k, round(v*1e3,4)) for k,v in dd.items())})")
@@ -398,7 +407,11 @@ if __name__ == "__main__":
     ap.add_argument("--lte-dir", default=None,
                     help="папка конфигурации .lte для краевых углов E1/E2 и δ "
                          "(по умолчанию workspace/lte/configuration_v1)")
+    ap.add_argument("--lattices", default=None,
+                    help="через запятую: какие решётки перезаписывать (по умолч. ВСЕ). "
+                         "Чужие установки в тех же таблицах трогать нельзя — указывай свои")
     a = ap.parse_args()
     if a.lte_dir:
         LTE_DIR = a.lte_dir
-    main()
+    only = {t.strip() for t in a.lattices.split(",")} if a.lattices else None
+    main(only)

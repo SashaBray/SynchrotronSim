@@ -1,23 +1,28 @@
 # -*- coding: utf-8 -*-
-"""ЕДИНЫЙ загрузчик конфигураций решётки из подпапок workspace/lte/ — БЕЗ копирования .lte в корень.
-Одна команда на любой формат: авто-определяет тип конфигурации и вызывает нужный пайплайн, читая .lte
-ПРЯМО из папки конфигурации.
+"""Загрузчик конфигурации решётки в БД — по ПУТИ к .lte, без зашитых имён.
 
-Форматы (определяются по содержимому папки):
-  • sila  — СИЛА: *_desc.lte + *_line.lte (+ workspace/configs/lte_mapping.json).
-            Пайплайн: lte_to_lattice → assemble → build_matrix_db → warmstart_ring  (реш. из lte_mapping).
-  • flat  — сторонний PyAT/elegant: один .lte с LINE=(...).  Пайплайн: s2lattice_to_db (реш. 200 по умолч.).
-  • none  — нет загружаемого .lte (напр. только xlsx/pdf) → пропуск.
+Форматы (определяются по содержимому, а не по названию):
+  • sila  — описание + отдельная последовательность: *_desc.lte + *_line.lte
+            Пайплайн: lte_to_lattice → assemble_lattice_configs → build_matrix_db → warmstart_ring
+  • flat  — сторонний PyAT/elegant: один .lte, внутри LINE=(...)
+            Пайплайн: s2lattice_to_db
 
-По умолчанию доводит до ГОТОВОЙ К ТРЕКИНГУ решётки (mat_*). Полная загрузка СИЛА СБРАСЫВАет тюн
-(build_matrix_db перезаписывает откалиброванную coupling_matrix, warmstart — mat_* проектными K); поэтому
-если целевая решётка УЖЕ есть в БД — требуется --force (перед перезаписью делаются бэкапы). --parse-only —
-только разбор .lte в таблицы (для СИЛА: sp_elements+lattice_layout, недеструктивно к lattice_configs).
+СОСУЩЕСТВОВАНИЕ КОНФИГУРАЦИЙ. В таблицах живут РАЗНЫЕ установки одновременно, и загрузка одной
+НЕ должна ломать другие. Раньше ломала: assemble переписывал lattice_configs целиком, а
+build_matrix_db — element_connectivity, поэтому каждая загрузка СИЛЫ стирала Сибирь (build_line(2)
+падал с KeyError). Теперь загрузка объявляет СВОИ решётки (сама + суб-решётки из sub_lattices.json)
+и передаёт их вниз через --lattices; строки чужих установок переносятся как есть, со всеми
+столбцами (mat_*, структурные).
+
+Полная загрузка сбрасывает mat_* СВОЕЙ решётки к проектным K из .lte (warmstart). Если решётка уже
+есть — нужен --force (снимаются бэкапы). --parse-only — только разбор .lte в таблицы.
 
 Запуск:
   py -3.14 load_config.py --list
-  py -3.14 load_config.py --config v1 [--gen-assets] [--force] [--parse-only]
-  py -3.14 load_config.py --config syberia [--lattice 2]
+  py -3.14 load_config.py path/to/config_dir --force
+  py -3.14 load_config.py path/to/desc.lte --line path/to/line.lte --force
+  py -3.14 load_config.py path/to/ring.lte --lattice 2 --force      # сторонний flat .lte
+  py -3.14 load_config.py --config v1 --force                        # по короткому имени (удобство)
 """
 import os, sys, csv, glob, json, re, shutil, subprocess, argparse
 
@@ -51,8 +56,40 @@ def discover():
     return out
 
 
+def from_path(path, line=None):
+    """ПУТЬ (папка или .lte-файл) → cfg. Главный способ адресации: никаких зашитых имён.
+
+    • папка              — ищем в ней *_desc.lte + *_line.lte (формат sila) либо один .lte с LINE= (flat)
+    • файл + --line      — sila: описание и последовательность разными файлами
+    • файл с LINE=       — flat (PyAT/elegant, всё в одном файле)
+    """
+    path = os.path.abspath(path)
+    if os.path.isdir(path):
+        descs = sorted(set(glob.glob(os.path.join(path, "*_desc.lte")) + glob.glob(os.path.join(path, "*desc*.lte"))))
+        lines = sorted(set(glob.glob(os.path.join(path, "*_line.lte")) + glob.glob(os.path.join(path, "*line*.lte"))))
+        ltes = sorted(glob.glob(os.path.join(path, "*.lte")))
+        flat = [p for p in ltes if p not in descs and p not in lines and _has_line_def(p)]
+        fmt = "sila" if (descs and lines) else ("flat" if flat else "none")
+        return dict(name=os.path.basename(path), dir=path, format=fmt,
+                    descs=descs, lines=lines, ltes=ltes, flat=flat)
+    if not os.path.isfile(path):
+        raise SystemExit(f"путь не найден: {path}")
+    d = os.path.dirname(path)
+    if line:
+        line = os.path.abspath(line)
+        if not os.path.isfile(line):
+            raise SystemExit(f"файл последовательности не найден: {line}")
+        return dict(name=os.path.basename(d) or os.path.basename(path), dir=d, format="sila",
+                    descs=[path], lines=[line], ltes=[path, line], flat=[])
+    if _has_line_def(path):
+        return dict(name=os.path.splitext(os.path.basename(path))[0], dir=d, format="flat",
+                    descs=[], lines=[], ltes=[path], flat=[path])
+    raise SystemExit(f"в {path} нет LINE=(...) — укажи файл последовательности через --line")
+
+
 def resolve(name, configs):
-    """Гибкое сопоставление: 'v1'→configuration_v1, 'syberia'/'v3'→configuration_v3_syberia."""
+    """УДОБСТВО (не основной путь): короткое имя подпапки workspace/lte/ → cfg.
+    'v1'→configuration_v1, 'syberia'→configuration_v3_syberia. Основной способ — передать ПУТЬ."""
     nl = name.lower()
     for c in configs:
         if c["name"].lower() == nl:
@@ -63,6 +100,19 @@ def resolve(name, configs):
     if len(hits) > 1:
         raise SystemExit(f"неоднозначно '{name}': {[c['name'] for c in hits]}")
     raise SystemExit(f"конфигурация '{name}' не найдена. Есть: {[c['name'] for c in configs]}")
+
+
+def managed_lattices(lat):
+    """{решётки, которые ЭТА загрузка вправе перезаписывать} = сама + её суб-решётки.
+    Всё остальное в таблицах — чужие установки, их трогать нельзя."""
+    out = {str(lat)}
+    try:
+        cfg = json.load(open(os.path.join(ROOT, "workspace", "configs", "sub_lattices.json"), encoding="utf-8"))
+        for e in cfg.get("sub_lattices", []):
+            out.add(str(e.get("lattice_id") if isinstance(e, dict) else e[0]))
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        pass
+    return out
 
 
 def sila_lattice_id():
@@ -112,9 +162,16 @@ def load(cfg, lattice, exp, gen_assets, parse_only, force):
         if lattice_exists(lat) and not force:
             raise SystemExit(f"[защита] решётка {lat} уже есть в БД. Полная загрузка СБРОСИТ тюн "
                              f"(mat_*). Повтори с --force (будут бэкапы) или используй --parse-only.")
+        mine = ",".join(sorted(managed_lattices(lat)))
+        print(f"  перезаписываем решётки: {mine}   (остальные в БД — чужие, не трогаем)")
         sh(["assemble_lattice_configs.py"])
-        sh(["build_matrix_db.py", "--lte-dir", cfg["dir"]])   # края E1/E2 и δ — из ЗАГРУЖАЕМОЙ конфигурации
+        # --lattices: НЕ пересчитывать mat_*/края чужих установок — их писали свои импортёры
+        sh(["build_matrix_db.py", "--lte-dir", cfg["dir"], "--lattices", mine])
         sh(["warmstart_ring.py", str(lat), "--lte-dir", cfg["dir"]])
+        # ФИНАЛ: суб-решётки — копия родителя УЖЕ с физикой. assemble создаёт их до warmstart,
+        # когда mat_* ещё пусты, а warmstart пишет только родителя ⇒ без этого шага суб-решётка
+        # остаётся с нулевыми киками при гнущейся геометрии (так решётка 3 потеряла mat_B).
+        sh(["assemble_lattice_configs.py", "--sync-subs"])
         return lat
 
     # flat (PyAT/elegant) — self-contained one-shot
@@ -127,9 +184,14 @@ def load(cfg, lattice, exp, gen_assets, parse_only, force):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="единый загрузчик конфигураций решётки из подпапок workspace/lte/")
-    ap.add_argument("--config", help="имя конфигурации (v1 / syberia / configuration_v3_syberia; подстрока)")
-    ap.add_argument("--list", action="store_true", help="показать доступные конфигурации и их формат")
+    ap = argparse.ArgumentParser(
+        description="загрузчик конфигурации решётки в БД по ПУТИ к .lte (папка или файл)")
+    ap.add_argument("path", nargs="?", default=None,
+                    help="ПУТЬ: папка с .lte, либо сам .lte-файл (с --line, если последовательность отдельно)")
+    ap.add_argument("--line", default=None, help="путь к файлу последовательности (формат desc+line)")
+    ap.add_argument("--config", default=None,
+                    help="УДОБСТВО вместо пути: короткое имя подпапки workspace/lte/ (v1 / syberia)")
+    ap.add_argument("--list", action="store_true", help="показать конфигурации в workspace/lte/ и их формат")
     ap.add_argument("--lattice", type=int, default=None, help="переопределить id решётки")
     ap.add_argument("--exp", type=int, default=None, help="id эксперимента (flat; по умолч. = id решётки)")
     ap.add_argument("--gen-assets", action="store_true", help="СИЛА: генерировать синтетические карты/STL")
@@ -137,19 +199,19 @@ def main():
     ap.add_argument("--force", action="store_true", help="перезаписать уже существующую решётку (с бэкапами)")
     a = ap.parse_args()
 
-    configs = discover()
-    if a.list or not a.config:
+    if a.list or (not a.path and not a.config):
         print("Конфигурации в workspace/lte/:\n")
         print(f"  {'папка':28} {'формат':22} файлы")
-        for c in configs:
+        for c in discover():
             key = c["descs"] + c["lines"] if c["format"] == "sila" else (c["flat"] or c["ltes"])
             files = ", ".join(os.path.basename(p) for p in key) or "—"
             print(f"  {c['name']:28} {FMT_RU[c['format']]:22} {files}")
-        print("\nЗагрузка:  py -3.14 load_config.py --config <имя> [--force] [--parse-only]")
-        if not a.config:
+        print("\nЗагрузка:  py -3.14 load_config.py <путь> [--line <файл>] [--force] [--parse-only]")
+        print("           py -3.14 load_config.py --config v1 --force      # по короткому имени")
+        if not (a.path or a.config):
             return
 
-    cfg = resolve(a.config, configs)
+    cfg = from_path(a.path, a.line) if a.path else resolve(a.config, discover())
     print(f"\n=== Загрузка «{cfg['name']}» (формат: {FMT_RU[cfg['format']]}) из {os.path.relpath(cfg['dir'], ROOT)} ===")
     lat = load(cfg, a.lattice, a.exp, a.gen_assets, a.parse_only, a.force)
     if lat is not None:

@@ -143,21 +143,36 @@ def assemble():
                 sub_rows.append({**r, "lattice_id": sub_id})
     output_rows.extend(sub_rows)
 
+    # ЧУЖИЕ РЕШЁТКИ СОХРАНЯЕМ. Эта сборка отвечает ТОЛЬКО за свою решётку (LATTICE_ID из
+    # lte_mapping.json) и её суб-решётки. Всё остальное в lattice_configs — сторонние установки,
+    # залитые своими импортёрами (s2lattice_to_db пишет туда напрямую). Раньше файл переписывался
+    # целиком «всё из lattice_layout + sub_lattices» ⇒ КАЖДАЯ загрузка СИЛЫ убивала Сибирь:
+    # build_line(2) падал с KeyError. Переносим их строки как есть, со ВСЕМИ столбцами.
+    managed = {str(LATTICE_ID)} | {str(s) for s, _ in SUB_LATTICES}
+    base = ["lattice_id", "instance_id", "device_type_id",
+            "x", "y", "z", "yaw", "pitch", "roll", "arg_val", "correct_coeff"]
+    foreign, extra_cols = [], []
+    if os.path.exists(LATTICE_CONFIGS):
+        with open(LATTICE_CONFIGS, encoding="utf-8") as f:
+            rd = csv.DictReader(f, delimiter=";")
+            extra_cols = [c for c in (rd.fieldnames or []) if c not in base]
+            foreign = [r for r in rd if r.get("lattice_id") not in managed]
+    fields = base + extra_cols          # столбцы mat_*/структурные чужих решёток НЕ теряем
+    for r in output_rows:               # свои строки — пустые значения, их заполнит build_matrix_db
+        for c in extra_cols:
+            r.setdefault(c, "")
+
     # Запись с retry: Windows может временно заблокировать файл (Excel/антивирус)
     import time as _time
     last_err = None
     for k in range(12):
         try:
             with open(LATTICE_CONFIGS, "w", encoding="utf-8", newline="") as f:
-                w = csv.writer(f, delimiter=";", lineterminator="\n")
-                w.writerow(["lattice_id", "instance_id", "device_type_id",
-                            "x", "y", "z", "yaw", "pitch", "roll",
-                            "arg_val", "correct_coeff"])
-                for r in output_rows:
-                    w.writerow([r["lattice_id"], r["instance_id"], r["device_type_id"],
-                                r["x"], r["y"], r["z"],
-                                r["yaw"], r["pitch"], r["roll"],
-                                r["arg_val"], r["correct_coeff"]])
+                w = csv.DictWriter(f, fieldnames=fields, delimiter=";",
+                                   lineterminator="\n", extrasaction="ignore")
+                w.writeheader()
+                w.writerows(output_rows)
+                w.writerows(foreign)
             break
         except PermissionError as e:
             last_err = e
@@ -167,9 +182,51 @@ def assemble():
     else:
         raise last_err
     main_count = sum(1 for r in output_rows if int(r["lattice_id"]) == LATTICE_ID)
-    print(f"Wrote {LATTICE_CONFIGS}: {len(output_rows)} rows "
-          f"(lattice {LATTICE_ID}: {main_count}, sub-lattices: {len(output_rows) - main_count})")
+    nfor = len({r["lattice_id"] for r in foreign})
+    print(f"Wrote {LATTICE_CONFIGS}: {len(output_rows) + len(foreign)} rows "
+          f"(lattice {LATTICE_ID}: {main_count}, sub-lattices: {len(output_rows) - main_count}, "
+          f"чужих решёток сохранено: {nfor} / {len(foreign)} строк)")
+
+
+def sync_sub_lattices():
+    """Обновить суб-решётки копией строк родителя — ПОСЛЕ того, как физика заполнена.
+
+    ЗАЧЕМ. assemble() создаёт суб-решётки в самом начале, когда mat_* ещё пусты: их заполняют
+    следующие шаги (build_matrix_db → warmstart_ring), и пишут они ТОЛЬКО в родительскую решётку.
+    Суб-решётка остаётся с нулевой физикой — геометрия гнёт, а Σθ0=0. Так решётка 3 (SP1) и
+    осталась без mat_B: изгиб −0.05·π по геометрии против нулевых киков.
+    Поэтому конвейер обязан закончиться этим шагом: строки родителя с instance_id <= max_gid
+    копируются в суб-решётку СО ВСЕМИ столбцами (mat_*, структурные, края).
+    """
+    rows = list(csv.DictReader(open(LATTICE_CONFIGS, encoding="utf-8"), delimiter=";"))
+    fields = list(rows[0].keys())
+    parent = [r for r in rows if r["lattice_id"] == str(LATTICE_ID)]
+    if not parent:
+        print(f"  sync_sub_lattices: решётка {LATTICE_ID} пуста — нечего копировать")
+        return 0
+    sub_ids = {str(s) for s, _ in SUB_LATTICES}
+    kept = [r for r in rows if r["lattice_id"] not in sub_ids]      # чужие решётки не трогаем
+    made = []
+    for sub_id, max_gid in SUB_LATTICES:
+        for r in parent:
+            if int(r["instance_id"]) <= max_gid:
+                made.append({**r, "lattice_id": str(sub_id)})
+    with open(LATTICE_CONFIGS, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields, delimiter=";", lineterminator="\n",
+                           extrasaction="ignore")
+        w.writeheader(); w.writerows(kept); w.writerows(made)
+    per = ", ".join(f"{s}:{sum(1 for r in made if r['lattice_id'] == str(s))}" for s, _ in SUB_LATTICES)
+    print(f"sync_sub_lattices: обновлено из решётки {LATTICE_ID} → {per} (со всеми столбцами)")
+    return len(made)
 
 
 if __name__ == "__main__":
-    assemble()
+    import argparse
+    ap = argparse.ArgumentParser(description="сборка lattice_configs из lattice_layout + sp_elements")
+    ap.add_argument("--sync-subs", action="store_true",
+                    help="только обновить суб-решётки копией родителя (запускать ПОСЛЕ warmstart)")
+    a = ap.parse_args()
+    if a.sync_subs:
+        sync_sub_lattices()
+    else:
+        assemble()
