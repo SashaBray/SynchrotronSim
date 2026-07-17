@@ -32,36 +32,27 @@ def body_global(m, st):
         st = mt._drift(st, m.L)
         pts.append(_g(m, m.L, st[0], st[2]))
         return st, pts
-    if getattr(m, "sector", False):                            # combined-function DQ вдоль изогнутой орбиты
-        p = m.sec; half = p["half"]; Xg, b0, Gu, Gv, S = p["Xg"], p["b0"], p["Gu"], p["Gv"], p["S"]
-        xref = m.sec_xref; N = len(xref); ds_i = m.L / N; ds_f = 2.0 * half / N
-        s = 0.0; pts = [_g(m, s, x, y)]; st = (x, px, y, py, t, d)
-        for i in range(N):
-            st = mt._drift(st, ds_i / 2.0); s += ds_i / 2.0
-            x, px, y, py, t, d = st
-            Xf = -half + (i + 0.5) * ds_f; du = x - xref[i]
-            b = np.interp(Xf, Xg, b0); gu = np.interp(Xf, Xg, Gu)
-            gv = np.interp(Xf, Xg, Gv); sc = np.interp(Xf, Xg, S)
-            Bz = b + gu * du + sc * (du * du - y * y); By = gv * y + 2 * sc * du * y
-            px += -mt.QP * Bz * ds_f; py += mt.QP * By * ds_f
-            st = mt._drift((x, px, y, py, t, d), ds_i / 2.0); s += ds_i / 2.0
-            pts.append(_g(m, s, st[0], st[2]))
-        return st, pts
     N = m.nsl
     dsg = m.L / N; dsf = m.Leff / N
     th, k1, k1v, k2, k3, kE = m.theta0, m.k1, m.k1v, m.k2, m.k3, m.kEdge
+    xr = m.xref                                                 # прогиб опорной дуги (см. Magnet._ref_bow)
     s = 0.0; pts = [_g(m, s, x, y)]; st = (x, px, y, py, t, d)
     if m.kEdge1:                                                # краевая линза на ВХОДЕ (гор.дефокус/верт.фокус)
-        x, px, y, py, t, d = st; st = (x, px + m.kEdge1 * x, y, py - m.kEdge1 * y, t, d)
-    for _ in range(N):
+        x, px, y, py, t, d = st
+        u = x - m.xref_in if xr is not None else x
+        st = (x, px + m.kEdge1 * u, y, py - m.kEdge1 * y, t, d)
+    for i in range(N):
         st = mt._drift(st, dsg / 2.0); s += dsg / 2.0
         x, px, y, py, t, d = st
-        px += th / N - k1 * x * dsf - 0.5 * k2 * (x * x - y * y) * dsf - (k3 / 6.0) * (x ** 3 - 3 * x * y * y) * dsf
-        py += k1v * y * dsf + k2 * x * y * dsf + (k3 / 6.0) * (3 * x * x * y - y ** 3) * dsf - (kE / N) * y
+        u = x - xr[i] if xr is not None else x                  # отклонение от опорной дуги (сектор), не от оси
+        px += th / N - k1 * u * dsf - 0.5 * k2 * (u * u - y * y) * dsf - (k3 / 6.0) * (u ** 3 - 3 * u * y * y) * dsf
+        py += k1v * y * dsf + k2 * u * y * dsf + (k3 / 6.0) * (3 * u * u * y - y ** 3) * dsf - (kE / N) * y
         st = mt._drift((x, px, y, py, t, d), dsg / 2.0); s += dsg / 2.0
         pts.append(_g(m, s, st[0], st[2]))
     if m.kEdge2:                                                # краевая линза на ВЫХОДЕ
-        x, px, y, py, t, d = st; st = (x, px + m.kEdge2 * x, y, py - m.kEdge2 * y, t, d)
+        x, px, y, py, t, d = st
+        u = x - m.xref_out if xr is not None else x
+        st = (x, px + m.kEdge2 * u, y, py - m.kEdge2 * y, t, d)
     return st, pts
 
 

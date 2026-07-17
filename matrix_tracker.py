@@ -116,29 +116,66 @@ class Magnet:
         self.kEdge2 = math.tan(self.edge2) * _rinv                  # выход
         self.nonzero = any(abs(v) > 0 for v in (self.theta0, self.k1, self.k1v, self.k2, self.k3,
                                                 self.kEdge, self.kEdge1, self.kEdge2))
+        # ПРОГИБ ОПОРНОЙ ОРБИТЫ (сагитта). Ящик прямой, а опорная внутри изгиба идёт по дуге и отходит
+        # от оси ящика на L·θ0/8. Мультиполи и края обязаны раскладываться ВДОЛЬ ОРБИТЫ (elegant делает
+        # это конструктивно: CSBEND — СЕКТОР, рама гнётся вместе с опорной, x≡0 по построению), поэтому
+        # кик берёт u = x − xref, а не x. Иначе сама опорная ловит кик k1·сагитта: у DQ_L1000
+        # (θ0=24.8мрад ⇒ сагитта 3.10мм, k1=−1.96) это ~6мрад ⇒ ~2мм за один элемент.
+        self.xref = self.xref_in = self.xref_out = None
+        if self.theta0 and any((self.k1, self.k1v, self.k2, self.k3, self.kEdge1, self.kEdge2)):
+            self.xref, self.xref_in, self.xref_out = self._ref_bow()
+
+    def _ref_bow(self):
+        """Опорная орбита в раме ящика: (x в точках кика, x на входной плоскости, x на выходной).
+
+        Ящик уложен по ХОРДЕ дуги, а его центр = СЕРЕДИНА дуги (lte_to_lattice.step ставит center в
+        точку дуги на половине угла, а ось — по касательной там же) ⇒ в центре опорная имеет x=0 и px=0.
+        Отсюда интегрируем в обе стороны, видя ТОЛЬКО изгиб: на самой опорной мультиполи по определению
+        не действуют. К торцам орбита отходит на сагитту L·θ0/8."""
+        N = self.nsl; ds = self.L / N; th = self.theta0
+        out = [0.0] * N
+        x = px = 0.0
+        for i in range(N // 2, N):                             # вперёд от центра к выходу
+            x += px * (ds / 2.0) / math.sqrt(max(1e-12, 1.0 - px * px)); out[i] = x
+            px += th / N
+            x += px * (ds / 2.0) / math.sqrt(max(1e-12, 1.0 - px * px))
+        x_out = x
+        x = px = 0.0
+        for i in range(N // 2 - 1, -1, -1):                    # назад от центра ко входу
+            x -= px * (ds / 2.0) / math.sqrt(max(1e-12, 1.0 - px * px)); out[i] = x
+            px -= th / N
+            x -= px * (ds / 2.0) / math.sqrt(max(1e-12, 1.0 - px * px))
+        return out, x, x_out
 
     def body(self, st):
         """Тело: N срезов drift-kick-drift по ЭФФЕКТИВНОЙ длине (ds_g=ds_f=L_eff/N) ⇒ полный изгиб/
         фокус = k·L_eff (совпадает с .lte). Чистый диполь = только кик изгиба (без фокусировки);
-        квадруполь/секступоль/октуполь — линейн./нелин. кики."""
+        квадруполь/секступоль/октуполь — линейн./нелин. кики.
+
+        У изгибающих элементов мультиполи и края берут u = x − xref (отклонение от ИЗОГНУТОЙ опорной),
+        а не x от оси ящика — см. _ref_bow. Для неизгибающих xref=None ⇒ u≡x, поведение бит-в-бит."""
         if not self.nonzero:                                   # выключенный — дрейф (нулевой элемент)
             return _drift(st, self.L)
         th, k1, k1v, k2, k3, kE = self.theta0, self.k1, self.k1v, self.k2, self.k3, self.kEdge
         N = self.nsl
         dsg = self.L / N; dsf = self.Leff / N
+        xr = self.xref
         if self.kEdge1:                                        # краевая линза на ВХОДЕ (гор.дефокус/верт.фокус)
             x, px, y, py, t, d = st
-            st = (x, px + self.kEdge1 * x, y, py - self.kEdge1 * y, t, d)
-        for _ in range(N):
+            u = x - self.xref_in if xr is not None else x
+            st = (x, px + self.kEdge1 * u, y, py - self.kEdge1 * y, t, d)
+        for i in range(N):
             st = _drift(st, dsg / 2.0)
             x, px, y, py, t, d = st
-            # НОРМАЛЬНЫЕ мультиполи (Re Cₙ): изгиб θ0, квад −k1·x, секступоль, октуполь + краевая линза
-            px += th / N - k1 * x * dsf - 0.5 * k2 * (x * x - y * y) * dsf - (k3 / 6.0) * (x ** 3 - 3 * x * y * y) * dsf
-            py += k1v * y * dsf + k2 * x * y * dsf + (k3 / 6.0) * (3 * x * x * y - y ** 3) * dsf - (kE / N) * y
+            u = x - xr[i] if xr is not None else x             # отклонение от опорной дуги (сектор), не от оси
+            # НОРМАЛЬНЫЕ мультиполи (Re Cₙ): изгиб θ0, квад −k1·u, секступоль, октуполь + краевая линза
+            px += th / N - k1 * u * dsf - 0.5 * k2 * (u * u - y * y) * dsf - (k3 / 6.0) * (u ** 3 - 3 * u * y * y) * dsf
+            py += k1v * y * dsf + k2 * u * y * dsf + (k3 / 6.0) * (3 * u * u * y - y ** 3) * dsf - (kE / N) * y
             st = _drift((x, px, y, py, t, d), dsg / 2.0)
         if self.kEdge2:                                        # краевая линза на ВЫХОДЕ
             x, px, y, py, t, d = st
-            st = (x, px + self.kEdge2 * x, y, py - self.kEdge2 * y, t, d)
+            u = x - self.xref_out if xr is not None else x
+            st = (x, px + self.kEdge2 * u, y, py - self.kEdge2 * y, t, d)
         return st
 
 
