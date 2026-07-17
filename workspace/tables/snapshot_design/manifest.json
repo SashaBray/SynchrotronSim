@@ -1,0 +1,19 @@
+{
+  "note": "замкнутое кольцо СИЛА + Сибирь + SP1, после разворота зеркала и секторной модели",
+  "git_commit": "4900833",
+  "git_branch": "chore/cleanup-and-docs",
+  "lte_dir": "workspace/lte/configuration_v1_closed",
+  "tables": {
+    "lattice_configs.csv": {
+      "1": 3122,
+      "2": 144,
+      "3": 79
+    },
+    "lattice_layout.csv": {
+      "rows": 3122
+    },
+    "sp_elements.csv": {
+      "rows": 236
+    }
+  }
+}
