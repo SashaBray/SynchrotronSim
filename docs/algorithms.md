@@ -1257,8 +1257,22 @@ $$
 - $L$ — arc length of the bending magnet, in metres (from the LTE
   `L=` parameter).
 - $\alpha$ — total bend angle, in radians (from the LTE `ANGLE=`
-  parameter). Positive $\alpha$ means a left turn, negative a right
-  turn.
+  parameter). **Sign convention: a positive $\alpha$ turns the ring to the
+  RIGHT**, i.e. the yaw $\psi$ *decreases* — the same convention as
+  elegant/MAD. The implementation negates the LTE value on entry
+  (`lte_to_lattice.step`), which is the single source of this convention
+  for the whole project (`design_orbit`, `s2lattice_to_db` and `lte_ring`
+  all defer to it).
+  Why it matters: the tracker's transverse axis
+  $\hat{u} = (-\sin\psi, \cos\psi, 0)$ points where the yaw grows, so with a
+  decreasing yaw the reference orbit bends towards $-x$ and **$+x$ points
+  outwards** of the ring — as in elegant (where $\eta_x > 0$). Laying the
+  ring out the other way mirrors it, and a mirrored lattice needs the sign
+  flipped on every kick that is *even* in $x$ (dipole $\propto x^0$,
+  sextupole $\propto x^2$) but not on the odd ones (quadrupole $\propto x^1$,
+  octupole $\propto x^3$). Consequently $k_1 = +K_1$, $k_2 = +K_2$,
+  $k_3 = +K_3$ are taken from the LTE verbatim, while
+  $\text{mat\_B} = -\alpha_{\text{LTE}}/(\text{QP}\cdot L_{\text{eff}})$.
 - $\rho = L/\alpha$ — radius of curvature, in metres.
 - $L_{\text{chord}}$ — chord length used to straighten the bend (slightly
   shorter than $L$ when $\alpha \ne 0$). For $\alpha \to 0$ the chord
@@ -1358,6 +1372,26 @@ No arithmetic — the operation is a **relational join** between
 calibrations), followed by a union with shortened copies of the master
 lattice.
 
+Two properties of the assembly are load-bearing and easy to lose:
+
+**(a) Ordering.** The union (10.3) copies rows of the master lattice, but
+`assemble` runs *first* in the pipeline, when the physics columns
+(`mat_*`) are still empty — they are filled afterwards by
+`build_matrix_db` and `warmstart_ring`, and **only for the master
+lattice**. A sub-lattice built at step one therefore ends up with a
+bending geometry but zero kicks. The pipeline must close with a second
+pass (`assemble_lattice_configs.py --sync-subs`) that re-derives $R_s$
+from the *filled* master, carrying every column. Without it, sub-lattice
+3 (SP1) carried $\sum\theta_0 = 0$ against a geometry bending by
+$-0.05\pi$.
+
+**(b) Foreign lattices are preserved.** `lattice_configs` holds several
+installations at once, and only the master lattice and its sub-lattices
+come from (10.1). Rows whose `lattice_id` belongs to neither are written
+by their own importers (`s2lattice_to_db`) directly, with their own
+`mat_*`; the assembly copies them through untouched. Rewriting the table
+wholesale — as it once did — silently deleted them.
+
 In set-builder notation:
 
 $$
@@ -1388,7 +1422,7 @@ R_s = \{\,(s.\text{lattice\_id},\;\text{rest of the row}) \;\big|\; r \in R_{\te
 \tag{10.3}
 $$
 
-- $L_0 = 101$ — master lattice ID (from `lte_mapping.json`).
+- $L_0 = 1$ — master lattice ID (from `lte_mapping.json`).
 - $\ell$ — a row of `lattice_layout.csv`.
 - $\ell.\vec{q} = (\ell.x, \ell.y, \ell.z, \ell.\text{yaw},
    \ell.\text{pitch}, \ell.\text{roll})$ — geometry tuple of the
