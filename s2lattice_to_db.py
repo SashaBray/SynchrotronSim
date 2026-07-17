@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Импорт стороннего синхротрона s2lattice (configuration_v3_syberia/s2lattice.lte, PyAT/elegant)
-в БД проекта как решётку 200 для МАТРИЧНОЙ модели (kick-phys). Другая машина: 124 м, 12 SP,
+в БД проекта как решётку 2 для МАТРИЧНОЙ модели (kick-phys). Другая машина: 124 м, 12 SP,
 KQUAD/KSEXT/CSBEND. Физкоэф. из .lte: mat_G=K1/QP, mat_S=K2/QP, mat_O=K3/QP, mat_B=ANGLE/(QP·Leff)
 (⇒ трекер-k1=K1, θ=ANGLE — оптика верна независимо от энергии пучка). Геометрия — проход кольца
 (дрейф вдоль курса, CSBEND поворачивает курс на ANGLE). STL — плейсхолдеры SILA. Устройства s2_*.
@@ -11,7 +11,7 @@ import synthetic_assets as sa                                  # gen_stl: мас
 
 TB = os.path.join("workspace", "tables")
 LTE = os.path.join("workspace", "lte", "configuration_v3_syberia", "s2lattice.lte")
-LAT_ID, EXP_ID, GROUP = "2", "200", "1"
+LAT_ID, EXP_ID, GROUP = "2", "2", "1"
 PFX = "s2_"
 MAGKIND = {"KQUAD": "quad", "KSEXT": "sext", "KOCT": "oct", "CSBEND": "dipole"}
 ACTIVE = {"quad": "k1", "sext": "k2", "oct": "k3", "dipole": "theta_y"}
@@ -99,7 +99,7 @@ def main():
                         "next_instance_id": str(iid + 1) if k < len(lc_rows) - 1 else ""})
     upsert_lattice(os.path.join(TB, "element_connectivity.csv"), ec_hdr, LAT_ID, ec_rows)
 
-    # 3) эксперимент 200 (1 оборот) + пучок group 1
+    # 3) эксперимент 2 (1 оборот) + пучок group 1
     ex_hdr = next(csv.reader(open(os.path.join(TB, "experiments.csv"), encoding="utf-8"), delimiter=";"))
     ex = {c: "" for c in ex_hdr}
     ex.update(exp_id=EXP_ID, lattice_id=LAT_ID, group_id=GROUP, dt="6,74E-13", max_turns="1", traj_stride="1")
