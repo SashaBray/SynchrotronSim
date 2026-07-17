@@ -160,9 +160,11 @@ def _apply_arc(pts: list[tuple[float, float, float]],
                L: float, angle: float, n_sub: int) -> tuple[float, float, float]:
     """Дуга длиной L с поворотом angle. Добавляет n_sub точек (без стартовой).
     Аналитика: kappa=angle/L; на пути s касательная = yaw + kappa*s;
-    смещения вычислены интегралом cos/sin от касательной."""
+    смещения вычислены интегралом cos/sin от касательной.
+    ЗНАК: положительный ANGLE из .lte поворачивает ВПРАВО (yaw убывает) — см. lte_to_lattice.step."""
     if L <= 0.0:
         return x, y, yaw
+    angle = -angle                      # .lte ANGLE > 0 ⇒ поворот вправо
     if abs(angle) < _DYAW_EPS:
         return _apply_line(pts, x, y, yaw, L, n_sub)
     kappa = angle / L
@@ -185,9 +187,11 @@ def _advance_pose(x: float, y: float, yaw: float,
                   L: float, angle: float) -> tuple[float, float, float]:
     """Сдвиг (x, y, yaw) после прохождения одного сегмента. Без накопления точек.
     Возвращает (x_end, y_end, yaw_end). Используется в compute_magnet_endpoints,
-    где промежуточные точки не нужны."""
+    где промежуточные точки не нужны.
+    ЗНАК: положительный ANGLE из .lte поворачивает ВПРАВО (yaw убывает) — см. lte_to_lattice.step."""
     if L <= 0.0:
         return x, y, yaw
+    angle = -angle                      # .lte ANGLE > 0 ⇒ поворот вправо
     if abs(angle) < _DYAW_EPS:
         return x + L * math.cos(yaw), y + L * math.sin(yaw), yaw
     kappa = angle / L

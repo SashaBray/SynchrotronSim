@@ -275,16 +275,19 @@ def add_edge_angles():
             grp = list(range(j, k + 1))
             th = sum(lte[names[i]][0] for i in grp)            # суммарный изгиб группы
             dl = sum(dlt.get(insts[i]["device_type_id"], 0.0) for i in grp)
-            box = (th + dl) / 2.0                              # край ящика на внешней грани
+            # ЗНАК: положительный ANGLE .lte = поворот ВПРАВО (θ0<0, см. lte_to_lattice.step), а E меняет
+            # знак вместе с ANGLE ⇒ край отрицателен. Тогда kEdge=tan(E)·θ0/L чётен по изгибу: верт. фокус
+            # края не зависит от того, в какую сторону гнёт диполь (иначе зеркальный диполь ДЕфокусировал бы).
+            box = -(th + dl) / 2.0                             # край ящика на внешней грани
             e1o = lte[names[grp[0]]][1]; e2o = lte[names[grp[-1]]][2]  # .lte внешние (первый.E1, последний.E2)
             if abs(abs(box) - abs(e1o)) < 2e-5 and abs(abs(box) - abs(e2o)) < 2e-5:
                 insts[grp[0]]["edge1"] = f"{(box if e1o >= 0 else -box):.12g}"   # ЯЩИК: только внешние грани
                 insts[grp[-1]]["edge2"] = f"{(box if e2o >= 0 else -box):.12g}"
                 nfill += 2
-            else:                                              # асимметрия (DQ2C) — per-slice .lte дословно
+            else:                                              # асимметрия (DQ2C) — per-slice .lte (со знаком)
                 for i in grp:
                     _, e1, e2 = lte[names[i]]
-                    insts[i]["edge1"] = f"{e1:.12g}"; insts[i]["edge2"] = f"{e2:.12g}"; nfill += 2
+                    insts[i]["edge1"] = f"{-e1:.12g}"; insts[i]["edge2"] = f"{-e2:.12g}"; nfill += 2
             j = k + 1
     fields = list(data[0].keys())
     os.makedirs(os.path.join(TB, "backups"), exist_ok=True)
