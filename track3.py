@@ -30,32 +30,37 @@ TB = os.path.join("workspace", "tables")
 RESULTS = os.path.join("workspace", "results")
 
 
-def run_kick(lattice, group, source, exp_id=None):
-    """Режим 2: глобальный трек инжектированного пучка старт-плоскость→финиш-плоскость. Возврат сводки.
-    Замкнут (финиш=старт) ⇒ полный оборот + невязка замыкания; открыт (финиш≠старт) ⇒ путь до конца сегмента."""
+def run_kick(lattice, group, source, exp_id=None, n_turns=1, thin_eps=0.0):
+    """Режим 2: глобальный трек инжектированного пучка старт→финиш, n_turns оборотов. Возврат сводки.
+    Замкнут (финиш=старт) ⇒ оборот(ы) + невязка; открыт (финиш≠старт) ⇒ путь до конца сегмента (n_turns=1).
+    thin_eps>0 (м) ⇒ потоковое прореживание траектории по кривизне (лёгкие длинные многооборотные треки)."""
     plane, ordered, states, info = bi.inject(lattice, group, source=source)
     finish = info.get("finish", plane); closed = info.get("closed", True)
-    survived = 0; residuals = []; trajs = []
+    if n_turns > 1 and not closed:
+        n_turns = 1                                        # открытый сегмент не зациклить
+    survived = 0; residuals = []; trajs = []; lost_turns = []
     for st in states:
-        s = tuple(st); x0, y0 = st[0], st[2]; lost_at = None
-        pts = [mte._g(plane, 0.0, x0, y0)]
+        s = tuple(st); x0, y0 = st[0], st[2]; lost_turn = None; turn = 0
+        th = mte.Thinner(thin_eps); th.add(mte._g(plane, 0.0, x0, y0))
         try:
-            s, pp = mte.drift_global(s, plane, ordered[0]); pts += pp
-            s, pp = mte.body_global(ordered[0], s); pts += pp
-            for j in range(1, len(ordered)):
-                s, pp = mte.drift_global(s, ordered[j - 1], ordered[j]); pts += pp
-                s, pp = mte.body_global(ordered[j], s); pts += pp
-            s, pp = mte.drift_global(s, ordered[-1], finish); pts += pp   # → ФИНИШ-плоскость (замкнут: = старт)
+            for turn in range(n_turns):
+                s, pp = mte.drift_global(s, plane, ordered[0]);            [th.add(p) for p in pp]
+                s, pp = mte.body_global(ordered[0], s);                    [th.add(p) for p in pp]
+                for j in range(1, len(ordered)):
+                    s, pp = mte.drift_global(s, ordered[j - 1], ordered[j]); [th.add(p) for p in pp]
+                    s, pp = mte.body_global(ordered[j], s);                  [th.add(p) for p in pp]
+                s, pp = mte.drift_global(s, ordered[-1], finish);          [th.add(p) for p in pp]   # → финиш (замкнут: =старт)
             survived += 1
             residuals.append(np.hypot(s[0] - x0, s[2] - y0) if closed else np.nan)  # невязка только для замкнутого
-        except mt.ParticleLost as e:
-            lost_at = str(e)
-        trajs.append(np.asarray(pts, float))
+        except mt.ParticleLost:
+            lost_turn = turn + 1
+        trajs.append(th.result()); lost_turns.append(lost_turn)
     if exp_id is not None:
         os.makedirs(RESULTS, exist_ok=True)
         mte.write_bin(trajs, os.path.join(RESULTS, f"trajectories_exp{exp_id}.bin"))
         mte.ensure_experiment(exp_id, lattice)
     return dict(n=len(states), survived=survived, residuals=residuals, info=info, closed=closed,
+                turns=n_turns, lost_turns=lost_turns,
                 after=info["after_elem"], before=info["before_elem"])
 
 
@@ -137,6 +142,8 @@ def main():
     ap.add_argument("--exp", type=int, required=True, help="id эксперимента в experiments.csv (установка+пучок+финиш-плоскость)")
     ap.add_argument("--lattice", type=int, default=None, help="переопределить установку (иначе — из experiments.csv[exp])")
     ap.add_argument("--group", type=int, default=None, help="переопределить пучок (иначе — из experiments.csv[exp])")
+    ap.add_argument("--turns", type=int, default=1, help="число оборотов (kick-phys, только замкнутый; >1 ⇒ авто-прореживание)")
+    ap.add_argument("--thin", type=float, default=0.0, help="прореживание траектории по кривизне, ε в мм (0=авто: выкл для 1 об., 0.5мм для многих)")
     a = ap.parse_args()
 
     # ЕДИНЫЙ ИСТОЧНИК: установка+пучок берутся из experiments.csv[exp]; --lattice/--group переопределяют
@@ -154,14 +161,21 @@ def main():
         print(f"\nРежим 1 (диффур): выжило {s if s is not None else '?'} частиц "
               f"(плоскость '{res['info']['after_elem']}'→'{res['info']['before_elem']}').")
     else:
+        turns = max(1, a.turns)
+        thin_eps = (a.thin * 1e-3) if a.thin > 0 else (5e-4 if turns > 1 else 0.0)   # мм→м; авто 0.5мм для многооборота
         author_experiment(lattice, group, a.exp)   # записать/обновить конфиг (старт+финиш-плоскость) — чтобы оба ядра читали одно
-        res = run_kick(lattice, group, "physical", exp_id=a.exp)
-        kind = "замкнут (полный оборот)" if res["closed"] else "ОТКРЫТ (старт→финиш сегмента)"
-        print(f"\nРежим 2 ({a.mode}): выжило {res['survived']}/{res['n']} частиц — путь {kind}.")
+        res = run_kick(lattice, group, "physical", exp_id=a.exp, n_turns=turns, thin_eps=thin_eps)
+        kind = "замкнут" if res["closed"] else "ОТКРЫТ (старт→финиш сегмента)"
+        print(f"\nРежим 2 ({a.mode}): {res['turns']} об., выжило {res['survived']}/{res['n']} частиц — путь {kind}.")
         print(f"  плоскость старта: '{res['after']}' → '{res['before']}'")
+        if res["turns"] > 1:
+            lost = [f"частица {i} на об.{t}" for i, t in enumerate(res["lost_turns"]) if t]
+            print(f"  потери по оборотам: {'; '.join(lost) if lost else 'нет, все дошли'}")
         rr = [r for r in res["residuals"] if not np.isnan(r)]
         if res["closed"] and rr:
-            print(f"  невязка замыкания (поперечн.): макс {max(rr)*1e3:.3f} мм, средн {np.mean(rr)*1e3:.3f} мм")
+            print(f"  невязка замыкания за оборот (поперечн.): макс {max(rr)*1e3:.3f} мм, средн {np.mean(rr)*1e3:.3f} мм")
+        if thin_eps > 0:
+            print(f"  траектория прорежена по кривизне (ε={thin_eps*1e3:.2f}мм) — лёгкий bin для визуализации")
 
 
 if __name__ == "__main__":

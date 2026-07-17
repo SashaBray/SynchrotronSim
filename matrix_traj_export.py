@@ -80,6 +80,39 @@ def track_global(mags, particle):
     return np.asarray(pts, dtype=np.float64)
 
 
+def _perp_dist(p, a, b):
+    """Перпендикулярное расстояние точки p от прямой a→b (3D, на чистых float — быстро)."""
+    (px, py, pz), (ax, ay, az), (bx, by, bz) = p, a, b
+    abx, aby, abz = bx - ax, by - ay, bz - az
+    L2 = abx * abx + aby * aby + abz * abz
+    apx, apy, apz = px - ax, py - ay, pz - az
+    if L2 < 1e-24:
+        return (apx * apx + apy * apy + apz * apz) ** 0.5
+    cx = aby * apz - abz * apy; cy = abz * apx - abx * apz; cz = abx * apy - aby * apx
+    return ((cx * cx + cy * cy + cz * cz) / L2) ** 0.5
+
+
+class Thinner:
+    """Потоковое прореживание полилинии по кривизне (Reumann–Witkam): точка сохраняется, только если
+    её удаление сдвинуло бы линию > eps. Прямые участки (дрейфы) → 2 точки; изгибы/бетатрон — сохранены.
+    eps в метрах; eps<=0 ⇒ прореживания нет (все точки). Держит в памяти только сохранённые точки."""
+    def __init__(self, eps):
+        self.eps = eps; self.out = []; self.anchor = None; self.prev = None
+    def add(self, p):
+        p = (float(p[0]), float(p[1]), float(p[2]))
+        if self.eps <= 0:
+            self.out.append(p); return
+        if self.anchor is None:
+            self.out.append(p); self.anchor = p; self.prev = p; return
+        if _perp_dist(self.prev, self.anchor, p) > self.eps:
+            self.out.append(self.prev); self.anchor = self.prev
+        self.prev = p
+    def result(self):
+        if self.eps > 0 and self.prev is not None and (not self.out or self.out[-1] != self.prev):
+            self.out.append(self.prev)
+        return np.asarray(self.out, dtype=np.float64)
+
+
 def write_bin(particles_pts, path):
     with open(path, "wb") as f:
         for pts in particles_pts:
