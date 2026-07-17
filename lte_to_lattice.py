@@ -468,13 +468,13 @@ def run(lte_dir=None, tol_mm=1.0, gen_assets=False):
     # Closure-хак УДАЛЁН. Раньше здесь ANGLE чистых диполей скрытно масштабировался до Σ=2π —
     # это замыкало ГЕОМЕТРИЮ (кадры), но кики (warmstart читает сырой ANGLE) оставались недогнутыми,
     # отсюда рассинхрон кадры↔кики и уход опорной. Замыкание теперь чинится В ИСТОЧНИКЕ (.lte)
-    # скриптом close_ring_lte.py (грузи *_closed конфиг). Здесь — только ЧЕСТНОЕ предупреждение.
+    # инструментом lte_ring.py (грузи замкнутую копию). Здесь — только ЧЕСТНОЕ предупреждение.
     deficit = 2.0 * math.pi - raw_total_bend
     if abs(deficit) > 1e-6:
         print(f"\n  [ВНИМАНИЕ] Кольцо НЕ замкнуто: Σ ANGLE = {math.degrees(raw_total_bend):.4f}° "
               f"= {raw_total_bend / math.pi:.6f}·π  (недобор {deficit * 1e3:+.2f} мрад).")
         print(f"  Геометрия будет ОТКРЫТА (честное состояние, не размазываем). "
-              f"Замкнуть: close_ring_lte.py → грузи *_closed конфиг.")
+              f"Замкнуть: lte_ring.py <файл> --out <файл>")
     else:
         print(f"\n  Кольцо замкнуто в .lte: Σ ANGLE = {math.degrees(raw_total_bend):.4f}° "
               f"(невязка {deficit * 1e3:+.3f} мрад).")
