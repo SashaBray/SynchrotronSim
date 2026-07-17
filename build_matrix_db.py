@@ -268,6 +268,61 @@ def add_edge_angles():
     return p, nfill
 
 
+def add_edge_delta():
+    """Добавляет в hardware_library колонку edge_delta: δ = E1+E2−ANGLE из .lte (радианы), на
+    ДЛИНО-специфичный device_type. δ — фиксированный доворот полюсных граней сверх геометрического
+    клина, КОНСТАНТА типа магнита (не зависит от ρ/изгиба). Используется при расчёте E1/E2 = геом.+δ/2.
+    Мост lte_name→device: те же compute_magnet_endpoints + lattice_configs, что в add_edge_angles.
+    Идемпотентна, трогает только edge_delta. Возврат (path, n_заполнено, {device: δ})."""
+    import re
+    import design_orbit as do
+    lte_path = os.path.join("workspace", "lte", "configuration_v1", "SYLA_desc.lte")
+    if not os.path.exists(lte_path):
+        lte_path = os.path.join("workspace", "lte", "SYLA_desc.lte")
+    p = os.path.join(TB, "hardware_library.csv")
+    if not os.path.exists(lte_path):
+        return p, 0, {}
+    desc = open(lte_path, encoding="utf-8").read()
+    dl = {}                                                    # lte_name → δ (рад)
+    for m in re.finditer(r"([A-Za-z0-9_]+)\s*:\s*CSBEND\s*,([^\n]+)", desc):
+        b = m.group(2)
+        def g(k, b=b):
+            mm = re.search(rf"\b{k}=(-?[0-9.eE+-]+)", b)
+            return float(mm.group(1)) if mm else 0.0
+        dl[m.group(1)] = g("E1") + g("E2") - g("ANGLE")
+    lc = {r["instance_id"]: r["device_type_id"]
+          for r in csv.DictReader(open(os.path.join(TB, "lattice_configs.csv"), encoding="utf-8"), delimiter=";")
+          if r["lattice_id"] == "1"}
+    try:
+        eps, _ = do.compute_magnet_endpoints(1)
+    except Exception:
+        eps = []
+    dev_delta = {}                                            # длино-специфичный device → δ (проверяем единственность)
+    for e in eps:
+        if e.lte_name in dl:
+            dev = lc.get(str(e.global_id), e.device_type_id)
+            d = round(dl[e.lte_name], 12)
+            if dev in dev_delta and abs(dev_delta[dev] - d) > 1e-9:
+                raise ValueError(f"δ неоднозначна для {dev}: {dev_delta[dev]} vs {d} — проверь суффикс длины")
+            dev_delta[dev] = d
+    rows = list(csv.reader(open(p, encoding="utf-8"), delimiter=";"))
+    hdr = rows[0]
+    os.makedirs(os.path.join(TB, "backups"), exist_ok=True)
+    if "edge_delta" not in hdr:
+        shutil.copy(p, os.path.join(TB, "backups", "hardware_library_pre_delta.csv"))
+        hdr.append("edge_delta")
+        for r in rows[1:]:
+            r.append("")
+    i = hdr.index("edge_delta")
+    n = 0
+    for r in rows[1:]:
+        if r[0] in dev_delta:
+            r[i] = f"{dev_delta[r[0]]:.12g}"; n += 1
+    with open(p, "w", newline="", encoding="utf-8") as f:
+        csv.writer(f, delimiter=";").writerows(rows)
+    return p, n, dev_delta
+
+
 def main():
     print("hardware_library + eff_length:", add_lengths())
     print("element_transforms:", write_transforms())
@@ -279,6 +334,8 @@ def main():
     print(f"lattice_configs + структурные (eff_length/kind/n_slices/edge1/edge2): {sp}  ({nr} строк)")
     ep, ne = add_edge_angles()
     print(f"lattice_configs + краевые углы E1/E2 из .lte: {ep}  (заполнено {ne} изгибающих экземпляров)")
+    dp, nd, dd = add_edge_delta()
+    print(f"hardware_library + edge_delta (δ из .lte): {dp}  ({nd} типов: {dict((k, round(v*1e3,4)) for k,v in dd.items())})")
 
 
 if __name__ == "__main__":
