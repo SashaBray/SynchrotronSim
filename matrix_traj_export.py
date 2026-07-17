@@ -133,6 +133,7 @@ def main_injected(exp_id, lattice, group_id):
     import beam_injection as bi
     os.makedirs(RESULTS, exist_ok=True)
     plane, ordered, states, info = bi.inject(lattice, group_id)
+    finish = info.get("finish", plane)
     trajs = []
     for st in states:
         s = tuple(st); pts = [_g(plane, 0.0, st[0], st[2])]      # старт: точка на плоскости
@@ -142,7 +143,7 @@ def main_injected(exp_id, lattice, group_id):
             for j in range(1, len(ordered)):
                 s, pp = drift_global(s, ordered[j - 1], ordered[j]); pts += pp
                 s, pp = body_global(ordered[j], s); pts += pp
-            s, pp = drift_global(s, ordered[-1], plane); pts += pp   # возврат в плоскость (полный круг)
+            s, pp = drift_global(s, ordered[-1], finish); pts += pp   # → ФИНИШ-плоскость (замкнут: = старт)
         except mt.ParticleLost:
             pass
         trajs.append(np.asarray(pts, float))

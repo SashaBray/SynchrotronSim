@@ -124,29 +124,43 @@ def inject(lattice, group_id, source="physical"):
     centroid, normal = fit_plane(parts)
     vel_dir = np.mean([p["vel"] / np.linalg.norm(p["vel"]) for p in parts], axis=0)
     vel_dir /= np.linalg.norm(vel_dir)
-    i, center, axis = find_injection_site(mags, centroid, normal, vel_dir)
-    plane = PlaneMagnet(center, axis)
-    ordered = mags[i + 1:] + mags[:i + 1]        # кольцо стартует ПОСЛЕ mags[i], возвращается к нему
+    try:
+        i, center, axis = find_injection_site(mags, centroid, normal, vel_dir)
+        plane = PlaneMagnet(center, axis)
+        ordered = mags[i + 1:] + mags[:i + 1]    # ЗАМКНУТ: старт ПОСЛЕ mags[i], возврат к нему
+        finish = plane                            # финиш-плоскость СОВПАДАЕТ со стартовой ⇒ полный оборот
+        after, before, closed = mags[i].dev, mags[(i + 1) % len(mags)].dev, True
+    except ValueError:
+        # ОТКРЫТЫЙ сегмент (SP1 и т.п.): опорная орбита не пересекает плоскость пучка замкнуто — пучок
+        # стоит ДО первого элемента. Старт = плоскость пучка, финиш = выход последнего элемента (путь НЕ замкнут).
+        plane = PlaneMagnet(centroid, vel_dir)
+        ordered = list(mags)                      # элементы по порядку, без замыкающего шва
+        last = mags[-1]
+        finish = PlaneMagnet(np.asarray(last.exit, float), last.axis)   # финиш ≠ старт ⇒ путь открыт
+        center = centroid
+        after, before, closed = "BEAM_PLANE", mags[0].dev, False
     states = [to_canonical(p, plane) for p in parts]
-    info = dict(nparts=len(parts), after_elem=mags[i].dev, before_elem=mags[(i + 1) % len(mags)].dev,
-                center=center, axis=axis, closed=bool(np.linalg.norm(center - centroid) < 1e-3))
+    info = dict(nparts=len(parts), after_elem=after, before_elem=before,
+                center=center, axis=plane.axis, closed=closed, finish=finish)
     return plane, ordered, states, info
 
 
 # ---------------- трек одного оборота (плоскость → кольцо → плоскость) ----------------
-def track_turn(plane, ordered, states):
-    """Каждая частица: инжекция в плоскости → полный круг → возврат в плоскость (финиш). Возврат
-    [(final_state, lost)]. lost=None если долетела."""
+def track_turn(plane, ordered, states, finish=None):
+    """Каждая частица: старт-плоскость → элементы → ФИНИШ-плоскость. Возврат [(final_state, lost)].
+    finish=None ⇒ финиш совпадает со стартом (замкнутый полный оборот)."""
+    if finish is None:
+        finish = plane
     res = []
     for st in states:
         s = tuple(st); lost = None
         try:
-            s = mt.modified_drift(s, plane, ordered[0])          # плоскость → 1-й элемент
+            s = mt.modified_drift(s, plane, ordered[0])          # старт-плоскость → 1-й элемент
             s = ordered[0].body(s)
             for j in range(1, len(ordered)):
                 s = mt.modified_drift(s, ordered[j - 1], ordered[j])
                 s = ordered[j].body(s)
-            s = mt.modified_drift(s, ordered[-1], plane)         # последний → плоскость = полный круг
+            s = mt.modified_drift(s, ordered[-1], finish)        # последний → ФИНИШ (замкнут: = старт)
         except mt.ParticleLost as e:
             lost = str(e)
         res.append((s, lost))
@@ -161,12 +175,13 @@ if __name__ == "__main__":
     print(f"Группа {gid}, решётка {lat}: {info['nparts']} частиц, плоскость КОМПЛАНАРНА ✓")
     print(f"  инжекция в дрейфе между '{info['after_elem']}' и '{info['before_elem']}'")
     print(f"  центр плоскости = {info['center'].round(4)}  ось = {info['axis'].round(4)}")
-    print(f"  замкнута (центр≈центроид пучка): {info['closed']}, магнитов в круге: {len(ordered)}")
-    print("Полный оборот (плоскость → кольцо → плоскость):")
+    kind = "ЗАМКНУТ (полный оборот)" if info['closed'] else "ОТКРЫТ (старт→финиш-сегмент)"
+    print(f"  тип пути: {kind}, элементов: {len(ordered)}")
+    print(f"Трек (старт-плоскость → элементы → финиш-плоскость):")
     surv = 0
-    for k, (st, lost) in enumerate(track_turn(plane, ordered, states)):
+    for k, (st, lost) in enumerate(track_turn(plane, ordered, states, info['finish'])):
         if lost:
             print(f"  частица {k}: ПОТЕРЯНА — {lost}")
         else:
-            print(f"  частица {k}: круг пройден, финиш x={st[0]*1e3:+.4f}мм y={st[2]*1e3:+.4f}мм t={st[4]:.4f}м"); surv += 1
-    print(f"ВЫЖИЛО {surv}/{info['nparts']} полный оборот")
+            print(f"  частица {k}: путь пройден, финиш x={st[0]*1e3:+.4f}мм y={st[2]*1e3:+.4f}мм t={st[4]:.4f}м"); surv += 1
+    print(f"ВЫЖИЛО {surv}/{info['nparts']}")

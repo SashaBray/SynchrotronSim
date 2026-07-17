@@ -31,8 +31,10 @@ RESULTS = os.path.join("workspace", "results")
 
 
 def run_kick(lattice, group, source, exp_id=None):
-    """Режимы 2/3: глобальный трек инжектированного пучка полный оборот. Возврат сводки."""
+    """Режим 2: глобальный трек инжектированного пучка старт-плоскость→финиш-плоскость. Возврат сводки.
+    Замкнут (финиш=старт) ⇒ полный оборот + невязка замыкания; открыт (финиш≠старт) ⇒ путь до конца сегмента."""
     plane, ordered, states, info = bi.inject(lattice, group, source=source)
+    finish = info.get("finish", plane); closed = info.get("closed", True)
     survived = 0; residuals = []; trajs = []
     for st in states:
         s = tuple(st); x0, y0 = st[0], st[2]; lost_at = None
@@ -43,9 +45,9 @@ def run_kick(lattice, group, source, exp_id=None):
             for j in range(1, len(ordered)):
                 s, pp = mte.drift_global(s, ordered[j - 1], ordered[j]); pts += pp
                 s, pp = mte.body_global(ordered[j], s); pts += pp
-            s, pp = mte.drift_global(s, ordered[-1], plane); pts += pp   # возврат в плоскость
+            s, pp = mte.drift_global(s, ordered[-1], finish); pts += pp   # → ФИНИШ-плоскость (замкнут: = старт)
             survived += 1
-            residuals.append(np.hypot(s[0] - x0, s[2] - y0))            # невязка замыкания (поперечн.)
+            residuals.append(np.hypot(s[0] - x0, s[2] - y0) if closed else np.nan)  # невязка только для замкнутого
         except mt.ParticleLost as e:
             lost_at = str(e)
         trajs.append(np.asarray(pts, float))
@@ -53,7 +55,7 @@ def run_kick(lattice, group, source, exp_id=None):
         os.makedirs(RESULTS, exist_ok=True)
         mte.write_bin(trajs, os.path.join(RESULTS, f"trajectories_exp{exp_id}.bin"))
         mte.ensure_experiment(exp_id, lattice)
-    return dict(n=len(states), survived=survived, residuals=residuals, info=info,
+    return dict(n=len(states), survived=survived, residuals=residuals, info=info, closed=closed,
                 after=info["after_elem"], before=info["before_elem"])
 
 
@@ -63,9 +65,12 @@ def author_experiment(lattice, group, exp_id, dt=1e-11, skip_steps=300000):
     skip_steps (max_turns, перепрофилир. в C++ как «пропустить N шагов до проверки плоскости») —
     пропускает старт и противоположное пересечение, ловит ВОЗВРАТ (≈3.7e5 шагов при dt=1e-11)."""
     plane, ordered, states, info = bi.inject(lattice, group)     # source не важен для геометрии плоскости
-    c = plane.center; u = plane.uhat; v = plane.vhat; ax = plane.axis
+    fin = info.get("finish", plane)                              # в БД пишем ФИНИШ-плоскость (её ловит диффур)
+    closed = info.get("closed", True)
+    c = fin.center; u = fin.uhat; v = fin.vhat; ax = fin.axis
     p1 = c + 1.0 * u + 1.0 * v; p2 = c - 1.0 * u + 1.0 * v; p3 = c + 0.0 * u - 1.0 * v  # 3 точки плоскости
-    row = [str(exp_id), str(lattice), str(group), f"{dt:.2e}".replace("e", "E"), str(skip_steps), "50"]
+    skip = skip_steps if closed else 0                           # открыт: финиш≠старт, пересекается 1 раз — без пропуска
+    row = [str(exp_id), str(lattice), str(group), f"{dt:.2e}".replace("e", "E"), str(skip), "50"]
     row += [f"{p1[0]:.6f}", f"{p1[1]:.6f}", f"{p1[2]:.6f}",
             f"{p2[0]:.6f}", f"{p2[1]:.6f}", f"{p2[2]:.6f}",
             f"{p3[0]:.6f}", f"{p3[1]:.6f}", f"{p3[2]:.6f}"]
@@ -149,13 +154,13 @@ def main():
         print(f"\nРежим 1 (диффур): выжило {s if s is not None else '?'} частиц "
               f"(плоскость '{res['info']['after_elem']}'→'{res['info']['before_elem']}').")
     else:
-        author_experiment(lattice, group, a.exp)   # записать/обновить конфиг (плоскость=инжекция) — чтобы оба ядра читали одно
+        author_experiment(lattice, group, a.exp)   # записать/обновить конфиг (старт+финиш-плоскость) — чтобы оба ядра читали одно
         res = run_kick(lattice, group, "physical", exp_id=a.exp)
-        rr = res["residuals"]
-        print(f"\nРежим 2 ({a.mode}): выжило {res['survived']}/{res['n']} "
-              f"частиц полный оборот.")
-        print(f"  плоскость инжекции: '{res['after']}' → '{res['before']}'")
-        if rr:
+        kind = "замкнут (полный оборот)" if res["closed"] else "ОТКРЫТ (старт→финиш сегмента)"
+        print(f"\nРежим 2 ({a.mode}): выжило {res['survived']}/{res['n']} частиц — путь {kind}.")
+        print(f"  плоскость старта: '{res['after']}' → '{res['before']}'")
+        rr = [r for r in res["residuals"] if not np.isnan(r)]
+        if res["closed"] and rr:
             print(f"  невязка замыкания (поперечн.): макс {max(rr)*1e3:.3f} мм, средн {np.mean(rr)*1e3:.3f} мм")
 
 
