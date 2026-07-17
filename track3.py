@@ -30,11 +30,11 @@ TB = os.path.join("workspace", "tables")
 RESULTS = os.path.join("workspace", "results")
 
 
-def run_kick(lattice, group, source, exp_id=None, n_turns=1, thin_eps=0.0, loss_radius=None):
+def run_kick(lattice, group, source, exp_id=None, n_turns=1, thin_eps=0.0, settings=None):
     """Режим 2: глобальный трек инжектированного пучка старт→финиш, n_turns оборотов. Возврат сводки.
     Замкнут (финиш=старт) ⇒ оборот(ы) + невязка; открыт (финиш≠старт) ⇒ путь до конца сегмента (n_turns=1).
     thin_eps>0 (м) ⇒ потоковое прореживание траектории по кривизне (лёгкие длинные многооборотные треки)."""
-    plane, ordered, states, info = bi.inject(lattice, group, source=source, loss_radius=loss_radius)
+    plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings)
     finish = info.get("finish", plane); closed = info.get("closed", True)
     if n_turns > 1 and not closed:
         n_turns = 1                                        # открытый сегмент не зациклить
@@ -92,17 +92,16 @@ def author_experiment(lattice, group, exp_id, dt=1e-11, skip_steps=300000, loss_
 
 
 def load_experiment(exp_id):
-    """experiments.csv[exp_id] → (lattice_id, group_id, loss_radius_m) или (None, None, None).
-    ЕДИНЫЙ конфиг эксперимента (установка+пучок+финиш-плоскость+порог потери), который читают ОБА ядра.
-    loss_radius_m — из столбца loss_radius_mm (мм→м); None ⇒ ядро возьмёт свой дефолт."""
+    """experiments.csv[exp_id] → (lattice_id, group_id) или (None, None).
+    ЕДИНЫЙ конфиг эксперимента (установка+пучок+финиш-плоскость), который читают ОБА ядра.
+    ПАРАМЕТРЫ ЯДРА того же опыта читает matrix_tracker.Settings.from_experiment(exp_id)."""
     path = os.path.join(TB, "experiments.csv")
     if not os.path.exists(path):
-        return None, None, None
+        return None, None
     for r in csv.DictReader(open(path, encoding="utf-8"), delimiter=";"):
         if r.get("exp_id") == str(exp_id):
-            lr = (r.get("loss_radius_mm") or "").strip()
-            return int(r["lattice_id"]), int(r["group_id"]), (float(lr) / 1e3 if lr else None)
-    return None, None, None
+            return int(r["lattice_id"]), int(r["group_id"])
+    return None, None
 
 
 def run_diff(lattice, group, exp_id):
@@ -147,15 +146,27 @@ def main():
     ap.add_argument("--group", type=int, default=None, help="переопределить пучок (иначе — из experiments.csv[exp])")
     ap.add_argument("--turns", type=int, default=1, help="число оборотов (kick-phys, только замкнутый; >1 ⇒ авто-прореживание)")
     ap.add_argument("--thin", type=float, default=0.0, help="прореживание траектории по кривизне, ε в мм (0=авто: выкл для 1 об., 0.5мм для многих)")
-    ap.add_argument("--loss-mm", type=float, default=None, help="порог потери пучка (мм); иначе из experiments.csv[loss_radius_mm]")
+    # ПАРАМЕТРЫ ЯДРА: дефолт ← experiments.csv[exp] ← этот аргумент (приоритет справа налево)
+    ap.add_argument("--loss-mm", type=float, default=None,
+                    help="порог потери пучка, мм (иначе experiments.csv[loss_radius_mm], иначе дефолт ядра)")
+    ap.add_argument("--plane-same-tol-mm", type=float, default=None,
+                    help="плоскости ближе этого — одна, без пролёта, мм (иначе experiments.csv[plane_same_tol_mm])")
+    ap.add_argument("--plane-parallel-tol", type=float, default=None,
+                    help="|axis_A × axis_B| ниже — нормали параллельны (иначе experiments.csv[plane_parallel_tol])")
+    ap.add_argument("--n-slices", type=int, default=None,
+                    help="срезов тела, ФОЛБЭК (приоритет у lattice_configs[n_slices]; иначе experiments.csv[n_slices])")
     a = ap.parse_args()
 
     # ЕДИНЫЙ ИСТОЧНИК: установка+пучок берутся из experiments.csv[exp]; --lattice/--group переопределяют
     # (и создают новую строку, если эксперимента ещё нет). Оба ядра стартуют из ОДНОГО конфига.
-    lat_db, grp_db, lr_db = load_experiment(a.exp)
+    lat_db, grp_db = load_experiment(a.exp)
     lattice = a.lattice if a.lattice is not None else lat_db
     group = a.group if a.group is not None else grp_db
-    loss_r = (a.loss_mm / 1e3) if a.loss_mm is not None else lr_db   # порог потери: CLI > БД > дефолт ядра
+    settings = mt.Settings.from_experiment(
+        a.exp,
+        loss_radius_m=(a.loss_mm / 1e3) if a.loss_mm is not None else None,
+        plane_same_tol_m=(a.plane_same_tol_mm / 1e3) if a.plane_same_tol_mm is not None else None,
+        plane_parallel_tol=a.plane_parallel_tol, n_slices=a.n_slices)
     if lattice is None or group is None:
         ap.error(f"эксперимент {a.exp} не найден в experiments.csv — задайте --lattice и --group, чтобы создать его")
 
@@ -169,9 +180,10 @@ def main():
         turns = max(1, a.turns)
         thin_eps = (a.thin * 1e-3) if a.thin > 0 else (5e-4 if turns > 1 else 0.0)   # мм→м; авто 0.5мм для многооборота
         # записать/обновить конфиг (старт+финиш-плоскость+порог потери) — чтобы оба ядра читали одно
-        author_experiment(lattice, group, a.exp, loss_mm=(loss_r * 1e3 if loss_r else 12.0))
+        author_experiment(lattice, group, a.exp, loss_mm=settings.loss_radius_m * 1e3)
+        print(f"  параметры ядра: {settings}")
         res = run_kick(lattice, group, "physical", exp_id=a.exp, n_turns=turns, thin_eps=thin_eps,
-                       loss_radius=loss_r)
+                       settings=settings)
         kind = "замкнут" if res["closed"] else "ОТКРЫТ (старт→финиш сегмента)"
         print(f"\nРежим 2 ({a.mode}): {res['turns']} об., выжило {res['survived']}/{res['n']} частиц — путь {kind}.")
         print(f"  плоскость старта: '{res['after']}' → '{res['before']}'")

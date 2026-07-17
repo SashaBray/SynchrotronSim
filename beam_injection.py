@@ -115,11 +115,12 @@ def to_canonical(part, plane):
 
 
 # ---------------- сборка инжектированной замкнутой структуры ----------------
-def inject(lattice, group_id, source="physical", loss_radius=None):
+def inject(lattice, group_id, source="physical", settings=None):
     """Полная инжекция: пучок группы → (плоскость-магнит, упорядоченное кольцо, канон. состояния).
+    settings — matrix_tracker.Settings прогона (порог потери, допуски стыков; None ⇒ дефолты).
     Возврат (plane, ordered_mags, states, info)."""
     eff, phys, coup, trans = mt.load_db()
-    mags = mt.build_line(lattice, eff, phys, coup, trans, source=source, loss_radius=loss_radius)
+    mags = mt.build_line(lattice, eff, phys, coup, trans, source=source, settings=settings)
     parts = load_group(group_id)
     centroid, normal = fit_plane(parts)
     vel_dir = np.mean([p["vel"] / np.linalg.norm(p["vel"]) for p in parts], axis=0)

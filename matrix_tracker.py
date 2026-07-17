@@ -67,7 +67,7 @@ class ParticleLost(Exception):
 
 
 class Magnet:
-    def __init__(self, insts, eff, phys, coup, trans, source="physical"):
+    def __init__(self, insts, eff, phys, coup, trans, source="physical", settings=None):
         r0 = insts[0]
         self.center = np.array([float(r0["x"]), float(r0["y"]), float(r0["z"])])
         self.yaw = float(r0["yaw"])
@@ -81,7 +81,8 @@ class Magnet:
         self.exit = self.center + 0.5 * self.L * self.axis
         _tr = trans.get(self.dev, {})
         self.kind = r0.get("kind") or _tr.get("kind") or ""
-        self.nsl = int(r0.get("n_slices") or _tr.get("n_slices") or 40)   # число срезов тела (drift-kick-drift)
+        # срезов тела (drift-kick-drift): приоритет у элемента, затем у типа, затем параметр прогона
+        self.nsl = int(r0.get("n_slices") or _tr.get("n_slices") or (settings or Settings()).n_slices)
         self.edge1 = float(r0.get("edge1") or 0.0)             # краевые углы E1/E2 (.lte); физика края — Фаза 3
         self.edge2 = float(r0.get("edge2") or 0.0)
         self.devs = [r["device_type_id"] for r in insts]
@@ -179,7 +180,9 @@ class Magnet:
         return st
 
 
-def build_line(lattice_id, eff, phys, coup, trans, lo=None, hi=None, source="physical", loss_radius=None):
+def build_line(lattice_id, eff, phys, coup, trans, lo=None, hi=None, source="physical", settings=None):
+    """Собрать решётку. settings — Settings прогона (None ⇒ дефолты ядра)."""
+    st = settings or Settings()
     conf = {(r["lattice_id"], r["instance_id"]): r for r in _read("lattice_configs.csv")}
     conn = [r for r in _read("element_connectivity.csv") if r["lattice_id"] == str(lattice_id)]
     conn.sort(key=lambda r: int(r["instance_id"]))
@@ -192,9 +195,9 @@ def build_line(lattice_id, eff, phys, coup, trans, lo=None, hi=None, source="phy
                 group.append(rn); i += 1
             else:
                 break
-        mags.append(Magnet(group, eff, phys, coup, trans, source)); i += 1
+        mags.append(Magnet(group, eff, phys, coup, trans, source, settings=st)); i += 1
     out = mags[lo:hi] if lo is not None else mags
-    check_junctions(out, loss_radius=loss_radius)   # стыки: снап совпадающих + контроль клиновых по порогу опыта
+    check_junctions(out, settings=st)               # стыки: снап совпадающих + контроль клиновых по порогу опыта
     return out
 
 
@@ -203,36 +206,78 @@ def build_line(lattice_id, eff, phys, coup, trans, lo=None, hi=None, source="phy
 # быть ПАРАЛЛЕЛЬНЫМИ с зазором (обычный дрейф) или образовывать КЛИН (непараллельные). У клина плоскости
 # пересекаются по линии; если эта линия ближе к опорной, чем порог потери, часть пучка попадает в
 # вырожденную зону (для одних частиц вход B уже позади выхода A) — это ошибка геометрии.
-PLANE_SAME_TOL   = 1e-4      # м: плоскости ближе этого ⇒ считаем ОДНОЙ (переход без пролёта)
-PLANE_PARA_TOL   = 1e-9      # |axis_A × axis_B| ниже ⇒ нормали параллельны
-BEAM_LOSS_RADIUS = 0.012     # м: ДЕФОЛТ порога потери пучка. Рабочее значение — параметр ЭКСПЕРИМЕНТА
-                             # (experiments.csv.loss_radius_mm), пробрасывается сюда через build_line.
+class Settings:
+    """Параметры ЯДРА для одного прогона: ни одного зашитого числа в расчётном коде.
+
+    Источник — столбцы experiments.csv (у каждого опыта свои), любой можно переопределить
+    аргументом. Пустая ячейка ⇒ значение из DEFAULTS. Порядок приоритета:
+        явный аргумент  >  столбец experiments.csv  >  DEFAULTS
+
+    loss_radius_m      — порог потери пучка. Им же меряется опасность клина между плоскостями.
+    plane_same_tol_m   — плоскости ближе этого считаем ОДНОЙ (переход без пролёта).
+    plane_parallel_tol — |axis_A × axis_B| ниже ⇒ нормали параллельны.
+    n_slices           — срезов тела, ФОЛБЭК: приоритет у lattice_configs.n_slices данного элемента.
+    """
+    DEFAULTS = dict(loss_radius_m=0.012, plane_same_tol_m=1e-4,
+                    plane_parallel_tol=1e-9, n_slices=40)
+    # столбец experiments.csv → (поле, множитель к СИ)
+    COLUMNS = {"loss_radius_mm": ("loss_radius_m", 1e-3),
+               "plane_same_tol_mm": ("plane_same_tol_m", 1e-3),
+               "plane_parallel_tol": ("plane_parallel_tol", 1.0),
+               "n_slices": ("n_slices", 1)}
+
+    def __init__(self, **kw):
+        bad = set(kw) - set(self.DEFAULTS)
+        if bad:
+            raise ValueError(f"неизвестные параметры ядра: {sorted(bad)}; "
+                             f"допустимы {sorted(self.DEFAULTS)}")
+        for k, v in self.DEFAULTS.items():
+            setattr(self, k, v if kw.get(k) is None else type(v)(kw[k]))
+
+    @classmethod
+    def from_experiment(cls, exp_id, **override):
+        """Прочитать параметры опыта из experiments.csv; **override перебивает столбцы."""
+        vals = {}
+        p = os.path.join(TB, "experiments.csv")
+        if exp_id is not None and os.path.exists(p):
+            for r in csv.DictReader(open(p, encoding="utf-8"), delimiter=";"):
+                if r.get("exp_id") == str(exp_id):
+                    for col, (field, mul) in cls.COLUMNS.items():
+                        raw = (r.get(col) or "").strip()
+                        if raw:
+                            vals[field] = float(raw) * mul
+                    break
+        vals.update({k: v for k, v in override.items() if v is not None})
+        return cls(**vals)
+
+    def __repr__(self):
+        return ("Settings(" + ", ".join(f"{k}={getattr(self, k)!r}" for k in self.DEFAULTS) + ")")
 
 
-def _plane_relation(A, B):
+def _plane_relation(A, B, st):
     """(kind, apex, gap): kind ∈ {'same','parallel','wedge'}; apex — расстояние линии пересечения
     плоскостей до опорной точки стыка (для 'wedge'); gap — отступ A.exit от плоскости B по её нормали."""
     nA, nB, pA, pB = A.axis, B.axis, A.exit, B.entry
     gap = abs(float(nB @ (pA - pB)))
     cr = np.cross(nA, nB); s = float(np.linalg.norm(cr))
-    if s < PLANE_PARA_TOL:                                     # нормали параллельны
-        return ("same" if gap < PLANE_SAME_TOL else "parallel"), float("inf"), gap
+    if s < st.plane_parallel_tol:                              # нормали параллельны
+        return ("same" if gap < st.plane_same_tol_m else "parallel"), float("inf"), gap
     d = cr / s                                                 # направление линии пересечения
     X0 = np.linalg.lstsq(np.vstack([nA, nB]), np.array([float(nA @ pA), float(nB @ pB)]), rcond=None)[0]
     w = pA - X0
     return "wedge", float(np.linalg.norm(w - (w @ d) * d)), gap
 
 
-def check_junctions(mags, loss_radius=None, verbose=False):
+def check_junctions(mags, settings=None, verbose=False):
     """Проверка стыков ПРИ СБОРКЕ. Совпадающие плоскости помечаются как одна (пролёт не нужен).
     Клин с линией пересечения ближе порога потери к опорной — ОШИБКА. Возврат: список проблем.
-    loss_radius (м) — порог потери пучка ДАННОГО эксперимента (experiments.csv.loss_radius_mm);
-    None ⇒ дефолт BEAM_LOSS_RADIUS."""
-    lr = BEAM_LOSS_RADIUS if loss_radius is None else float(loss_radius)
+    settings — Settings прогона (None ⇒ дефолты)."""
+    st = settings or Settings()
+    lr = st.loss_radius_m
     problems = []; n = {"same": 0, "parallel": 0, "wedge": 0}
     for j in range(1, len(mags)):
         A, B = mags[j - 1], mags[j]
-        kind, apex, gap = _plane_relation(A, B)
+        kind, apex, gap = _plane_relation(A, B, st)
         n[kind] += 1
         B.same_plane_as_prev = (kind == "same")                # снап: переход без пролёта
         if kind == "wedge" and apex < lr:
