@@ -219,46 +219,73 @@ def add_structural_columns():
 
 
 def add_edge_angles():
-    """Заполняет edge1/edge2 в lattice_configs краевыми углами E1/E2 из .lte (per-instance, радианы).
-    Мост instance→.lte: design_orbit.compute_magnet_endpoints(lat) даёт список в порядке global_id
-    (== instance_id) с полем lte_name, выровненный 1:1 с insts (как в add_matrix_columns); E1/E2 берём
-    из lte_to_lattice.parse_desc(SYLA_desc.lte)[lte_name] (там уже float). У НЕизгибов (квад/секст/окт/
-    корректор/BPM) E1/E2 нет → пусто. Стойка DQ: все обмотки — один магнит, один lte_name, один E1/E2.
-    Ядро эти столбцы ПОКА игнорирует (Фаза 3a). close_scale их не масштабирует — значения дословно.
-    Идемпотентна, трогает только edge1/edge2 (после add_structural_columns, где они уже заведены)."""
+    """Заполняет edge1/edge2 в lattice_configs КАК ЯЩИК: краевой угол = (θ0_полн + δ_полн)/2 на ВНЕШНИХ
+    гранях сгруппированного диполя (внутренние грани срезов = 0, они гасятся), знак — по .lte-краю.
+    θ0 = ANGLE из .lte; δ из hardware_library.edge_delta (по device_type). Группа = подряд идущие изгибы
+    одного device (срезы длинного диполя); обмотки DQ (одна позиция, разные device, один lte_name) —
+    каждая своя группа, но θ0/δ/край одинаковы → Magnet читает первую. Асимметричные (DQ2C: расчёт ≠
+    .lte-край) → сохраняем per-slice .lte. Мост instance→.lte: compute_magnet_endpoints(lat).lte_name.
+    Ядро ПОКА игнорирует (Фаза 3a→3b). Идемпотентна. Возврат (path, n_заполнено)."""
+    import re
     import design_orbit as do
-    import lte_to_lattice as lte
     from collections import OrderedDict
     lte_path = os.path.join("workspace", "lte", "configuration_v1", "SYLA_desc.lte")
     if not os.path.exists(lte_path):
         lte_path = os.path.join("workspace", "lte", "SYLA_desc.lte")
-    devices = lte.parse_desc(lte_path) if os.path.exists(lte_path) else {}
     p = os.path.join(TB, "lattice_configs.csv")
     data = list(csv.DictReader(open(p, encoding="utf-8"), delimiter=";"))
     if not data or "edge1" not in data[0]:
         return p, 0                                          # столбцов нет — сначала add_structural_columns()
+    lte = {}                                                 # lte_name → (ANGLE, E1, E2), рад
+    if os.path.exists(lte_path):
+        desc = open(lte_path, encoding="utf-8").read()
+        for m in re.finditer(r"([A-Za-z0-9_]+)\s*:\s*CSBEND\s*,([^\n]+)", desc):
+            b = m.group(2)
+            def _g(k, b=b):
+                mm = re.search(rf"\b{k}=(-?[0-9.eE+-]+)", b); return float(mm.group(1)) if mm else 0.0
+            lte[m.group(1)] = (_g("ANGLE"), _g("E1"), _g("E2"))
+    dlt = {}                                                 # device_type → δ
+    for r in csv.DictReader(open(os.path.join(TB, "hardware_library.csv"), encoding="utf-8"), delimiter=";"):
+        v = (r.get("edge_delta") or "").strip()
+        if v:
+            try: dlt[r["device_type_id"]] = float(v)
+            except ValueError: pass
     by_lat = OrderedDict()
     for r in data:
         by_lat.setdefault(r["lattice_id"], []).append(r)
     nfill = 0
     for lat, insts in by_lat.items():
         insts.sort(key=lambda r: int(r["instance_id"]))
+        for r in insts:
+            r["edge1"] = r["edge2"] = ""                     # сброс (идемпотентность)
         try:
             eps, _ = do.compute_magnet_endpoints(int(lat))
         except Exception:
             eps = None
-        aligned = eps if (eps and len(eps) == len(insts)) else None
-        for j, r in enumerate(insts):
-            e1 = e2 = ""
-            if aligned is not None:
-                d = devices.get(getattr(aligned[j], "lte_name", "") or "", {})
-                if d.get("E1") is not None:
-                    e1 = f"{float(d['E1']):.12g}"
-                if d.get("E2") is not None:
-                    e2 = f"{float(d['E2']):.12g}"
-            r["edge1"], r["edge2"] = e1, e2
-            if e1 or e2:
-                nfill += 1
+        if not (eps and len(eps) == len(insts)):
+            continue
+        names = [getattr(eps[j], "lte_name", "") or "" for j in range(len(insts))]
+        j = 0
+        while j < len(insts):
+            if names[j] not in lte:
+                j += 1; continue
+            dev = insts[j]["device_type_id"]; k = j            # группа подряд идущих изгибов одного device
+            while k + 1 < len(insts) and names[k + 1] in lte and insts[k + 1]["device_type_id"] == dev:
+                k += 1
+            grp = list(range(j, k + 1))
+            th = sum(lte[names[i]][0] for i in grp)            # суммарный изгиб группы
+            dl = sum(dlt.get(insts[i]["device_type_id"], 0.0) for i in grp)
+            box = (th + dl) / 2.0                              # край ящика на внешней грани
+            e1o = lte[names[grp[0]]][1]; e2o = lte[names[grp[-1]]][2]  # .lte внешние (первый.E1, последний.E2)
+            if abs(abs(box) - abs(e1o)) < 2e-5 and abs(abs(box) - abs(e2o)) < 2e-5:
+                insts[grp[0]]["edge1"] = f"{(box if e1o >= 0 else -box):.12g}"   # ЯЩИК: только внешние грани
+                insts[grp[-1]]["edge2"] = f"{(box if e2o >= 0 else -box):.12g}"
+                nfill += 2
+            else:                                              # асимметрия (DQ2C) — per-slice .lte дословно
+                for i in grp:
+                    _, e1, e2 = lte[names[i]]
+                    insts[i]["edge1"] = f"{e1:.12g}"; insts[i]["edge2"] = f"{e2:.12g}"; nfill += 2
+            j = k + 1
     fields = list(data[0].keys())
     os.makedirs(os.path.join(TB, "backups"), exist_ok=True)
     shutil.copy(p, os.path.join(TB, "backups", "lattice_configs_pre_edges.csv"))
