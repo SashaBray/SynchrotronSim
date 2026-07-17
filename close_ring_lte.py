@@ -102,7 +102,13 @@ def main():
     pure_names = {nm for nm, d in dev.items()
                   if d["typ"] == "CSBEND" and abs(d["angle"]) > 1e-12 and not d["has_k1"]}
 
-    # переписываем desc построчно: у чистых диполей ANGLE ×= close_scale
+    # Переписываем desc построчно: у чистых диполей ANGLE ×= close_scale, и КРАЯ E1/E2 ×= close_scale.
+    # ЗАЧЕМ края. Масштабировать ANGLE, не трогая E, нельзя: δ = E1+E2−ANGLE (отклонение полюса от
+    # rectangular bend) обязана быть КОНСТАНТОЙ типа устройства — build_matrix_db.add_edge_delta это
+    # проверяет и падает при неоднозначности, а add_edge_angles сверяет внешние грани группы срезов с
+    # box = (Σθ+Σδ)/2. Меняя только ANGLE, мы сдвигали бы δ у каждого среза на свою величину.
+    # Общий множитель обе инварианты сохраняет: δ → s·δ (по-прежнему константа типа, s глобальный),
+    # box → s·box, внешние грани → s·(грани) ⇒ сверка сходится. Геометрия дуги масштабируется целиком.
     n_scaled = 0
     out_lines = []
     for raw in open(desc_path, encoding="utf-8", errors="ignore").read().splitlines():
@@ -110,7 +116,7 @@ def main():
         if m and m.group(1).upper() in pure_names:
             def repl(mm):
                 return mm.group(1) + repr(float(mm.group(2)) * close_scale)
-            new = re.sub(r'(\bANGLE\s*=\s*)([-\d.eE+]+)', repl, raw)
+            new = re.sub(r'(\b(?:ANGLE|E1|E2)\s*=\s*)([-\d.eE+]+)', repl, raw)
             out_lines.append(new)
             n_scaled += 1
         else:

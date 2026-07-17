@@ -11,6 +11,23 @@ import os, csv, json, shutil
 import bip_matrix as bm
 
 TB = os.path.join("workspace", "tables")
+
+# Папка конфигурации .lte, из которой берутся краевые углы E1/E2 и δ (add_edge_angles / add_edge_delta).
+# ПАРАМЕТР, а не константа: иначе при загрузке другой конфигурации (напр. замкнутой configuration_v1_closed)
+# края молча считались бы по .lte ПРЕЖНЕЙ конфигурации. Переопределяется --lte-dir (load_config передаёт).
+LTE_DIR = os.path.join("workspace", "lte", "configuration_v1")
+
+
+def _desc_lte():
+    """Путь к *_desc.lte текущей конфигурации (fallback — старое место в корне workspace/lte)."""
+    p = os.path.join(LTE_DIR, "SYLA_desc.lte")
+    if os.path.exists(p):
+        return p
+    import glob as _glob
+    got = _glob.glob(os.path.join(LTE_DIR, "*_desc.lte"))
+    return got[0] if got else os.path.join("workspace", "lte", "SYLA_desc.lte")
+
+
 QP, BRHO = bm.QP, bm.BRHO
 J = json.load(open("workspace/calibration/composite_fullrange.json", encoding="utf-8"))
 
@@ -119,13 +136,22 @@ def write_transforms():
 
 
 def write_connectivity():
-    """Для каждого экземпляра решётки — предшественник/преемник по порядку instance_id внутри lattice."""
+    """Для каждого экземпляра решётки — предшественник/преемник по порядку instance_id внутри lattice.
+
+    СТОРОННИЕ решётки СОХРАНЯЮТСЯ. Импорт чужого синхротрона (s2lattice_to_db) пишет связность НАПРЯМУЮ,
+    минуя lattice_configs, поэтому слепая перезапись «всё из lattice_configs» их стирала — так пропадала
+    Сибирь (реш. 2) при каждой перегенерации СИЛЫ. Решётки, которых нет в lattice_configs, переносим как есть."""
     p = os.path.join(TB, "lattice_configs.csv")
     rows = list(csv.DictReader(open(p, encoding="utf-8"), delimiter=";"))
     by_lat = {}
     for r in rows:
         by_lat.setdefault(r["lattice_id"], []).append(r)
     out = os.path.join(TB, "element_connectivity.csv")
+    keep = []                                                              # строки решёток не из lattice_configs
+    if os.path.exists(out):
+        for r in csv.reader(open(out, encoding="utf-8"), delimiter=";"):
+            if r and r[0] != "lattice_id" and r[0] not in by_lat:
+                keep.append(r)
     with open(out, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=";")
         w.writerow(["lattice_id", "instance_id", "device_type_id", "prev_instance_id", "next_instance_id"])
@@ -135,7 +161,9 @@ def write_connectivity():
                 prev = lst[i - 1]["instance_id"] if i > 0 else ""          # торцы пусты (не кольцо; при нужде замкнуть)
                 nxt = lst[i + 1]["instance_id"] if i < len(lst) - 1 else ""
                 w.writerow([lat, r["instance_id"], r["device_type_id"], prev, nxt])
-    return out, len(by_lat), len(rows)
+        w.writerows(keep)                                                  # сторонние решётки — без изменений
+    nkeep = len({r[0] for r in keep})
+    return out, len(by_lat) + nkeep, len(rows) + len(keep)
 
 
 def add_matrix_columns():
@@ -229,9 +257,7 @@ def add_edge_angles():
     import re
     import design_orbit as do
     from collections import OrderedDict
-    lte_path = os.path.join("workspace", "lte", "configuration_v1", "SYLA_desc.lte")
-    if not os.path.exists(lte_path):
-        lte_path = os.path.join("workspace", "lte", "SYLA_desc.lte")
+    lte_path = _desc_lte()
     p = os.path.join(TB, "lattice_configs.csv")
     data = list(csv.DictReader(open(p, encoding="utf-8"), delimiter=";"))
     if not data or "edge1" not in data[0]:
@@ -306,9 +332,7 @@ def add_edge_delta():
     Идемпотентна, трогает только edge_delta. Возврат (path, n_заполнено, {device: δ})."""
     import re
     import design_orbit as do
-    lte_path = os.path.join("workspace", "lte", "configuration_v1", "SYLA_desc.lte")
-    if not os.path.exists(lte_path):
-        lte_path = os.path.join("workspace", "lte", "SYLA_desc.lte")
+    lte_path = _desc_lte()
     p = os.path.join(TB, "hardware_library.csv")
     if not os.path.exists(lte_path):
         return p, 0, {}
@@ -369,4 +393,12 @@ def main():
 
 
 if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser(description="Расширение БД SynchrotronSim под матричную модель.")
+    ap.add_argument("--lte-dir", default=None,
+                    help="папка конфигурации .lte для краевых углов E1/E2 и δ "
+                         "(по умолчанию workspace/lte/configuration_v1)")
+    a = ap.parse_args()
+    if a.lte_dir:
+        LTE_DIR = a.lte_dir
     main()

@@ -113,7 +113,7 @@ def load(cfg, lattice, exp, gen_assets, parse_only, force):
             raise SystemExit(f"[защита] решётка {lat} уже есть в БД. Полная загрузка СБРОСИТ тюн "
                              f"(mat_*). Повтори с --force (будут бэкапы) или используй --parse-only.")
         sh(["assemble_lattice_configs.py"])
-        sh(["build_matrix_db.py"])
+        sh(["build_matrix_db.py", "--lte-dir", cfg["dir"]])   # края E1/E2 и δ — из ЗАГРУЖАЕМОЙ конфигурации
         sh(["warmstart_ring.py", str(lat), "--lte-dir", cfg["dir"]])
         return lat
 

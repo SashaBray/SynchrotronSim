@@ -17,7 +17,7 @@ SP_I2_1A;True;B;SP_I2_100A_v3.fld;sextupole/SP_I2_100A_v3.bin;-;1;100;1;1;0.1870
 BPM;True;none;-;-;-;1;-;1;1;0.0000;0;False;;
 QP_L_1A_L295;True;B;-;synthetic/QP_L_1A_L295.bin;synthetic/QP_L_1A_L295.STL;1;100;1;1;0.2950;0;True;QP_L_1A;
 QP_sh_1A_L162;True;B;-;synthetic/QP_sh_1A_L162.bin;synthetic/QP_sh_1A_L162.STL;1;100;1;1;0.1620;0;True;QP_sh_1A;
-DP_L_PM_L418;False;B;-;synthetic/DP_L_PM_L418.bin;synthetic/DP_L_PM_L418.STL;1;-;-1;0.0005;0.4178;0;True;DP_L_PM;0.000140805865
+DP_L_PM_L418;False;B;-;synthetic/DP_L_PM_L418.bin;synthetic/DP_L_PM_L418.STL;1;-;-1;0.0005;0.4178;0;True;DP_L_PM;0.000142345305
 QP_sh_1A_L212;True;B;-;synthetic/QP_sh_1A_L212.bin;synthetic/QP_sh_1A_L212.STL;1;100;1;1;0.2120;0;True;QP_sh_1A;
 SP_I1_1A_L166;True;B;-;synthetic/SP_I1_1A_L166.bin;synthetic/SP_I1_1A_L166.STL;1;100;1;1;0.1660;0;True;SP_I1_1A;
 SP_I2_1A_L166;True;B;-;synthetic/SP_I2_1A_L166.bin;-;1;100;1;1;0.1720;0;True;SP_I2_1A;

@@ -25,7 +25,10 @@ def write_warmstart(lattice=1, lte_dir=None):
     for i, g in enumerate(grp):
         c = mapping[i]
         dev = g[0]["device_type_id"]; Leff = eff.get(dev, 1.0)
-        matB = c["angle"] / (QP * Leff) if (c["kind"] in ("dipole", "dq") and c["angle"]) else 0.0
+        # ЗНАК: положительный ANGLE из .lte = поворот ВПРАВО, т.е. θ0 = −ANGLE (см. lte_to_lattice.step).
+        # Геометрия уложена так же ⇒ кик и ящик гнут в одну сторону. Без минуса диполь гнул бы ПРОТИВ
+        # своей же геометрии: до разворота укладки было theta+angle и θ0=+ANGLE — согласовано, теперь нет.
+        matB = -c["angle"] / (QP * Leff) if (c["kind"] in ("dipole", "dq") and c["angle"]) else 0.0
         if matB: nbend += 1
         if c["G"] or c["S"] or c["O"]: nfoc += 1
         for k, inst in enumerate(g):
