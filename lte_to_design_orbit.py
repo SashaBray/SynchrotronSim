@@ -54,14 +54,15 @@ def main() -> None:
     line = lte.parse_line(str(line_path))
     print(f"  parsed line with {len(line)} element references")
 
-    # --- Замыкание кольца: масштабируем ANGLE чистых диполей --------------
-    # (точная копия логики из lte_to_lattice.main, чтобы геометрии совпадали)
-    raw_pure_bend = 0.0
-    raw_dq_bend   = 0.0
+    # --- Замыкание кольца УДАЛЕНО (был скрытый closure-хак) ---------------
+    # Раньше здесь ANGLE чистых диполей масштабировался до Σ=2π. Теперь замыкание чинится
+    # В ИСТОЧНИКЕ (.lte) через close_ring_lte.py; здесь — только предупреждение, чтобы
+    # незамкнутость была ВИДНА, а не молча размазана в опорную орбиту.
+    raw_pure_bend = raw_dq_bend = 0.0
     for name in line:
-        if name not in devices:
+        d = devices.get(name)
+        if not d:
             continue
-        d = devices[name]
         angle = d.get("ANGLE", 0.0)
         if not isinstance(angle, (int, float)) or angle == 0.0:
             continue
@@ -71,21 +72,11 @@ def main() -> None:
         else:
             raw_pure_bend += angle
     raw_total = raw_pure_bend + raw_dq_bend
-    if abs(raw_pure_bend) > 1e-9:
-        target_pure = (2.0 * math.pi) - raw_dq_bend
-        close_scale = target_pure / raw_pure_bend
-        print(f"\n  Closing ring: raw bend = {math.degrees(raw_total):.4f} deg "
-              f"(pure={math.degrees(raw_pure_bend):.4f} + "
-              f"DQ={math.degrees(raw_dq_bend):.4f})")
-        print(f"  close_scale on pure dipoles = {close_scale:.8f}")
-        for d in devices.values():
-            angle = d.get("ANGLE", 0.0)
-            if not isinstance(angle, (int, float)) or angle == 0.0:
-                continue
-            k1 = d.get("K1", 0.0)
-            if isinstance(k1, (int, float)) and k1 != 0.0:
-                continue  # DQ не трогаем
-            d["ANGLE"] = angle * close_scale
+    deficit = 2.0 * math.pi - raw_total
+    if abs(deficit) > 1e-6:
+        print(f"\n  [ВНИМАНИЕ] Кольцо НЕ замкнуто: Σ ANGLE = {math.degrees(raw_total):.4f}° "
+              f"(недобор {deficit * 1e3:+.2f} мрад). Опорная орбита будет ОТКРЫТА. "
+              f"Замкнуть: close_ring_lte.py → *_closed конфиг.")
 
     # --- Проход по line.lte, эмит сегментов по sp_type --------------------
     # Для КАЖДОГО уникального sp_type сохраняем сегменты ПЕРВОГО встреченного

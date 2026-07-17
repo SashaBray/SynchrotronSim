@@ -456,29 +456,19 @@ def run(lte_dir=None, tol_mm=1.0, gen_assets=False):
         else:
             raw_pure_bend += angle
     raw_total_bend = raw_pure_bend + raw_dq_bend
-    if abs(raw_pure_bend) > 1e-9:
-        target_pure = (2.0 * math.pi) - raw_dq_bend
-        close_scale = target_pure / raw_pure_bend
-        deficit_deg = 360.0 - math.degrees(raw_total_bend)
-        print(f"\n  Closing the ring (pure dipoles only, DQ unchanged):")
-        print(f"  Raw sum(ANGLE): {math.degrees(raw_total_bend):.4f} deg "
-              f"({math.degrees(raw_pure_bend):.4f} pure + {math.degrees(raw_dq_bend):.4f} DQ)")
-        print(f"  Deficit = {deficit_deg:+.4f} deg")
-        print(f"  Scaling PURE dipole ANGLE x {close_scale:.8f} (DQ K1!=0 unchanged)")
-        # Скалируем angle только у чистых диполей (K1=0).
-        n_scaled = 0; n_skipped = 0
-        for d in devices.values():
-            angle = d.get("ANGLE", 0.0)
-            if not isinstance(angle, (int, float)) or angle == 0.0:
-                continue
-            k1 = d.get("K1", 0.0)
-            if isinstance(k1, (int, float)) and k1 != 0.0:
-                n_skipped += 1
-            else:
-                d["ANGLE"] = angle * close_scale
-                n_scaled += 1
-        print(f"  Scaled {n_scaled} pure-dipole device definitions, "
-              f"skipped {n_skipped} DQ-type definitions")
+    # Closure-хак УДАЛЁН. Раньше здесь ANGLE чистых диполей скрытно масштабировался до Σ=2π —
+    # это замыкало ГЕОМЕТРИЮ (кадры), но кики (warmstart читает сырой ANGLE) оставались недогнутыми,
+    # отсюда рассинхрон кадры↔кики и уход опорной. Замыкание теперь чинится В ИСТОЧНИКЕ (.lte)
+    # скриптом close_ring_lte.py (грузи *_closed конфиг). Здесь — только ЧЕСТНОЕ предупреждение.
+    deficit = 2.0 * math.pi - raw_total_bend
+    if abs(deficit) > 1e-6:
+        print(f"\n  [ВНИМАНИЕ] Кольцо НЕ замкнуто: Σ ANGLE = {math.degrees(raw_total_bend):.4f}° "
+              f"= {raw_total_bend / math.pi:.6f}·π  (недобор {deficit * 1e3:+.2f} мрад).")
+        print(f"  Геометрия будет ОТКРЫТА (честное состояние, не размазываем). "
+              f"Замкнуть: close_ring_lte.py → грузи *_closed конфиг.")
+    else:
+        print(f"\n  Кольцо замкнуто в .lte: Σ ANGLE = {math.degrees(raw_total_bend):.4f}° "
+              f"(невязка {deficit * 1e3:+.3f} мрад).")
 
     # Обход линии: одновременно собираем шаблоны SP и развёртку
     layout_rows = []

@@ -1,0 +1,15 @@
+! Поэлементные R-матрицы (1-й порядок) для сравнения с нашим ядром.
+&run_setup
+    lattice = "syla_ring.lte",
+    use_beamline = "RING",
+    p_central_mev = 3000,
+    default_order = 1,
+&end
+
+! SDDS_output: матрица, накопленная от начала до конца каждого элемента (R11..R66 + s + ElementName)
+&matrix_output
+    SDDS_output = "%s.mat",
+    SDDS_output_order = 1,
+    individual_matrices = 0,
+    full_matrix_only = 0,
+&end

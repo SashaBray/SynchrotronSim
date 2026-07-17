@@ -1,0 +1,22 @@
+! elegant: floor-survey (проверка замыкания) + twiss для нашей решётки СИЛА
+&run_setup
+    lattice = "syla_ring.lte",
+    use_beamline = "RING",
+    p_central_mev = 3000,
+    default_order = 1,
+    magnets = "%s.mag",
+&end
+
+! ГЛАВНОЕ: floor_coordinates выводит глобальные X,Y,Z каждого элемента.
+! Если последний != первый — кольцо геометрически не замкнуто (наш вопрос).
+&floor_coordinates
+    filename = "%s.flr",
+    magnet_centers = 1,
+&end
+
+! Оптика (тюны/бета). matched=1 ищет периодическое решение в криволинейных коорд.
+&twiss_output
+    filename = "%s.twi",
+    matched = 1,
+    output_at_each_step = 0,
+&end

@@ -1,0 +1,10 @@
+&run_setup
+    lattice = "syla_ring.lte",
+    use_beamline = "RING_Q",
+    p_central_mev = 3000,
+    default_order = 1,
+&end
+&floor_coordinates
+    filename = "%s.flr",
+    magnet_centers = 0,
+&end

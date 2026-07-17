@@ -1,0 +1,11 @@
+&run_setup
+    lattice = "syla_ring.lte",
+    use_beamline = "DIP",
+    p_central_mev = 3000,
+    default_order = 1,
+&end
+&matrix_output
+    SDDS_output = "%s.mat",
+    SDDS_output_order = 1,
+    full_matrix_only = 1,
+&end

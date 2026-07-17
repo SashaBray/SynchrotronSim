@@ -72,3 +72,16 @@ research_log/
 
 # Бэкапы БД (транзиентные)
 workspace/tables/backups/
+
+# elegant: установка (80МБ) и бинарные выходы прогонов — в репо не нужны
+elegant/
+elegant_run/*.flr
+elegant_run/*.cen
+elegant_run/*.twi
+elegant_run/*.mag
+elegant_run/*.mat
+elegant_run/*.log
+
+# временные снимки таблиц
+workspace/tables/*.tmp
+workspace/tables/*.leff_tuned
