@@ -156,23 +156,74 @@ def build_line(lattice_id, eff, phys, coup, trans, lo=None, hi=None, source="phy
             else:
                 break
         mags.append(Magnet(group, eff, phys, coup, trans, source)); i += 1
-    return mags[lo:hi] if lo is not None else mags
+    out = mags[lo:hi] if lo is not None else mags
+    check_junctions(out)                      # стыки плоскостей: снап совпадающих + контроль клиновых
+    return out
+
+
+# ---- ПРОВЕРКА СТЫКОВ ПЛОСКОСТЕЙ (при сборке решётки) -------------------------------------------
+# Выходная плоскость A и входная плоскость B могут: СОВПАДАТЬ (стык «в упор» — переходим без пролёта),
+# быть ПАРАЛЛЕЛЬНЫМИ с зазором (обычный дрейф) или образовывать КЛИН (непараллельные). У клина плоскости
+# пересекаются по линии; если эта линия ближе к опорной, чем порог потери, часть пучка попадает в
+# вырожденную зону (для одних частиц вход B уже позади выхода A) — это ошибка геометрии.
+PLANE_SAME_TOL   = 1e-4      # м: плоскости ближе этого ⇒ считаем ОДНОЙ (переход без пролёта)
+PLANE_PARA_TOL   = 1e-9      # |axis_A × axis_B| ниже ⇒ нормали параллельны
+BEAM_LOSS_RADIUS = 0.012     # м: дальше этого от опорной пучок считается потерянным (порог проекта, 12 мм)
+
+
+def _plane_relation(A, B):
+    """(kind, apex, gap): kind ∈ {'same','parallel','wedge'}; apex — расстояние линии пересечения
+    плоскостей до опорной точки стыка (для 'wedge'); gap — отступ A.exit от плоскости B по её нормали."""
+    nA, nB, pA, pB = A.axis, B.axis, A.exit, B.entry
+    gap = abs(float(nB @ (pA - pB)))
+    cr = np.cross(nA, nB); s = float(np.linalg.norm(cr))
+    if s < PLANE_PARA_TOL:                                     # нормали параллельны
+        return ("same" if gap < PLANE_SAME_TOL else "parallel"), float("inf"), gap
+    d = cr / s                                                 # направление линии пересечения
+    X0 = np.linalg.lstsq(np.vstack([nA, nB]), np.array([float(nA @ pA), float(nB @ pB)]), rcond=None)[0]
+    w = pA - X0
+    return "wedge", float(np.linalg.norm(w - (w @ d) * d)), gap
+
+
+def check_junctions(mags, verbose=False):
+    """Проверка стыков ПРИ СБОРКЕ. Совпадающие плоскости помечаются как одна (пролёт не нужен).
+    Клин с линией пересечения ближе BEAM_LOSS_RADIUS к опорной — ОШИБКА. Возврат: список проблем."""
+    problems = []; n = {"same": 0, "parallel": 0, "wedge": 0}
+    for j in range(1, len(mags)):
+        A, B = mags[j - 1], mags[j]
+        kind, apex, gap = _plane_relation(A, B)
+        n[kind] += 1
+        B.same_plane_as_prev = (kind == "same")                # снап: переход без пролёта
+        if kind == "wedge" and apex < BEAM_LOSS_RADIUS:
+            problems.append((j, A.dev, B.dev, apex, gap))
+    if verbose:
+        print(f"  стыки плоскостей: {n['same']} совмещённых (без пролёта), "
+              f"{n['parallel']} параллельных с зазором, {n['wedge']} клиновых")
+    for j, da, db, apex, gap in problems:
+        print(f"  [ОШИБКА СТЫКА] #{j} {da} → {db}: линия пересечения плоскостей в {apex * 1e3:.2f} мм "
+              f"от опорной — ближе порога потери {BEAM_LOSS_RADIUS * 1e3:.0f} мм (зазор {gap * 1e3:.3f} мм). "
+              f"Часть пучка попадёт в вырожденную зону.")
+    return problems
 
 
 def modified_drift(st, A, B):
     """Геометрический пролёт: плоскость выхода A → плоскость входа B (произв. ориентации). δ-корректно
-    (p_полный сохраняется). Проверка направления импульса. st в системе A → st в системе B, + путь."""
+    (p_полный сохраняется). Если при сборке плоскости признаны ОДНОЙ (B.same_plane_as_prev) — переход
+    без пролёта. st в системе A → st в системе B, + путь."""
     x, px, y, py, t, d = st
     P = A.exit + x * A.uhat + y * A.vhat                       # глоб. позиция на выходной плоскости A
     ps = math.sqrt((1.0 + d) ** 2 - px * px - py * py)
     dir_ = (px * A.uhat + py * A.vhat + ps * A.axis) / (1.0 + d)   # единичное направление импульса (глоб.)
-    denom = float(B.axis @ dir_)
-    if denom <= 1e-9:
-        raise ParticleLost(f"пучок не долетит до входа {B.dev}: n·d={denom:.3g} ≤ 0")
-    tt = float(B.axis @ (B.entry - P)) / denom
-    if tt < 0:
-        raise ParticleLost(f"плоскость входа {B.dev} позади частицы: t={tt:.3g} < 0")
-    Q = P + tt * dir_
+    if getattr(B, "same_plane_as_prev", False):
+        Q, tt = P, 0.0                                         # стык «в упор» — пролёта нет
+    else:
+        denom = float(B.axis @ dir_)
+        if denom <= 1e-9:
+            raise ParticleLost(f"пучок не долетит до входа {B.dev}: n·d={denom:.3g} ≤ 0")
+        tt = float(B.axis @ (B.entry - P)) / denom
+        if tt < 0:
+            raise ParticleLost(f"плоскость входа {B.dev} позади частицы: t={tt:.3g} < 0")
+        Q = P + tt * dir_
     rel = Q - B.entry
     x2 = float(rel @ B.uhat); y2 = float(rel @ B.vhat)
     px2 = (1.0 + d) * float(dir_ @ B.uhat); py2 = (1.0 + d) * float(dir_ @ B.vhat)
