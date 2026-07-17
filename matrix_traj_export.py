@@ -48,15 +48,20 @@ def body_global(m, st):
             pts.append(_g(m, s, st[0], st[2]))
         return st, pts
     N = m.nsl
-    dsg = m.L / N; dsf = m.Leff / N; th, k1, k2, k3 = m.theta0, m.k1, m.k2, m.k3
+    dsg = m.L / N; dsf = m.Leff / N
+    th, k1, k1v, k2, k3, kE = m.theta0, m.k1, m.k1v, m.k2, m.k3, m.kEdge
     s = 0.0; pts = [_g(m, s, x, y)]; st = (x, px, y, py, t, d)
+    if m.kEdge1:                                                # краевая линза на ВХОДЕ (гор.дефокус/верт.фокус)
+        x, px, y, py, t, d = st; st = (x, px + m.kEdge1 * x, y, py - m.kEdge1 * y, t, d)
     for _ in range(N):
         st = mt._drift(st, dsg / 2.0); s += dsg / 2.0
         x, px, y, py, t, d = st
         px += th / N - k1 * x * dsf - 0.5 * k2 * (x * x - y * y) * dsf - (k3 / 6.0) * (x ** 3 - 3 * x * y * y) * dsf
-        py += k1 * y * dsf + k2 * x * y * dsf + (k3 / 6.0) * (3 * x * x * y - y ** 3) * dsf
+        py += k1v * y * dsf + k2 * x * y * dsf + (k3 / 6.0) * (3 * x * x * y - y ** 3) * dsf - (kE / N) * y
         st = mt._drift((x, px, y, py, t, d), dsg / 2.0); s += dsg / 2.0
         pts.append(_g(m, s, st[0], st[2]))
+    if m.kEdge2:                                                # краевая линза на ВЫХОДЕ
+        x, px, y, py, t, d = st; st = (x, px + m.kEdge2 * x, y, py - m.kEdge2 * y, t, d)
     return st, pts
 
 

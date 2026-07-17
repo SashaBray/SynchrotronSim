@@ -109,7 +109,13 @@ class Magnet:
         # краевой (фриндж) верт. фокус 2-го порядка: 1/f_y = FE·θ₀²/L_eff (∝поле², offset/угол-независим).
         # Эквивалент углового члена Δv'=−(q/p)u'v∂ₓBz после ∫по частям = −(q/p)²∫Bz²ds·v. Диполи: θ₀≠0.
         self.kEdge = _edge_ff(self.dev) * self.theta0 ** 2 / self.Leff if self.Leff > 0 else 0.0
-        self.nonzero = any(abs(v) > 0 for v in (self.theta0, self.k1, self.k1v, self.k2, self.k3, self.kEdge))
+        # КРАЕВАЯ ЛИНЗА 1-го порядка (наклон полюса E1/E2 из .lte, box-модель): 1/f = tan(E)/ρ, ρ=L_eff/θ0.
+        # Верт. ФОКУС (py−=k·y), гор. ДЕФОКУС (px+=k·x) — как rectangular bend. На ВНЕШНИХ гранях диполя.
+        _rinv = self.theta0 / self.Leff if self.Leff > 0 else 0.0    # 1/ρ (знак по изгибу)
+        self.kEdge1 = math.tan(self.edge1) * _rinv                  # вход
+        self.kEdge2 = math.tan(self.edge2) * _rinv                  # выход
+        self.nonzero = any(abs(v) > 0 for v in (self.theta0, self.k1, self.k1v, self.k2, self.k3,
+                                                self.kEdge, self.kEdge1, self.kEdge2))
 
     def body(self, st):
         """Тело: N срезов drift-kick-drift по ЭФФЕКТИВНОЙ длине (ds_g=ds_f=L_eff/N) ⇒ полный изгиб/
@@ -120,6 +126,9 @@ class Magnet:
         th, k1, k1v, k2, k3, kE = self.theta0, self.k1, self.k1v, self.k2, self.k3, self.kEdge
         N = self.nsl
         dsg = self.L / N; dsf = self.Leff / N
+        if self.kEdge1:                                        # краевая линза на ВХОДЕ (гор.дефокус/верт.фокус)
+            x, px, y, py, t, d = st
+            st = (x, px + self.kEdge1 * x, y, py - self.kEdge1 * y, t, d)
         for _ in range(N):
             st = _drift(st, dsg / 2.0)
             x, px, y, py, t, d = st
@@ -127,6 +136,9 @@ class Magnet:
             px += th / N - k1 * x * dsf - 0.5 * k2 * (x * x - y * y) * dsf - (k3 / 6.0) * (x ** 3 - 3 * x * y * y) * dsf
             py += k1v * y * dsf + k2 * x * y * dsf + (k3 / 6.0) * (3 * x * x * y - y ** 3) * dsf - (kE / N) * y
             st = _drift((x, px, y, py, t, d), dsg / 2.0)
+        if self.kEdge2:                                        # краевая линза на ВЫХОДЕ
+            x, px, y, py, t, d = st
+            st = (x, px + self.kEdge2 * x, y, py - self.kEdge2 * y, t, d)
         return st
 
 
