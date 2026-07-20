@@ -152,6 +152,31 @@ def deviation_paths(lattice, radius=1e-3, source="physical", settings=None):
     return out, labels, meta
 
 
+def experiment_closure(lattice, group, source="physical", settings=None):
+    """Сводка замыкания опыта для подписи визуализации: инжектированный пучок, 1 оборот, СЕКТОРНЫМ телом
+    (m.body()+modified_drift — как бит-в-бит). Возврат dict(closed, turns, n, survived, residual_mm).
+    closed из инжекции (замкнутое кольцо vs открытый сегмент); residual_mm — макс. поперечн. невязка
+    старт↔финиш за оборот (только для замкнутого)."""
+    import beam_injection as bi
+    plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings)
+    finish = info.get("finish", plane); closed = info.get("closed", True)
+    res = []; surv = 0
+    for st0 in states:
+        st = tuple(st0); x0, y0 = st[0], st[2]
+        try:
+            st = mt.modified_drift(st, plane, ordered[0]); st = ordered[0].body(st)
+            for j in range(1, len(ordered)):
+                st = mt.modified_drift(st, ordered[j - 1], ordered[j]); st = ordered[j].body(st)
+            st = mt.modified_drift(st, ordered[-1], finish)
+            surv += 1
+            if closed:
+                res.append(((st[0] - x0) ** 2 + (st[2] - y0) ** 2) ** 0.5)
+        except mt.ParticleLost:
+            pass
+    return dict(closed=closed, turns=1, n=len(states), survived=surv,
+                residual_mm=(max(res) * 1e3 if res else None))
+
+
 def write_bin(particles_pts, path):
     with open(path, "wb") as f:
         for pts in particles_pts:

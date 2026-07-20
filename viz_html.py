@@ -82,7 +82,7 @@ def _deviation_fig(dev, labels, meta):
     return fig2
 
 
-def build(exp_id, lat, hw, kind, lc, decimate, glyph, out):
+def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out):
     """Собрать сцену и записать самодостаточный HTML. Возвращает (путь, число_треуг)."""
     stl_cache, grouped = {}, defaultdict(list)               # STL-кэш + группировка инстансов по устройству
     for r in lc:
@@ -135,14 +135,29 @@ def build(exp_id, lat, hw, kind, lc, decimate, glyph, out):
                                    line=dict(width=5, color=COLORS[i % len(COLORS)]),
                                    name=LABELS[i] if i < len(LABELS) else f"P{i+1}"))
 
+    # ПОДЗАГОЛОВОК: сколько оборотов, замкнута ли орбита, невязка (секторным телом — как график отклонения).
+    sub = ""
+    try:
+        c = mte.experiment_closure(int(lat), int(group))
+        st = f"Оборотов: {c['turns']} · "
+        if c["closed"]:
+            st += "орбита замкнута" + (f" (невязка {c['residual_mm']:.2f} мм)" if c["residual_mm"] is not None else "")
+        else:
+            st += "открытый сегмент (орбита не замкнута)"
+        st += f" · выжило {c['survived']}/{c['n']}"
+        sub = f"<br><sub>{st}</sub>"
+    except Exception as e:                                        # подпись не критична — не рушим виз
+        print(f"[!] сводка замыкания пропущена: {type(e).__name__}: {e}")
+
     mode = "блоки" if glyph else ("STL, прорежено " + f"{decimate:g}" if decimate > 0 else "полный STL")
-    fig.update_layout(title=f"SynchrotronSim — эксперимент {exp_id} (решётка {lat}, {len(grouped)} типов магнитов; {mode})",
+    fig.update_layout(title=dict(text=f"SynchrotronSim — эксперимент {exp_id} "
+                                      f"(решётка {lat}, {len(grouped)} типов магнитов; {mode}){sub}", y=0.96, yanchor="top"),
                       scene=dict(aspectmode="data", xaxis_title="X, м", yaxis_title="Y, м", zaxis_title="Z, м",
                                  bgcolor="white", domain=dict(x=[0, 1], y=[0, 1])),  # сцена на всю область
                       autosize=True,                          # тянется на всю ширину окна браузера (без пустого поля справа)
                       legend=dict(title="частицы", x=0.99, xanchor="right", y=0.99, yanchor="top",  # оверлей, не резервирует колонку
                                   bgcolor="rgba(255,255,255,0.6)", bordercolor="lightgray", borderwidth=1),
-                      margin=dict(l=0, r=0, t=40, b=0))
+                      margin=dict(l=0, r=0, t=66, b=0))          # t↑ под двухстрочный заголовок
     # 2D-график отклонения ПРОБНОГО пучка от опорной орбиты (перетрек x,y секторным телом) — под 3D-сценой.
     dev_html = ""
     try:
@@ -159,7 +174,7 @@ def build(exp_id, lat, hw, kind, lc, decimate, glyph, out):
     with open(out, "w", encoding="utf-8") as f:                   # 3D сверху, график отклонения снизу — один файл
         f.write("<!doctype html><html><head><meta charset='utf-8'>"
                 f"<title>SynchrotronSim — эксперимент {exp_id}</title></head>"
-                f"<body style='margin:0;font-family:sans-serif'>{s3d}{dev_html}</body></html>")
+                f"<body style='margin:0;padding-top:16px;font-family:sans-serif'>{s3d}{dev_html}</body></html>")
     print(f"[OK] {out}")
     print(f"     {os.path.getsize(out)/1e6:.1f} МБ ({mode}); {ntri:,} треуг. магнитов, {len(parts)} частиц"
           f"{' + график отклонения' if dev_html else ''}. Самодостаточный — крутить/зумить, передавать файлом.")
@@ -181,7 +196,7 @@ def _resolve_decimate(decimate, glyph, lc, hw):
 
 def main(exp_id, decimate=-1.0, out=None, glyph=False, both=False):
     exp = {r["exp_id"]: r for r in _read("experiments.csv")}[str(exp_id)]
-    lat = exp["lattice_id"]
+    lat = exp["lattice_id"]; group = exp["group_id"]
     hw = {r["device_type_id"]: r for r in _read("hardware_library.csv")}
     kind = {r["device_type_id"]: r["kind"] for r in _read("element_transforms.csv")}
     lc = [r for r in _read("lattice_configs.csv") if r["lattice_id"] == lat]
@@ -189,10 +204,10 @@ def main(exp_id, decimate=-1.0, out=None, glyph=False, both=False):
     base = out or os.path.join(HTML_DIR, f"exp{exp_id}_3d.html")
     stem = base[:-5] if base.lower().endswith(".html") else base
     if both:                                                 # обе версии: лёгкая (блоки) + детальная (STL)
-        build(exp_id, lat, hw, kind, lc, 0.0, True, stem + "_light.html")
-        build(exp_id, lat, hw, kind, lc, _resolve_decimate(decimate, False, lc, hw), False, stem + "_detailed.html")
+        build(exp_id, lat, group, hw, kind, lc, 0.0, True, stem + "_light.html")
+        build(exp_id, lat, group, hw, kind, lc, _resolve_decimate(decimate, False, lc, hw), False, stem + "_detailed.html")
     else:
-        build(exp_id, lat, hw, kind, lc, _resolve_decimate(decimate, glyph, lc, hw), glyph, base)
+        build(exp_id, lat, group, hw, kind, lc, _resolve_decimate(decimate, glyph, lc, hw), glyph, base)
 
 
 if __name__ == "__main__":
