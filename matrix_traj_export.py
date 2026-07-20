@@ -109,71 +109,72 @@ class Thinner:
         return np.asarray(self.out, dtype=np.float64)
 
 
-def deviation_paths(lattice, radius=1e-3, source="physical", settings=None):
-    """Отклонение ПРОБНОГО пучка от ОПОРНОЙ орбиты вдоль решётки — для 2D-графиков x(s), y(s).
+def deviation_paths(lattice, group, radius=1e-3, source="physical", settings=None):
+    """Отклонение ПРОБНОГО пучка от ОПОРНОЙ орбиты — 3D-траектория (глоб.) + 2D-графики x(s), y(s).
 
-    Пучок = [опорная(0), +x, −x, +y, −y] со смещением radius (наглядно: опорная лежит на 0, смещённые
-    осциллируют бетатронно). На частицу ndarray (M,6): (s, x, y, X, Y, Z) — ЛОКАЛЬНЫЕ поперечные x,y
-    (= отклонение от опорной; для 2D-графика) + ГЛОБАЛЬНЫЕ X,Y,Z (для 3D-траектории и связки клик↔3D).
-    s — ОПОРНАЯ арк-длина (Σ L тел + Σ осевой зазор; монотонна). Трекинг m.body()+modified_drift
-    (секторный при SS_SECTOR=1 — как бит-в-бит; боксовый body_global рассогласован с криволин. рамками).
-    Возврат (пути, метки, meta, mags_meta): meta=dict(name/idx/sp) — метаданные ТОЧЕК (общие); mags_meta=
-    dict(center/name/idx/sp) — по МАГНИТУ (для ховера магнитов в 3D). СП по длинным прямым (зазор>2м).
+    Пучок [опорная(0), +x, −x, +y, −y] инжектируется В ПЛОСКОСТИ ИНЖЕКЦИИ опыта (как реальный пучок,
+    bi.inject), затем ДРЕЙФ до первого элемента («пустой пробег»), кольцо, у замкнутого — возврат к
+    плоскости (замыкание). Опорная (0) = центроид группы ≈ проектная орбита ⇒ лежит на 0. На точку
+    ndarray (M,6): (s, x, y, X, Y, Z) — локальные x,y (отклонение, 2D) + глобальные X,Y,Z (3D + связка).
+    Трекинг m.body()+modified_drift (секторный при SS_SECTOR=1). Возврат (пути, метки, meta, mags_meta):
+    meta=dict(name/idx/sp) точек, mags_meta=dict(center/name/idx/sp) магнитов. СП по длинным прямым (>2м).
 
-    Инжектированный пучок опыта тут НЕ берём: он у нас near-reference (<0.03мм) ⇒ график был бы плоским,
-    а точки инжекц./финиш-плоскости дают ложные спайки. Пробный пучок показывает бетатрон наглядно."""
-    eff, phys, coup, trans = mt.load_db()
-    mags = mt.build_line(lattice, eff, phys, coup, trans, source=source, settings=settings)
+    Опорная = центроид пучка на плоскости (для наших опытов ≈ проектная орбита ⇒ график опорной плоский);
+    смещённые ±x/±y осциллируют бетатронно от плоскости инжекции."""
+    import beam_injection as bi
+    plane, ordered, _st, info = bi.inject(lattice, group, source=source, settings=settings)
+    finish = info.get("finish", plane); closed = bool(info.get("closed", True))
     r = float(radius)
     beam = [(0, 0, 0, 0, 0, 0), (r, 0, 0, 0, 0, 0), (-r, 0, 0, 0, 0, 0),
             (0, 0, r, 0, 0, 0), (0, 0, -r, 0, 0, 0)]
     labels = ["опорная", "+x", "−x", "+y", "−y"]
-    gaps = [float((mags[j].fr_in[0] - mags[j - 1].fr_out[0]) @ mags[j - 1].fr_out[1]) for j in range(1, len(mags))]
 
     def gp(fr, x, y):                                                 # локальные (x,y) в рамке fr → глоб. XYZ
         p = fr[0] + x * fr[2] + y * fr[3]
         return float(p[0]), float(p[1]), float(p[2])
 
-    # МЕТАДАННЫЕ по точкам (общие — те же элементы): имя, № по порядку, суперпериод + РАМКА точки (для XYZ).
-    # СП считаем по длинным прямым (осевой зазор >2м = граница; поля СП в БД нет). Точки: старт, выход mags0,
-    # затем на магнит (вход=fr_in, выход=fr_out).
-    frames = [mags[0].fr_in, mags[0].fr_out]
-    name = ["старт", mags[0].dev]; idx = [0, 1]; sp = [1, 1]; cur = 1
-    for j in range(1, len(mags)):
-        if gaps[j - 1] > 2.0:
+    gap_in = float((ordered[0].fr_in[0] - plane.fr_out[0]) @ plane.fr_out[1])          # плоскость → 1-й элемент
+    ord_gaps = [float((ordered[j].fr_in[0] - ordered[j - 1].fr_out[0]) @ ordered[j - 1].fr_out[1])
+                for j in range(1, len(ordered))]
+    gap_out = float((finish.fr_in[0] - ordered[-1].fr_out[0]) @ ordered[-1].fr_out[1]) if closed else 0.0
+
+    # МЕТАДАННЫЕ по точкам (общие): плоскость инжекции, затем на магнит (вход fr_in, выход fr_out), у
+    # замкнутого — финиш=плоскость. СП по длинным прямым между ordered-элементами.
+    frames = [plane.fr_out, ordered[0].fr_in, ordered[0].fr_out]
+    name = ["плоскость инжекции", ordered[0].dev, ordered[0].dev]; idx = [0, 1, 1]; sp = [1, 1, 1]; cur = 1
+    for j in range(1, len(ordered)):
+        if ord_gaps[j - 1] > 2.0:
             cur += 1
-        frames += [mags[j].fr_in, mags[j].fr_out]
-        name += [mags[j].dev, mags[j].dev]; idx += [j + 1, j + 1]; sp += [cur, cur]
-    # ЗАМЫКАНИЕ: у замкнутого кольца (Σугол≈2π) добавляем wrap-дрейф mags[-1]→mags[0], чтобы траектория
-    # финишировала в СТАРТОВОЙ плоскости (mags[0].fr_in). У открытого сегмента (SP1) — нет.
-    closed = abs(sum(abs(m.theta0) for m in mags) - 2 * np.pi) < 0.15
-    wrap_gap = float((mags[0].fr_in[0] - mags[-1].fr_out[0]) @ mags[-1].fr_out[1]) if closed else 0.0
+        frames += [ordered[j].fr_in, ordered[j].fr_out]
+        name += [ordered[j].dev, ordered[j].dev]; idx += [j + 1, j + 1]; sp += [cur, cur]
     if closed:
-        frames.append(mags[0].fr_in); name.append("старт (замыкание)"); idx.append(1); sp.append(1)
+        frames.append(finish.fr_in); name.append("плоскость инжекции (замыкание)"); idx.append(0); sp.append(cur)
     meta = dict(name=name, idx=idx, sp=sp)
-    # МЕТАДАННЫЕ МАГНИТОВ (1 на магнит) — для ховера/маркеров магнитов в 3D: центр, имя, №, СП.
-    mc = [tuple(float(v) for v in mags[0].center)]; mn = [mags[0].dev]; mi = [1]; ms = [1]; c2 = 1
-    for j in range(1, len(mags)):
-        if gaps[j - 1] > 2.0:
+    # МЕТАДАННЫЕ МАГНИТОВ (по ordered-порядку) — для ховера/маркеров магнитов в 3D.
+    mc = [tuple(float(v) for v in ordered[0].center)]; mn = [ordered[0].dev]; mi = [1]; ms = [1]; c2 = 1
+    for j in range(1, len(ordered)):
+        if ord_gaps[j - 1] > 2.0:
             c2 += 1
-        mc.append(tuple(float(v) for v in mags[j].center)); mn.append(mags[j].dev); mi.append(j + 1); ms.append(c2)
+        mc.append(tuple(float(v) for v in ordered[j].center)); mn.append(ordered[j].dev); mi.append(j + 1); ms.append(c2)
     mags_meta = dict(center=mc, name=mn, idx=mi, sp=ms)
 
     out = []
     for st0 in beam:                                                  # на точку: (s, x, y, X, Y, Z) — локал.+глоб.
         st = tuple(map(float, st0)); s = 0.0
-        g = gp(frames[0], st[0], st[2]); dev = [(0.0, st[0], st[2], g[0], g[1], g[2])]
+        g = gp(frames[0], st[0], st[2]); dev = [(0.0, st[0], st[2], *g)]
         try:
-            st = mags[0].body(st); s += mags[0].L
-            g = gp(frames[1], st[0], st[2]); dev.append((s, st[0], st[2], g[0], g[1], g[2]))
-            for j in range(1, len(mags)):
-                st = mt.modified_drift(st, mags[j - 1], mags[j]); s += gaps[j - 1]
-                g = gp(frames[2 * j], st[0], st[2]); dev.append((s, st[0], st[2], g[0], g[1], g[2]))
-                st = mags[j].body(st); s += mags[j].L
-                g = gp(frames[2 * j + 1], st[0], st[2]); dev.append((s, st[0], st[2], g[0], g[1], g[2]))
-            if closed:                                               # wrap-дрейф → финиш в стартовой плоскости
-                st = mt.modified_drift(st, mags[-1], mags[0]); s += wrap_gap
-                g = gp(mags[0].fr_in, st[0], st[2]); dev.append((s, st[0], st[2], g[0], g[1], g[2]))
+            st = mt.modified_drift(st, plane, ordered[0]); s += gap_in       # ВЕДУЩИЙ дрейф (пустой пробег)
+            g = gp(frames[1], st[0], st[2]); dev.append((s, st[0], st[2], *g))
+            st = ordered[0].body(st); s += ordered[0].L
+            g = gp(frames[2], st[0], st[2]); dev.append((s, st[0], st[2], *g))
+            for j in range(1, len(ordered)):
+                st = mt.modified_drift(st, ordered[j - 1], ordered[j]); s += ord_gaps[j - 1]
+                g = gp(frames[1 + 2 * j], st[0], st[2]); dev.append((s, st[0], st[2], *g))
+                st = ordered[j].body(st); s += ordered[j].L
+                g = gp(frames[2 + 2 * j], st[0], st[2]); dev.append((s, st[0], st[2], *g))
+            if closed:                                                       # финиш → плоскость инжекции (замыкание)
+                st = mt.modified_drift(st, ordered[-1], finish); s += gap_out
+                g = gp(frames[-1], st[0], st[2]); dev.append((s, st[0], st[2], *g))
         except mt.ParticleLost:
             pass
         out.append(np.asarray(dev, float))

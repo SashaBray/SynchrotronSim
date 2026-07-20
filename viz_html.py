@@ -139,7 +139,7 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out):
     # клик↔3D работает) + метаданные точек (имя/№/СП, глоб. XYZ) и магнитов.
     dev = dlabels = dmeta = dmags = None
     try:
-        dev, dlabels, dmeta, dmags = mte.deviation_paths(int(lat))
+        dev, dlabels, dmeta, dmags = mte.deviation_paths(int(lat), int(group))
     except Exception as e:
         print(f"[!] пробный пучок не собрался: {type(e).__name__}: {e}")
 
