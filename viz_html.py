@@ -101,7 +101,7 @@ background:rgba(255,255,255,.9);border:1px solid #ccc;border-radius:8px;padding:
   var paths=TRAJ.map(function(ix){var t=g.data[ix],x=arr(t.x);return{x:x,y:arr(t.y),z:arr(t.z),n:x.length};});
   var n=paths.length?paths[0].n:0;
   if(n<2)return;
-  var TAIL=Math.min(150,Math.max(10,Math.round(n*0.05)));      // длина следа ~5% пути (голова→хвост) — тает вдвое быстрее
+  var TAIL=Math.min(250,Math.max(30,Math.round(n*0.15)));      // ДЛИННЫЙ след ~15% пути; яркость гаснет резко у головы (куб)
   var base=g.data.length;
   Plotly.addTraces(g,TRAJ.map(function(ix,i){                  // след = ЛИНИЯ с градиентом цвет→белый (угасает к хвосту)
     var c=COL[i].replace('#',''),R=parseInt(c.substr(0,2),16),G=parseInt(c.substr(2,2),16),Bc=parseInt(c.substr(4,2),16);
@@ -144,7 +144,7 @@ background:rgba(255,255,255,.9);border:1px solid #ccc;border-radius:8px;padding:
     var wx=[],wy=[],wz=[],wc=[];
     for(var k=lo;k<=hi;k++){                                   // целые точки следа
      wx.push(p.x[k]);wy.push(p.y[k]);wz.push(p.z[k]);
-     wc.push(Math.max(0,1-(P-k)/TAIL));                        // 1 у головы → 0 (белый) у хвоста
+     var b=Math.max(0,1-(P-k)/TAIL); wc.push(b*b*b);          // КУБ: яркость падает сразу за головой → длинный тусклый хвост
     }
     if(hi+1<p.n){var f=P-hi;                                   // ИНТЕРПОЛИРОВАННАЯ голова в точной позиции P — плавность
      wx.push(p.x[hi]+(p.x[hi+1]-p.x[hi])*f);
