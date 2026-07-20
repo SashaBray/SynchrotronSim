@@ -31,7 +31,8 @@ DEV_COL = ["#555555", "#e15759", "#f28e2b", "#4e79a7", "#59a14f"]   # цвета
 KINDCOL = {"quad": "#4e79a7", "dipole": "#e15759", "sext": "#59a14f", "oct": "#b07aa1",
            "dq": "#f28e2b", "kicker": "#9c755f", "monitor": "#bab0ac"}
 TRAJ_MAX = 8000                                              # макс. точек на частицу (длинную траекторию прореживаем)
-TARGET_TRI = 300_000                                        # цель по треуг. для авто-прореживания детальной версии
+TARGET_TRI = 650_000                                        # цель по треуг. авто-прореживания (float32 ⇒ вдвое больше
+#                                                             деталей при прежнем весе; μm-точность на масштабе метров)
 
 # JS-связка 2D↔3D: наведение на график отклонения → временная подсветка точки на 3D-траектории (снимается
 # при уходе мыши); клик → стойкая подсветка (повторный клик по той же точке снимает, клик по другой — переносит).
@@ -89,13 +90,14 @@ def _deviation_fig(dev, labels, meta):
         if len(d) < 2:
             continue
         L = len(d)
-        s = d[:, 0]; x = d[:, 1] * 1e3; y = d[:, 2] * 1e3            # мм
+        s = d[:, 0].astype(np.float32); x = (d[:, 1] * 1e3).astype(np.float32); y = (d[:, 2] * 1e3).astype(np.float32)
         nm = labels[i] if i < len(labels) else f"P{i+1}"
         c = DEV_COL[i % len(DEV_COL)]; w = 2.0 if i == 0 else 1.1
-        # %{text}=имя, customdata[0]=№, [1]=СП; [2..4]=глоб. XYZ (для JS-связки клик/наведение → 3D)
-        text = name[:L]; cust = np.column_stack([midx[:L], msp[:L], d[:, 3], d[:, 4], d[:, 5]])
-        ht = ("s = %{x:.2f} м · {ax} = %{y:+.3f} мм<br>элемент №%{customdata[0]}: %{text}"
-              "<br>суперпериод %{customdata[1]}<extra>%{fullData.name}</extra>")
+        # %{text}=имя, customdata[0]=№, [1]=СП; [2..4]=глоб. XYZ (для JS-связки клик/наведение → 3D). float32:
+        # −43% веса; №/СП стали float ⇒ формат :.0f. XYZ в μm-точности хватает для подсветки.
+        text = name[:L]; cust = np.column_stack([midx[:L], msp[:L], d[:, 3], d[:, 4], d[:, 5]]).astype(np.float32)
+        ht = ("s = %{x:.2f} м · {ax} = %{y:+.3f} мм<br>элемент №%{customdata[0]:.0f}: %{text}"
+              "<br>суперпериод %{customdata[1]:.0f}<extra>%{fullData.name}</extra>")
         fig2.add_trace(go.Scattergl(x=s, y=x, mode="lines", line=dict(width=w, color=c), name=nm, legendgroup=nm,
                                     text=text, customdata=cust, hovertemplate=ht.replace("{ax}", "x")), row=1, col=1)
         fig2.add_trace(go.Scattergl(x=s, y=y, mode="lines", line=dict(width=w, color=c), name=nm, legendgroup=nm,
@@ -145,7 +147,8 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out):
     ntri = 0
     for dv, tlist in grouped.items():                        # магниты → Mesh3d, цвет по типу
         big = vz.build_combined_mesh(stl_cache[hw[dv]["stl_path"]], np.asarray(tlist, float))
-        V = np.asarray(big.points); F = np.asarray(big.faces).reshape(-1, 4)[:, 1:]
+        V = np.asarray(big.points, dtype=np.float32)         # float32: −43% веса, μm-точность (масштаб метров) — с запасом
+        F = np.asarray(big.faces).reshape(-1, 4)[:, 1:].astype(np.int32)
         ntri += len(F)
         fig.add_trace(go.Mesh3d(x=V[:, 0], y=V[:, 1], z=V[:, 2], i=F[:, 0], j=F[:, 1], k=F[:, 2],
                                 color=KINDCOL.get(kind.get(dv, ""), "silver"), opacity=0.5,
@@ -153,13 +156,13 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out):
 
     # МАРКЕРЫ МАГНИТОВ в центрах — ховер «имя · № · суперпериод» (полная инфа по магниту в 3D)
     if dmags:
-        mc = np.array(dmags["center"], float)
+        mc = np.array(dmags["center"], np.float32)
         mh = [f"{dmags['name'][k]} · №{dmags['idx'][k]} · суперпериод {dmags['sp'][k]}" for k in range(len(mc))]
         fig.add_trace(go.Scatter3d(x=mc[:, 0], y=mc[:, 1], z=mc[:, 2], mode="markers",
                                    marker=dict(size=2.5, color="rgba(70,70,70,0.35)"), name="магниты",
                                    text=mh, hovertemplate="%{text}<extra>магнит</extra>", showlegend=False))
     # BPM — маркеры на датчиках положения (kind=monitor)
-    bpm = np.array([(float(r["x"]), float(r["y"]), float(r["z"])) for r in lc if kind.get(r["device_type_id"]) == "monitor"])
+    bpm = np.array([(float(r["x"]), float(r["y"]), float(r["z"])) for r in lc if kind.get(r["device_type_id"]) == "monitor"], np.float32)
     if len(bpm):
         fig.add_trace(go.Scatter3d(x=bpm[:, 0], y=bpm[:, 1], z=bpm[:, 2], mode="markers",
                                    marker=dict(size=3, color="black", symbol="diamond"), name=f"BPM ({len(bpm)})"))
@@ -171,7 +174,8 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out):
                 continue
             ht = [f"{dmeta['name'][k]} · №{dmeta['idx'][k]} · суперпериод {dmeta['sp'][k]}<br>s = {d[k, 0]:.1f} м"
                   for k in range(len(d))]
-            fig.add_trace(go.Scatter3d(x=d[:, 3], y=d[:, 4], z=d[:, 5], mode="lines",
+            fig.add_trace(go.Scatter3d(x=d[:, 3].astype(np.float32), y=d[:, 4].astype(np.float32),
+                                       z=d[:, 5].astype(np.float32), mode="lines",
                                        line=dict(width=(6 if i == 0 else 4), color=DEV_COL[i % len(DEV_COL)]),
                                        name=dlabels[i] if i < len(dlabels) else f"P{i+1}",
                                        text=ht, hovertemplate="%{text}<extra>%{fullData.name}</extra>"))
