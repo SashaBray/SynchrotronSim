@@ -85,3 +85,7 @@ elegant_run/*.log
 # временные снимки таблиц
 workspace/tables/*.tmp
 workspace/tables/*.leff_tuned
+
+# сверка траекторий: архивы (генерируемые) и временные файлы elegant
+workspace/results/traj_compare/
+elegant_run/_trajcmp.*
