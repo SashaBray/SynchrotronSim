@@ -113,12 +113,12 @@ def deviation_paths(lattice, radius=1e-3, source="physical", settings=None):
     """Отклонение ПРОБНОГО пучка от ОПОРНОЙ орбиты вдоль решётки — для 2D-графиков x(s), y(s).
 
     Пучок = [опорная(0), +x, −x, +y, −y] со смещением radius (наглядно: опорная лежит на 0, смещённые
-    осциллируют бетатронно). На частицу ndarray (M,3): (s, x, y), где x,y — ЛОКАЛЬНЫЕ поперечные
-    (= отклонение от опорной, x≡0 на ней в секторной рамке), s — ОПОРНАЯ арк-длина (Σ L тел + Σ осевой
-    зазор; монотонна, в отличие от пути частицы st[4]). Трекинг m.body()+modified_drift (секторный при
-    SS_SECTOR=1 — как бит-в-бит; боксовый body_global рассогласован с криволин. рамками).
-    Возврат (пути, метки, meta), meta=dict(name/idx/sp) — метаданные ТОЧЕК для ховера (имя элемента,
-    № по порядку, суперпериод; общие для всех частиц, длина = полная траектория 2·N магнитов).
+    осциллируют бетатронно). На частицу ndarray (M,6): (s, x, y, X, Y, Z) — ЛОКАЛЬНЫЕ поперечные x,y
+    (= отклонение от опорной; для 2D-графика) + ГЛОБАЛЬНЫЕ X,Y,Z (для 3D-траектории и связки клик↔3D).
+    s — ОПОРНАЯ арк-длина (Σ L тел + Σ осевой зазор; монотонна). Трекинг m.body()+modified_drift
+    (секторный при SS_SECTOR=1 — как бит-в-бит; боксовый body_global рассогласован с криволин. рамками).
+    Возврат (пути, метки, meta, mags_meta): meta=dict(name/idx/sp) — метаданные ТОЧЕК (общие); mags_meta=
+    dict(center/name/idx/sp) — по МАГНИТУ (для ховера магнитов в 3D). СП по длинным прямым (зазор>2м).
 
     Инжектированный пучок опыта тут НЕ берём: он у нас near-reference (<0.03мм) ⇒ график был бы плоским,
     а точки инжекц./финиш-плоскости дают ложные спайки. Пробный пучок показывает бетатрон наглядно."""
@@ -128,28 +128,47 @@ def deviation_paths(lattice, radius=1e-3, source="physical", settings=None):
     beam = [(0, 0, 0, 0, 0, 0), (r, 0, 0, 0, 0, 0), (-r, 0, 0, 0, 0, 0),
             (0, 0, r, 0, 0, 0), (0, 0, -r, 0, 0, 0)]
     labels = ["опорная", "+x", "−x", "+y", "−y"]
-    # МЕТАДАННЫЕ по точкам (общие для всех частиц — те же элементы в том же порядке): имя, № по порядку,
-    # суперпериод. СП считаем по длинным прямым (осевой зазор >2м = граница суперпериода; в БД поля СП нет).
     gaps = [float((mags[j].fr_in[0] - mags[j - 1].fr_out[0]) @ mags[j - 1].fr_out[1]) for j in range(1, len(mags))]
-    name = ["старт"]; idx = [0]; sp = [1]; cur = 1
-    name.append(mags[0].dev); idx.append(1); sp.append(cur)                     # выход mags[0]
+
+    def gp(fr, x, y):                                                 # локальные (x,y) в рамке fr → глоб. XYZ
+        p = fr[0] + x * fr[2] + y * fr[3]
+        return float(p[0]), float(p[1]), float(p[2])
+
+    # МЕТАДАННЫЕ по точкам (общие — те же элементы): имя, № по порядку, суперпериод + РАМКА точки (для XYZ).
+    # СП считаем по длинным прямым (осевой зазор >2м = граница; поля СП в БД нет). Точки: старт, выход mags0,
+    # затем на магнит (вход=fr_in, выход=fr_out).
+    frames = [mags[0].fr_in, mags[0].fr_out]
+    name = ["старт", mags[0].dev]; idx = [0, 1]; sp = [1, 1]; cur = 1
     for j in range(1, len(mags)):
         if gaps[j - 1] > 2.0:
-            cur += 1                                                            # пересекли длинную прямую
-        name += [mags[j].dev, mags[j].dev]; idx += [j + 1, j + 1]; sp += [cur, cur]   # вход, выход mags[j]
+            cur += 1
+        frames += [mags[j].fr_in, mags[j].fr_out]
+        name += [mags[j].dev, mags[j].dev]; idx += [j + 1, j + 1]; sp += [cur, cur]
     meta = dict(name=name, idx=idx, sp=sp)
+    # МЕТАДАННЫЕ МАГНИТОВ (1 на магнит) — для ховера/маркеров магнитов в 3D: центр, имя, №, СП.
+    mc = [tuple(float(v) for v in mags[0].center)]; mn = [mags[0].dev]; mi = [1]; ms = [1]; c2 = 1
+    for j in range(1, len(mags)):
+        if gaps[j - 1] > 2.0:
+            c2 += 1
+        mc.append(tuple(float(v) for v in mags[j].center)); mn.append(mags[j].dev); mi.append(j + 1); ms.append(c2)
+    mags_meta = dict(center=mc, name=mn, idx=mi, sp=ms)
+
     out = []
-    for st0 in beam:
-        st = tuple(map(float, st0)); s = 0.0; dev = [(0.0, st[0], st[2])]
+    for st0 in beam:                                                  # на точку: (s, x, y, X, Y, Z) — локал.+глоб.
+        st = tuple(map(float, st0)); s = 0.0
+        g = gp(frames[0], st[0], st[2]); dev = [(0.0, st[0], st[2], g[0], g[1], g[2])]
         try:
-            st = mags[0].body(st); s += mags[0].L; dev.append((s, st[0], st[2]))
+            st = mags[0].body(st); s += mags[0].L
+            g = gp(frames[1], st[0], st[2]); dev.append((s, st[0], st[2], g[0], g[1], g[2]))
             for j in range(1, len(mags)):
-                st = mt.modified_drift(st, mags[j - 1], mags[j]); s += gaps[j - 1]; dev.append((s, st[0], st[2]))
-                st = mags[j].body(st); s += mags[j].L; dev.append((s, st[0], st[2]))
+                st = mt.modified_drift(st, mags[j - 1], mags[j]); s += gaps[j - 1]
+                g = gp(frames[2 * j], st[0], st[2]); dev.append((s, st[0], st[2], g[0], g[1], g[2]))
+                st = mags[j].body(st); s += mags[j].L
+                g = gp(frames[2 * j + 1], st[0], st[2]); dev.append((s, st[0], st[2], g[0], g[1], g[2]))
         except mt.ParticleLost:
             pass
         out.append(np.asarray(dev, float))
-    return out, labels, meta
+    return out, labels, meta, mags_meta
 
 
 def experiment_closure(lattice, group, source="physical", settings=None):

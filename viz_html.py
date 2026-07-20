@@ -26,10 +26,41 @@ WS = "workspace"
 HTML_DIR = os.path.join(WS, "results", "html")               # отдельная папка для передаваемых HTML-экспортов
 COLORS = vz.VIZ_CFG.get("particle_colors", ["magenta", "cyan", "lime", "yellow", "red"])
 LABELS = vz.VIZ_CFG.get("particle_labels", ["P1", "P2", "P3", "P4", "P5"])
+DEV_COL = ["#555555", "#e15759", "#f28e2b", "#4e79a7", "#59a14f"]   # цвета пробного пучка (общие 3D↔2D):
+#                                                                     опорная серая, ±x тёплые, ±y холодные
 KINDCOL = {"quad": "#4e79a7", "dipole": "#e15759", "sext": "#59a14f", "oct": "#b07aa1",
            "dq": "#f28e2b", "kicker": "#9c755f", "monitor": "#bab0ac"}
 TRAJ_MAX = 8000                                              # макс. точек на частицу (длинную траекторию прореживаем)
 TARGET_TRI = 300_000                                        # цель по треуг. для авто-прореживания детальной версии
+
+# JS-связка 2D↔3D: наведение на график отклонения → временная подсветка точки на 3D-траектории (снимается
+# при уходе мыши); клик → стойкая подсветка (повторный клик по той же точке снимает, клик по другой — переносит).
+# Точка 2D несёт глоб. XYZ в customdata[2..4]; d[0]=3D-сцена, d[1]=2D-график (порядок в теле HTML).
+_LINK_JS = """<script>
+(function(){
+ function wire(){
+  var d=document.querySelectorAll('.plotly-graph-div');
+  if(d.length<2||!window.Plotly){setTimeout(wire,150);return;}
+  var g3=d[0],g2=d[1];
+  if(!g3.data||!g2.on){setTimeout(wire,150);return;}
+  var hi=g3.data.length,ci=g3.data.length+1;
+  Plotly.addTraces(g3,[
+   {type:'scatter3d',x:[],y:[],z:[],mode:'markers',hoverinfo:'skip',showlegend:false,marker:{size:7,color:'#111',line:{color:'#fff',width:2}}},
+   {type:'scatter3d',x:[],y:[],z:[],mode:'markers',hoverinfo:'skip',showlegend:false,marker:{size:10,color:'#ffd400',line:{color:'#111',width:2}}}
+  ]);
+  var ck=null;
+  function xyz(pt){var c=pt.customdata;return c?[[c[2]],[c[3]],[c[4]]]:null;}
+  g2.on('plotly_hover',function(e){var p=xyz(e.points[0]);if(p)Plotly.restyle(g3,{x:[p[0]],y:[p[1]],z:[p[2]]},[hi]);});
+  g2.on('plotly_unhover',function(){Plotly.restyle(g3,{x:[[]],y:[[]],z:[[]]},[hi]);});
+  g2.on('plotly_click',function(e){
+   var pt=e.points[0],k=pt.curveNumber+':'+pt.pointIndex,p=xyz(pt);
+   if(k===ck){Plotly.restyle(g3,{x:[[]],y:[[]],z:[[]]},[ci]);ck=null;}
+   else if(p){Plotly.restyle(g3,{x:[p[0]],y:[p[1]],z:[p[2]]},[ci]);ck=k;}
+  });
+ }
+ if(document.readyState!=='loading')wire();else document.addEventListener('DOMContentLoaded',wire);
+})();
+</script>"""
 
 
 def _read(name):
@@ -51,7 +82,6 @@ def _total_tris(lc, hw):                                     # оценка по
 def _deviation_fig(dev, labels, meta):
     """2D-график отклонения пробного пучка от опорной орбиты: x(s) сверху, y(s) снизу, линия на частицу.
     Ховер: координаты + № элемента по порядку + имя + суперпериод (из meta, общего для всех частиц)."""
-    col = ["#555555", "#e15759", "#f28e2b", "#4e79a7", "#59a14f"]     # опорная серая, ±x тёплые, ±y холодные
     name, midx, msp = meta["name"], meta["idx"], meta["sp"]
     fig2 = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
                          subplot_titles=("Горизонтальное отклонение x(s)", "Вертикальное отклонение y(s)"))
@@ -61,8 +91,9 @@ def _deviation_fig(dev, labels, meta):
         L = len(d)
         s = d[:, 0]; x = d[:, 1] * 1e3; y = d[:, 2] * 1e3            # мм
         nm = labels[i] if i < len(labels) else f"P{i+1}"
-        c = col[i % len(col)]; w = 2.0 if i == 0 else 1.1
-        text = name[:L]; cust = np.column_stack([midx[:L], msp[:L]])   # %{text}=имя, customdata[0]=№, [1]=СП
+        c = DEV_COL[i % len(DEV_COL)]; w = 2.0 if i == 0 else 1.1
+        # %{text}=имя, customdata[0]=№, [1]=СП; [2..4]=глоб. XYZ (для JS-связки клик/наведение → 3D)
+        text = name[:L]; cust = np.column_stack([midx[:L], msp[:L], d[:, 3], d[:, 4], d[:, 5]])
         ht = ("s = %{x:.2f} м · {ax} = %{y:+.3f} мм<br>элемент №%{customdata[0]}: %{text}"
               "<br>суперпериод %{customdata[1]}<extra>%{fullData.name}</extra>")
         fig2.add_trace(go.Scattergl(x=s, y=x, mode="lines", line=dict(width=w, color=c), name=nm, legendgroup=nm,
@@ -102,38 +133,48 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out):
         grouped[dev].append((float(r["yaw"]), float(r["pitch"]), float(r["roll"]),
                              float(r["x"]), float(r["y"]), float(r["z"])))
 
+    # ПРОБНЫЙ пучок (сектор): та же перетрекованная 3D-траектория и 2D-отклонение (один пучок ⇒ связка
+    # клик↔3D работает) + метаданные точек (имя/№/СП, глоб. XYZ) и магнитов.
+    dev = dlabels = dmeta = dmags = None
+    try:
+        dev, dlabels, dmeta, dmags = mte.deviation_paths(int(lat))
+    except Exception as e:
+        print(f"[!] пробный пучок не собрался: {type(e).__name__}: {e}")
+
     fig = go.Figure()
     ntri = 0
-    for dev, tlist in grouped.items():                       # магниты → Mesh3d, цвет по типу
-        big = vz.build_combined_mesh(stl_cache[hw[dev]["stl_path"]], np.asarray(tlist, float))
+    for dv, tlist in grouped.items():                        # магниты → Mesh3d, цвет по типу
+        big = vz.build_combined_mesh(stl_cache[hw[dv]["stl_path"]], np.asarray(tlist, float))
         V = np.asarray(big.points); F = np.asarray(big.faces).reshape(-1, 4)[:, 1:]
         ntri += len(F)
         fig.add_trace(go.Mesh3d(x=V[:, 0], y=V[:, 1], z=V[:, 2], i=F[:, 0], j=F[:, 1], k=F[:, 2],
-                                color=KINDCOL.get(kind.get(dev, ""), "silver"), opacity=0.55,
-                                name=dev, hovertext=dev, hoverinfo="text", showlegend=False))
+                                color=KINDCOL.get(kind.get(dv, ""), "silver"), opacity=0.5,
+                                name=dv, hovertext=dv, hoverinfo="text", showlegend=False))
 
-    # опорный путь — ломаная через центры магнитов в порядке кольца (проектная орбита, приближённо)
-    lc_ord = sorted(lc, key=lambda r: int(r["instance_id"]))
-    ref = np.array([(float(r["x"]), float(r["y"]), float(r["z"])) for r in lc_ord])
-    if len(ref) >= 2:
-        fig.add_trace(go.Scatter3d(x=ref[:, 0], y=ref[:, 1], z=ref[:, 2], mode="lines",
-                                   line=dict(width=2, color="dimgray"), name="опорный путь", opacity=0.6))
+    # МАРКЕРЫ МАГНИТОВ в центрах — ховер «имя · № · суперпериод» (полная инфа по магниту в 3D)
+    if dmags:
+        mc = np.array(dmags["center"], float)
+        mh = [f"{dmags['name'][k]} · №{dmags['idx'][k]} · суперпериод {dmags['sp'][k]}" for k in range(len(mc))]
+        fig.add_trace(go.Scatter3d(x=mc[:, 0], y=mc[:, 1], z=mc[:, 2], mode="markers",
+                                   marker=dict(size=2.5, color="rgba(70,70,70,0.35)"), name="магниты",
+                                   text=mh, hovertemplate="%{text}<extra>магнит</extra>", showlegend=False))
     # BPM — маркеры на датчиках положения (kind=monitor)
     bpm = np.array([(float(r["x"]), float(r["y"]), float(r["z"])) for r in lc if kind.get(r["device_type_id"]) == "monitor"])
     if len(bpm):
         fig.add_trace(go.Scatter3d(x=bpm[:, 0], y=bpm[:, 1], z=bpm[:, 2], mode="markers",
                                    marker=dict(size=3, color="black", symbol="diamond"), name=f"BPM ({len(bpm)})"))
 
-    parts = vz.load_trajectories(os.path.join(WS, "results", f"trajectories_exp{exp_id}.bin"))
-    for i, p in enumerate(parts):                            # пучок → линии по частицам
-        if len(p) < 2:
-            continue
-        if len(p) > TRAJ_MAX:                                # прореживание длинной траектории (форма кольца сохраняется)
-            step = len(p) // TRAJ_MAX + 1
-            p = np.vstack([p[::step], p[-1]])
-        fig.add_trace(go.Scatter3d(x=p[:, 0], y=p[:, 1], z=p[:, 2], mode="lines",
-                                   line=dict(width=5, color=COLORS[i % len(COLORS)]),
-                                   name=LABELS[i] if i < len(LABELS) else f"P{i+1}"))
+    # ТРАЕКТОРИЯ = пробный пучок (глоб. X,Y,Z из dev[:,3:6]); ховер «имя · № · суперпериод · s»
+    if dev:
+        for i, d in enumerate(dev):
+            if len(d) < 2:
+                continue
+            ht = [f"{dmeta['name'][k]} · №{dmeta['idx'][k]} · суперпериод {dmeta['sp'][k]}<br>s = {d[k, 0]:.1f} м"
+                  for k in range(len(d))]
+            fig.add_trace(go.Scatter3d(x=d[:, 3], y=d[:, 4], z=d[:, 5], mode="lines",
+                                       line=dict(width=(6 if i == 0 else 4), color=DEV_COL[i % len(DEV_COL)]),
+                                       name=dlabels[i] if i < len(dlabels) else f"P{i+1}",
+                                       text=ht, hovertemplate="%{text}<extra>%{fullData.name}</extra>"))
 
     # ПОДЗАГОЛОВОК: сколько оборотов, замкнута ли орбита, невязка (секторным телом — как график отклонения).
     sub = ""
@@ -158,15 +199,15 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out):
                       legend=dict(title="частицы", x=0.99, xanchor="right", y=0.99, yanchor="top",  # оверлей, не резервирует колонку
                                   bgcolor="rgba(255,255,255,0.6)", bordercolor="lightgray", borderwidth=1),
                       margin=dict(l=0, r=0, t=66, b=0))          # t↑ под двухстрочный заголовок
-    # 2D-график отклонения ПРОБНОГО пучка от опорной орбиты (перетрек x,y секторным телом) — под 3D-сценой.
+    # 2D-график отклонения (ТОТ ЖЕ пробный пучок) — под 3D; связь с 3D через customdata (глоб. XYZ точки)
     dev_html = ""
-    try:
-        dev, dlabels, dmeta = mte.deviation_paths(int(lat))
-        dev_html = _deviation_fig(dev, dlabels, dmeta).to_html(
-            include_plotlyjs=False, full_html=False, default_width="100%", default_height="640",
-            config={"responsive": True})
-    except Exception as e:                                        # не рушим 3D, если отклонение не собралось
-        print(f"[!] график отклонения пропущен: {type(e).__name__}: {e}")
+    if dev:
+        try:
+            dev_html = _deviation_fig(dev, dlabels, dmeta).to_html(
+                include_plotlyjs=False, full_html=False, default_width="100%", default_height="640",
+                config={"responsive": True})
+        except Exception as e:                                    # не рушим 3D, если график не собрался
+            print(f"[!] график отклонения пропущен: {type(e).__name__}: {e}")
 
     s3d = fig.to_html(include_plotlyjs="inline", full_html=False, default_width="100%",
                       default_height="78vh", config={"responsive": True})
@@ -174,10 +215,12 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out):
     with open(out, "w", encoding="utf-8") as f:                   # 3D сверху, график отклонения снизу — один файл
         f.write("<!doctype html><html><head><meta charset='utf-8'>"
                 f"<title>SynchrotronSim — эксперимент {exp_id}</title></head>"
-                f"<body style='margin:0;padding-top:16px;font-family:sans-serif'>{s3d}{dev_html}</body></html>")
+                f"<body style='margin:0;padding-top:16px;font-family:sans-serif'>{s3d}{dev_html}"
+                f"{_LINK_JS if dev_html else ''}</body></html>")
     print(f"[OK] {out}")
-    print(f"     {os.path.getsize(out)/1e6:.1f} МБ ({mode}); {ntri:,} треуг. магнитов, {len(parts)} частиц"
-          f"{' + график отклонения' if dev_html else ''}. Самодостаточный — крутить/зумить, передавать файлом.")
+    print(f"     {os.path.getsize(out)/1e6:.1f} МБ ({mode}); {ntri:,} треуг. магнитов, "
+          f"{len(dev) if dev else 0} частиц (пробный пучок){' + график отклонения' if dev_html else ''}. "
+          f"Самодостаточный — крутить/зумить, передавать файлом.")
     return out, ntri
 
 
