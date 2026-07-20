@@ -144,6 +144,12 @@ def deviation_paths(lattice, radius=1e-3, source="physical", settings=None):
             cur += 1
         frames += [mags[j].fr_in, mags[j].fr_out]
         name += [mags[j].dev, mags[j].dev]; idx += [j + 1, j + 1]; sp += [cur, cur]
+    # ЗАМЫКАНИЕ: у замкнутого кольца (Σугол≈2π) добавляем wrap-дрейф mags[-1]→mags[0], чтобы траектория
+    # финишировала в СТАРТОВОЙ плоскости (mags[0].fr_in). У открытого сегмента (SP1) — нет.
+    closed = abs(sum(abs(m.theta0) for m in mags) - 2 * np.pi) < 0.15
+    wrap_gap = float((mags[0].fr_in[0] - mags[-1].fr_out[0]) @ mags[-1].fr_out[1]) if closed else 0.0
+    if closed:
+        frames.append(mags[0].fr_in); name.append("старт (замыкание)"); idx.append(1); sp.append(1)
     meta = dict(name=name, idx=idx, sp=sp)
     # МЕТАДАННЫЕ МАГНИТОВ (1 на магнит) — для ховера/маркеров магнитов в 3D: центр, имя, №, СП.
     mc = [tuple(float(v) for v in mags[0].center)]; mn = [mags[0].dev]; mi = [1]; ms = [1]; c2 = 1
@@ -165,6 +171,9 @@ def deviation_paths(lattice, radius=1e-3, source="physical", settings=None):
                 g = gp(frames[2 * j], st[0], st[2]); dev.append((s, st[0], st[2], g[0], g[1], g[2]))
                 st = mags[j].body(st); s += mags[j].L
                 g = gp(frames[2 * j + 1], st[0], st[2]); dev.append((s, st[0], st[2], g[0], g[1], g[2]))
+            if closed:                                               # wrap-дрейф → финиш в стартовой плоскости
+                st = mt.modified_drift(st, mags[-1], mags[0]); s += wrap_gap
+                g = gp(mags[0].fr_in, st[0], st[2]); dev.append((s, st[0], st[2], g[0], g[1], g[2]))
         except mt.ParticleLost:
             pass
         out.append(np.asarray(dev, float))
