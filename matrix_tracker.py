@@ -52,6 +52,18 @@ def frame(yaw):
     return axis, uhat, vhat
 
 
+SECTOR = os.environ.get("SS_SECTOR", "") == "1"    # ОПЫТ: диполь = точный сектор внутри ящика
+_SECTOR_DISP = -1.0                                # знак дисперсии секторной карты (под «+x наружу»); сверить с elegant
+_PARA_TOL = 1e-4                                   # |axis_A × axis_B| ниже ⇒ оси параллельны (стык дуги ~1e-6,
+#                                                   дрейф =0); настоящий клин диполь→элемент ~мрад >> порога
+
+
+def _rotz(v, a):
+    """Поворот вектора v вокруг вертикали (z) на угол a."""
+    c, s = math.cos(a), math.sin(a)
+    return np.array([c * v[0] - s * v[1], s * v[0] + c * v[1], v[2]])
+
+
 def _drift(st, ell):
     """Точный дрейф на длину ell вдоль локальной оси (δ-корректный, канонический)."""
     x, px, y, py, t, d = st
@@ -115,8 +127,12 @@ class Magnet:
         _rinv = self.theta0 / self.Leff if self.Leff > 0 else 0.0    # 1/ρ (знак по изгибу)
         self.kEdge1 = math.tan(self.edge1) * _rinv                  # вход
         self.kEdge2 = math.tan(self.edge2) * _rinv                  # выход
+        # ОПЫТ: СЛАБАЯ (СЕКТОРНАЯ) ФОКУСИРОВКА 1/ρ². В секторе x''+(1/ρ²)x=0 ⇒ Δpx=−(1/ρ²)·u·ds (гор.
+        # фокус, верт. нет). У прямого ящика с постоянным киком изгиба R21=0 — этого члена нет. Вопрос:
+        # не даёт ли его сама укладка на дугу (поворот рамки на стыках)? Тест сравнит обе геометрии.
+        self.wkfoc = _rinv * _rinv if os.environ.get("SS_WEAK_FOCUS", "") == "1" else 0.0
         self.nonzero = any(abs(v) > 0 for v in (self.theta0, self.k1, self.k1v, self.k2, self.k3,
-                                                self.kEdge, self.kEdge1, self.kEdge2))
+                                                self.kEdge, self.kEdge1, self.kEdge2, self.wkfoc))
         # ПРОГИБ ОПОРНОЙ ОРБИТЫ (сагитта). Ящик прямой, а опорная внутри изгиба идёт по дуге и отходит
         # от оси ящика на L·θ0/8. Мультиполи и края обязаны раскладываться ВДОЛЬ ОРБИТЫ (elegant делает
         # это конструктивно: CSBEND — СЕКТОР, рама гнётся вместе с опорной, x≡0 по построению), поэтому
@@ -125,6 +141,23 @@ class Magnet:
         self.xref = self.xref_in = self.xref_out = None
         if self.theta0 and any((self.k1, self.k1v, self.k2, self.k3, self.kEdge1, self.kEdge2)):
             self.xref, self.xref_in, self.xref_out = self._ref_bow()
+        # РАМКИ СТЫКОВКИ: fr_in — вход (точка, ось, uhat, vhat), fr_out — выход. Для НЕизгибающих ящиков —
+        # плоскости ⊥ оси (как раньше). Для ДИПОЛЯ в секторном режиме — КРИВОЛИНЕЙНЫЕ рамки: грань ⊥
+        # касательной опорной дуги, опорная орбита проходит через точку рамки (x=0). Тогда секторная карта
+        # тела ложится напрямую (опорная = 0 на входе и выходе), а modified_drift стыкует к наклонной грани.
+        self.sector = SECTOR and self.kind == "dipole" and abs(self.theta0) > 0
+        if self.sector:
+            rho = self.Leff / self.theta0
+            O = self.center + rho * self.uhat                  # центр кривизны дуги
+            self.entry_pt = O + _rotz(self.center - O, -self.theta0 / 2.0)   # точка входа НА ДУГЕ
+            self.exit_pt = O + _rotz(self.center - O, self.theta0 / 2.0)
+            self.fr_in = (self.entry_pt, _rotz(self.axis, -self.theta0 / 2.0),
+                          _rotz(self.uhat, -self.theta0 / 2.0), self.vhat)
+            self.fr_out = (self.exit_pt, _rotz(self.axis, self.theta0 / 2.0),
+                           _rotz(self.uhat, self.theta0 / 2.0), self.vhat)
+        else:
+            self.fr_in = (self.entry, self.axis, self.uhat, self.vhat)
+            self.fr_out = (self.exit, self.axis, self.uhat, self.vhat)
 
     def _ref_bow(self):
         """Опорная орбита в раме ящика: (x в точках кика, x на входной плоскости, x на выходной).
@@ -148,6 +181,23 @@ class Magnet:
             x -= px * (ds / 2.0) / math.sqrt(max(1e-12, 1.0 - px * px))
         return out, x, x_out
 
+    def _body_sector(self, st):
+        """ТОЧНЫЙ СЕКТОР (линейная карта) в криволинейной рамке: опорная=0 на входе/выходе. Тело =
+        край(E1)·сектор(L,θ)·край(E2). Даёт R11/R12/R16/R21/R22/R26 аналитически (сверено с elegant).
+        Края — тонкие линзы на ⊥касательных гранях (kEdge1/2 = tan(E)/ρ). Верт. = дрейф по дуге."""
+        x, px, y, py, t, d = st
+        c = math.cos(self.theta0); s = math.sin(self.theta0)
+        rho = self.Leff / self.theta0
+        px += self.kEdge1 * x; py -= self.kEdge1 * y            # вход: край E1
+        disp = _SECTOR_DISP                                     # знак дисперсии под конвенцию «+x наружу»
+        x1 = c * x + rho * s * px + disp * rho * (1.0 - c) * d
+        px1 = -(s / rho) * x + c * px + disp * s * d
+        y1 = y + self.Leff * py
+        py1 = py
+        x, px, y, py = x1, px1, y1, py1
+        px += self.kEdge2 * x; py -= self.kEdge2 * y            # выход: край E2
+        return (x, px, y, py, t + self.Leff, d)
+
     def body(self, st):
         """Тело: N срезов drift-kick-drift по ЭФФЕКТИВНОЙ длине (ds_g=ds_f=L_eff/N) ⇒ полный изгиб/
         фокус = k·L_eff (совпадает с .lte). Чистый диполь = только кик изгиба (без фокусировки);
@@ -155,6 +205,8 @@ class Magnet:
 
         У изгибающих элементов мультиполи и края берут u = x − xref (отклонение от ИЗОГНУТОЙ опорной),
         а не x от оси ящика — см. _ref_bow. Для неизгибающих xref=None ⇒ u≡x, поведение бит-в-бит."""
+        if self.sector:                                        # ДИПОЛЬ в секторном режиме — точная карта
+            return self._body_sector(st)
         if not self.nonzero:                                   # выключенный — дрейф (нулевой элемент)
             return _drift(st, self.L)
         th, k1, k1v, k2, k3, kE = self.theta0, self.k1, self.k1v, self.k2, self.k3, self.kEdge
@@ -170,7 +222,8 @@ class Magnet:
             x, px, y, py, t, d = st
             u = x - xr[i] if xr is not None else x             # отклонение от опорной дуги (сектор), не от оси
             # НОРМАЛЬНЫЕ мультиполи (Re Cₙ): изгиб θ0, квад −k1·u, секступоль, октуполь + краевая линза
-            px += th / N - k1 * u * dsf - 0.5 * k2 * (u * u - y * y) * dsf - (k3 / 6.0) * (u ** 3 - 3 * u * y * y) * dsf
+            # + слабая секторная фокусировка −(1/ρ²)·u (гор., опыт SS_WEAK_FOCUS)
+            px += th / N - self.wkfoc * u * dsf - k1 * u * dsf - 0.5 * k2 * (u * u - y * y) * dsf - (k3 / 6.0) * (u ** 3 - 3 * u * y * y) * dsf
             py += k1v * y * dsf + k2 * u * y * dsf + (k3 / 6.0) * (3 * u * u * y - y ** 3) * dsf - (kE / N) * y
             st = _drift((x, px, y, py, t, d), dsg / 2.0)
         if self.kEdge2:                                        # краевая линза на ВЫХОДЕ
@@ -293,27 +346,59 @@ def check_junctions(mags, settings=None, verbose=False):
     return problems
 
 
+PURE_DRIFT = os.environ.get("SS_PURE_DRIFT", "") == "1"    # ОПЫТ: elegant-подобный чистый дрейф между элементами
+
+
+def _pure_drift(st, A, B):
+    """ЧИСТЫЙ дрейф (как в elegant): прямой отрезок вдоль оси A, выходная плоскость ПАРАЛЛЕЛЬНА входной
+    (обе ⊥ axis_A). Длина — до плоскости ⊥axis_A, проходящей через локальное начало B (B.entry).
+    Затем состояние переразлагается в рамке B при B.entry. Наклон грани B учитывается НЕ здесь, а
+    краевым киком в теле B (kEdge1) — так же, как отделяет дрейф от края elegant.
+    δ-корректно (p_полный сохраняется). st в системе A → st в системе B, + путь."""
+    Ld = 0.0 if getattr(B, "same_plane_as_prev", False) else float((B.entry - A.exit) @ A.axis)
+    x2, px2, y2, py2, t2, d = _drift(st, Ld)                   # прямой δ-корректный дрейф вдоль axis_A
+    P = A.exit + Ld * A.axis + x2 * A.uhat + y2 * A.vhat       # глоб. позиция на выходной плоскости дрейфа
+    ps = math.sqrt((1.0 + d) ** 2 - px2 * px2 - py2 * py2)
+    dir_ = (px2 * A.uhat + py2 * A.vhat + ps * A.axis) / (1.0 + d)
+    rel = P - B.entry                                         # плоскость дрейфа проходит через B.entry ⇒ rel·axis_B мал
+    x3 = float(rel @ B.uhat); y3 = float(rel @ B.vhat)
+    px3 = (1.0 + d) * float(dir_ @ B.uhat); py3 = (1.0 + d) * float(dir_ @ B.vhat)
+    return (x3, px3, y3, py3, t2, d)
+
+
 def modified_drift(st, A, B):
     """Геометрический пролёт: плоскость выхода A → плоскость входа B (произв. ориентации). δ-корректно
     (p_полный сохраняется). Если при сборке плоскости признаны ОДНОЙ (B.same_plane_as_prev) — переход
     без пролёта. st в системе A → st в системе B, + путь."""
+    if PURE_DRIFT:
+        return _pure_drift(st, A, B)
+    # рамки стыковки: выход A (fr_out) → вход B (fr_in). У диполя-сектора это НАКЛОННЫЕ грани (⊥
+    # касательной опорной), у прочих — ⊥ оси (как раньше). modified_drift сам ориентирует к наклонной грани.
+    aP, aAx, aU, aV = A.fr_out
+    bP, bAx, bU, bV = B.fr_in
     x, px, y, py, t, d = st
-    P = A.exit + x * A.uhat + y * A.vhat                       # глоб. позиция на выходной плоскости A
+    P = aP + x * aU + y * aV                                   # глоб. позиция на выходной плоскости A
     ps = math.sqrt((1.0 + d) ** 2 - px * px - py * py)
-    dir_ = (px * A.uhat + py * A.vhat + ps * A.axis) / (1.0 + d)   # единичное направление импульса (глоб.)
+    dir_ = (px * aU + py * aV + ps * aAx) / (1.0 + d)          # единичное направление импульса (глоб.)
     if getattr(B, "same_plane_as_prev", False):
-        Q, tt = P, 0.0                                         # стык «в упор» — пролёта нет
+        Q = P                                                 # стык «в упор» — пролёта нет
+    elif float(np.linalg.norm(np.cross(aAx, bAx))) < _PARA_TOL:
+        # ОСИ ПАРАЛЛЕЛЬНЫ (стык дуговых срезов = общая касательная; прямой дрейф) ⇒ ЧИСТЫЙ ДРЕЙФ (как в
+        # elegant): частица летит вдоль своего направления до плоскости ⊥aAx через B. Длина знаковая
+        # (μm-зазор butted-стыка любого знака корректен). Клина нет — луч-в-плоскость тут вырождается в дрейф.
+        Q = P + float((bP - P) @ aAx) / float(dir_ @ aAx) * dir_
     else:
-        denom = float(B.axis @ dir_)
+        denom = float(bAx @ dir_)                             # НАСТОЯЩИЙ клин (диполь → элемент под углом)
         if denom <= 1e-9:
             raise ParticleLost(f"пучок не долетит до входа {B.dev}: n·d={denom:.3g} ≤ 0")
-        tt = float(B.axis @ (B.entry - P)) / denom
-        if tt < 0:
-            raise ParticleLost(f"плоскость входа {B.dev} позади частицы: t={tt:.3g} < 0")
+        tt = float(bAx @ (bP - P)) / denom
+        if tt < -1e-4:                                        # μm-перекрытие butted-клина (⊥-ящики на дуге с
+            raise ParticleLost(f"плоскость входа {B.dev} позади частицы: t={tt:.3g} < 0")  # точной длиной) ок; >0.1мм = потеря
         Q = P + tt * dir_
-    rel = Q - B.entry
-    x2 = float(rel @ B.uhat); y2 = float(rel @ B.vhat)
-    px2 = (1.0 + d) * float(dir_ @ B.uhat); py2 = (1.0 + d) * float(dir_ @ B.vhat)
+    tt = float((Q - P) @ dir_)                                # длина пути вдоль импульса (знаковая)
+    rel = Q - bP
+    x2 = float(rel @ bU); y2 = float(rel @ bV)
+    px2 = (1.0 + d) * float(dir_ @ bU); py2 = (1.0 + d) * float(dir_ @ bV)
     return (x2, px2, y2, py2, t + tt, d)
 
 

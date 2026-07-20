@@ -70,6 +70,9 @@ class PlaneMagnet:
         self.L = self.Leff = 0.0; self.dev = "INJ_PLANE"; self.devs = ["INJ_PLANE"]
         self.yaw = math.atan2(a[1], a[0]); self.nsl = 1
         self.theta0 = self.k1 = self.k2 = self.k3 = 0.0; self.nonzero = False
+        self.sector = False                                   # плоскость — не сектор
+        self.fr_in = (self.entry, self.axis, self.uhat, self.vhat)   # рамки стыковки (⊥ оси)
+        self.fr_out = (self.exit, self.axis, self.uhat, self.vhat)
 
     def body(self, st):                          # плоскость длины 0 — состояние не меняется
         return st

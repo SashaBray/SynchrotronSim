@@ -313,11 +313,15 @@ def add_edge_angles(only_lattices=None):
             # края не зависит от того, в какую сторону гнёт диполь (иначе зеркальный диполь ДЕфокусировал бы).
             box = -(th + dl) / 2.0                             # край ящика на внешней грани
             e1o = lte[names[grp[0]]][1]; e2o = lte[names[grp[-1]]][2]  # .lte внешние (первый.E1, последний.E2)
-            if abs(abs(box) - abs(e1o)) < 2e-5 and abs(abs(box) - abs(e2o)) < 2e-5:
+            # ОПЫТ SS_EXACT_EDGES=1: посрезные E1/E2 из .lte у ВСЕХ групп (не только асимметричных).
+            # Box-модель (только внешние грани) верна для ПРЯМОГО ящика; на дуге у слайсов разные ρ ⇒
+            # внутренние края elegant не гасятся (tan(E)·(1/ρ_i−1/ρ_{i+1})) и их надо держать посрезно.
+            exact = os.environ.get("SS_EXACT_EDGES", "") == "1"
+            if not exact and abs(abs(box) - abs(e1o)) < 2e-5 and abs(abs(box) - abs(e2o)) < 2e-5:
                 insts[grp[0]]["edge1"] = f"{(box if e1o >= 0 else -box):.12g}"   # ЯЩИК: только внешние грани
                 insts[grp[-1]]["edge2"] = f"{(box if e2o >= 0 else -box):.12g}"
                 nfill += 2
-            else:                                              # асимметрия (DQ2C) — per-slice .lte (со знаком)
+            else:                                              # per-slice .lte (со знаком): асимметрия или SS_EXACT_EDGES
                 for i in grp:
                     _, e1, e2 = lte[names[i]]
                     insts[i]["edge1"] = f"{-e1:.12g}"; insts[i]["edge2"] = f"{-e2:.12g}"; nfill += 2

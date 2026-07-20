@@ -325,12 +325,12 @@ def write_lattice_layout_csv(rows, path):
                 r["sp_number"],
                 r["sp_type"],
                 r["sp_element_id"],
-                f"{r['x']:.6f}",
-                f"{r['y']:.6f}",
-                f"{r['z']:.6f}",
-                f"{r['yaw']:.8f}",
-                f"{r['pitch']:.6f}",
-                f"{r['roll']:.6f}",
+                f"{r['x']:.12f}",                        # 12 знаков: μm-округление центров давало ~0.4мкм пол
+                f"{r['y']:.12f}",
+                f"{r['z']:.12f}",
+                f"{r['yaw']:.12f}",
+                f"{r['pitch']:.12f}",
+                f"{r['roll']:.12f}",
             ])
 
 
@@ -578,9 +578,14 @@ def run(lte_dir=None, tol_mm=1.0, gen_assets=False):
         print(f"  {k:18s}  {hw_uses[k]:5d}")
 
     # Пост-обработка: выпрямление DL/JL 5-слайсовых семейств.
-    n_straightened, by_len = straighten_dljl_families(layout_rows, devices)
-    brk = ", ".join(f"{n}-слайс.: {c}" for n, c in sorted(by_len.items()))
-    print(f"\nВыпрямлено линеек диполей на прямую: {n_straightened} ({brk or 'нет'})")
+    # ОПЫТ (SS_STRAIGHTEN=0): не выпрямлять — оставить слайсы на ДУГЕ (как секторы elegant), чтобы
+    # проверить, вносит ли выпрямление хорды погрешность против elegant.
+    if os.environ.get("SS_STRAIGHTEN", "1") == "0":
+        print("\n[ОПЫТ] Выпрямление линеек ОТКЛЮЧЕНО (SS_STRAIGHTEN=0): слайсы диполей — на дуге.")
+    else:
+        n_straightened, by_len = straighten_dljl_families(layout_rows, devices)
+        brk = ", ".join(f"{n}-слайс.: {c}" for n, c in sorted(by_len.items()))
+        print(f"\nВыпрямлено линеек диполей на прямую: {n_straightened} ({brk or 'нет'})")
 
     # Удаляем технический ключ _lte_name перед записью.
     for r in layout_rows:

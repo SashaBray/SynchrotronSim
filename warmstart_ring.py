@@ -24,15 +24,22 @@ def write_warmstart(lattice=1, lte_dir=None):
     nbend = nfoc = 0
     for i, g in enumerate(grp):
         c = mapping[i]
-        dev = g[0]["device_type_id"]; Leff = eff.get(dev, 1.0)
+        dev = g[0]["device_type_id"]
+        # ТОЧНАЯ ДЛИНА: изгибающим ставим eff_length = .lte L среза (не округлённую device-длину). Тогда
+        # ρ=Leff/θ0 и геометрия сектора ТОЧНЫ, а дуговые срезы стыкуются в упор (без 28-мкм зазора).
+        # mat_B считаем ТОЙ ЖЕ длиной ⇒ θ0=QP·mat_B·Leff=−ANGLE точно. У DP L_lte≠device (0.41783 vs
+        # 0.4178); у DQ L_lte=1.0=device — не меняется. Прочие (квад/секступоль) — device eff (фит поля).
+        is_bend = c["kind"] in ("dipole", "dq") and c["angle"]
+        Llte = c.get("Llte") or 0.0
+        Leff = Llte if (is_bend and Llte) else eff.get(dev, 1.0)
         # ЗНАК: положительный ANGLE из .lte = поворот ВПРАВО, т.е. θ0 = −ANGLE (см. lte_to_lattice.step).
-        # Геометрия уложена так же ⇒ кик и ящик гнут в одну сторону. Без минуса диполь гнул бы ПРОТИВ
-        # своей же геометрии: до разворота укладки было theta+angle и θ0=+ANGLE — согласовано, теперь нет.
-        matB = -c["angle"] / (QP * Leff) if (c["kind"] in ("dipole", "dq") and c["angle"]) else 0.0
+        matB = -c["angle"] / (QP * Leff) if is_bend else 0.0
         if matB: nbend += 1
         if c["G"] or c["S"] or c["O"]: nfoc += 1
         for k, inst in enumerate(g):
             row = byid[inst["instance_id"]]
+            if is_bend and Llte and "eff_length" in row:
+                row["eff_length"] = f"{Llte:.10g}"           # точная длина среза в БД (её читает ядро)
             if k == 0:
                 row["mat_B"] = f"{matB:.9g}"; row["mat_G"] = f"{c['G']:.9g}"
                 row["mat_S"] = f"{c['S']:.9g}"; row["mat_O"] = f"{c['O']:.9g}"
