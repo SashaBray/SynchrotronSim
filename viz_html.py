@@ -214,8 +214,36 @@ def _deviation_fig(dev, labels, meta):
     return fig2
 
 
-def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out):
-    """Собрать сцену и записать самодостаточный HTML. Возвращает (путь, число_треуг)."""
+def _edge_lines(mesh, feature_angle=45.0):
+    """Feature-рёбра меша (острые грани + границы) → (X,Y,Z) с NaN-разделителями между отрезками для
+    Scatter3d(mode='lines'). Даёт чёткий контур формы магнита поверх полупрозрачного тела. None если нет/иной формат."""
+    try:
+        e = mesh.extract_feature_edges(feature_angle=feature_angle, boundary_edges=True,
+                                       feature_edges=True, non_manifold_edges=False, manifold_edges=False)
+    except Exception as ex:
+        print(f"[!] рёбра не извлеклись: {type(ex).__name__}: {ex}")
+        return None
+    pts = np.asarray(e.points, np.float64)
+    ln = np.asarray(e.lines, np.int64)
+    if pts.size == 0 or ln.size == 0:
+        return None
+    if ln.size % 3 != 0:                                          # feature-edges = 2-точечные отрезки [2,a,b]
+        return None
+    seg = ln.reshape(-1, 3)
+    if not np.all(seg[:, 0] == 2):                                # неожиданный формат (полилинии) — пропускаем
+        return None
+    A, B = pts[seg[:, 1]], pts[seg[:, 2]]                         # начала/концы отрезков (m,3)
+    out = np.empty((len(A) * 3, 3), np.float64)
+    out[0::3], out[1::3], out[2::3] = A, B, np.nan               # A, B, NaN (разрыв линии) на каждый отрезок
+    return out[:, 0], out[:, 1], out[:, 2]
+
+
+EDGE_AUTO_MAX = 150_000                                       # выше этой оценки отрезков-рёбер авто-режим их ОТКЛЮЧАЕТ (тяжело)
+
+
+def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out, edges=None):
+    """Собрать сцену и записать самодостаточный HTML. Возвращает (путь, число_треуг).
+    edges: True/False — рисовать feature-рёбра принудительно; None — АВТО (детальный полный ring — без, иначе — с)."""
     stl_cache, grouped = {}, defaultdict(list)               # STL-кэш + группировка инстансов по устройству
     for r in lc:
         dev = r["device_type_id"]; stl = hw.get(dev, {}).get("stl_path", "-")
@@ -234,6 +262,14 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out):
         grouped[dev].append((float(r["yaw"]), float(r["pitch"]), float(r["roll"]),
                              float(r["x"]), float(r["y"]), float(r["z"])))
 
+    if edges is None:                                        # АВТО: рёбра для лёгких сцен; детальный полный ring — без (тяжело)
+        nmag = sum(len(v) for v in grouped.values())
+        est = nmag * (12 if glyph else 150)                 # ~отрезков-рёбер (блок 12, детальный магнит ~150)
+        edges = est <= EDGE_AUTO_MAX
+        if not edges:
+            print(f"[авто] рёбра выключены: детальная сцена ~{est:,} отрезков > {EDGE_AUTO_MAX:,} "
+                  f"(тяжело); включить — флаг --edges, либо лёгкая версия --glyph")
+
     # ПРОБНЫЙ пучок (сектор): та же перетрекованная 3D-траектория и 2D-отклонение (один пучок ⇒ связка
     # клик↔3D работает) + метаданные точек (имя/№/СП, глоб. XYZ) и магнитов.
     dev = dlabels = dmeta = dmags = None
@@ -244,6 +280,7 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out):
 
     fig = go.Figure()
     ntri = 0
+    ex_all, ey_all, ez_all = [], [], []                      # feature-рёбра всех магнитов — в одну трассу
     for dv, tlist in grouped.items():                        # магниты → Mesh3d, цвет по типу
         big = vz.build_combined_mesh(stl_cache[hw[dv]["stl_path"]], np.asarray(tlist, float))
         V = np.asarray(big.points, dtype=np.float32)         # float32: −43% веса, μm-точность (масштаб метров) — с запасом
@@ -252,6 +289,16 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out):
         fig.add_trace(go.Mesh3d(x=V[:, 0], y=V[:, 1], z=V[:, 2], i=F[:, 0], j=F[:, 1], k=F[:, 2],
                                 color=KINDCOL.get(kind.get(dv, ""), "silver"), opacity=0.5,
                                 name=dv, hovertext=dv, hoverinfo="text", showlegend=False))
+        if edges:                                            # контур формы (острые грани) поверх полупрозрачного тела
+            el = _edge_lines(big)
+            if el is not None:
+                ex_all.append(el[0]); ey_all.append(el[1]); ez_all.append(el[2])
+    nedge = 0
+    if edges and ex_all:                                     # единая трасса рёбер (тонкие тёмные линии; в легенде — переключаемо)
+        EX = np.concatenate(ex_all).astype(np.float32); EY = np.concatenate(ey_all).astype(np.float32)
+        EZ = np.concatenate(ez_all).astype(np.float32); nedge = int(np.sum(~np.isnan(EX)) // 2)
+        fig.add_trace(go.Scatter3d(x=EX, y=EY, z=EZ, mode="lines", name="рёбра", hoverinfo="skip",
+                                   line=dict(color="rgba(35,35,35,0.55)", width=1)))
 
     # МАРКЕРЫ МАГНИТОВ в центрах — ховер «имя · № · суперпериод» (полная инфа по магниту в 3D)
     if dmags:
@@ -326,7 +373,8 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out):
                 f"<body style='margin:0;padding-top:16px;font-family:sans-serif'>{s3d}{dev_html}"
                 f"{_LINK_JS if dev_html else ''}{anim}</body></html>")
     print(f"[OK] {out}")
-    print(f"     {os.path.getsize(out)/1e6:.1f} МБ ({mode}); {ntri:,} треуг. магнитов, "
+    print(f"     {os.path.getsize(out)/1e6:.1f} МБ ({mode}); {ntri:,} треуг. магнитов"
+          f"{f', {nedge:,} рёбер' if nedge else ''}, "
           f"{len(dev) if dev else 0} частиц (пробный пучок){' + график отклонения' if dev_html else ''}. "
           f"Самодостаточный — крутить/зумить, передавать файлом.")
     return out, ntri
@@ -345,7 +393,7 @@ def _resolve_decimate(decimate, glyph, lc, hw):
     return 0.0
 
 
-def main(exp_id, decimate=-1.0, out=None, glyph=False, both=False):
+def main(exp_id, decimate=-1.0, out=None, glyph=False, both=False, edges=None):
     exp = {r["exp_id"]: r for r in _read("experiments.csv")}[str(exp_id)]
     lat = exp["lattice_id"]; group = exp["group_id"]
     hw = {r["device_type_id"]: r for r in _read("hardware_library.csv")}
@@ -355,10 +403,10 @@ def main(exp_id, decimate=-1.0, out=None, glyph=False, both=False):
     base = out or os.path.join(HTML_DIR, f"exp{exp_id}_3d.html")
     stem = base[:-5] if base.lower().endswith(".html") else base
     if both:                                                 # обе версии: лёгкая (блоки) + детальная (STL)
-        build(exp_id, lat, group, hw, kind, lc, 0.0, True, stem + "_light.html")
-        build(exp_id, lat, group, hw, kind, lc, _resolve_decimate(decimate, False, lc, hw), False, stem + "_detailed.html")
+        build(exp_id, lat, group, hw, kind, lc, 0.0, True, stem + "_light.html", edges)
+        build(exp_id, lat, group, hw, kind, lc, _resolve_decimate(decimate, False, lc, hw), False, stem + "_detailed.html", edges)
     else:
-        build(exp_id, lat, group, hw, kind, lc, _resolve_decimate(decimate, glyph, lc, hw), glyph, base)
+        build(exp_id, lat, group, hw, kind, lc, _resolve_decimate(decimate, glyph, lc, hw), glyph, base, edges)
 
 
 if __name__ == "__main__":
@@ -368,6 +416,9 @@ if __name__ == "__main__":
                     help="доля удаляемых треуг. STL (0..1); -1=авто (детальную прорежает под ~300k треуг.), 0=полный STL")
     ap.add_argument("--glyph", action="store_true", help="лёгкая версия: магниты блоками по габаритам STL")
     ap.add_argument("--both", action="store_true", help="сгенерировать ОБЕ версии: _light (блоки) и _detailed (STL)")
+    ap.add_argument("--edges", action=argparse.BooleanOptionalAction, default=None,
+                    help="feature-рёбра (контур формы) магнитов; по умолчанию АВТО (детальный полный ring — без, "
+                         "иначе — с); --edges форсит, --no-edges выключает")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
-    main(a.exp, a.decimate, a.out, a.glyph, a.both)
+    main(a.exp, a.decimate, a.out, a.glyph, a.both, a.edges)
