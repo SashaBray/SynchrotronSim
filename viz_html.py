@@ -65,11 +65,13 @@ _LINK_JS = """<script>
 
 
 def _anim_html(traj_idx, traj_col):
-    """Кометная анимация 3D: по каждой трассе траектории бежит частица с УГАСАЮЩИМ следом (маркеры,
-    цвет→белый + размер→0 к хвосту). Кнопка «animate» ВКЛ/ВЫКЛ: по умолчанию статичный вид (полные треки),
-    по клику — линии приглушаются (ghost) и пускается комета; повторный клик возвращает статику. Панель:
-    animate, скорость. Работает на УЖЕ встроенных массивах траектории (g.data[i].x/y/z) — файл не растёт.
-    traj_idx — индексы трасс, traj_col — их цвета."""
+    """Анимация 3D: по каждой трассе бежит УГАСАЮЩИЙ след — короткий отрезок ЛИНИИ с градиентом цвет→белый
+    (голова яркая, хвост растворяется на белом фоне). БЕЗ маркера-частицы (пользователь просил только след).
+    Голова интерполируется в дробной позиции ⇒ плавно; продвижение время-зависимо (индексов/мс, независимо
+    от FPS). Кнопка «animate» ВКЛ/ВЫКЛ: по умолчанию статичный вид (полные треки), по клику — линии
+    приглушаются (ghost) и пускается след; повторный клик возвращает статику. Работает на УЖЕ встроенных
+    массивах траектории (g.data[i].x/y/z) — файл не растёт. traj_idx — индексы трасс, traj_col — цвета.
+    NB: камера сохраняется при обновлении кадров через layout scene.uirevision — можно крутить во время анимации."""
     import json
     return (r"""<div id="ssac" style="position:fixed;left:12px;bottom:12px;z-index:9999;font:13px sans-serif;
 background:rgba(255,255,255,.9);border:1px solid #ccc;border-radius:8px;padding:8px 11px;box-shadow:0 1px 5px rgba(0,0,0,.15)">
@@ -99,41 +101,46 @@ background:rgba(255,255,255,.9);border:1px solid #ccc;border-radius:8px;padding:
   if(n<2)return;
   var TAIL=Math.min(300,Math.max(20,Math.round(n*0.1)));       // длина следа ~10% пути (голова→хвост)
   var base=g.data.length;
-  Plotly.addTraces(g,TRAJ.map(function(){return{type:'scatter3d',mode:'markers',x:[],y:[],z:[],
-    hoverinfo:'skip',showlegend:false,marker:{size:[],color:[]}};}));
+  Plotly.addTraces(g,TRAJ.map(function(ix,i){                  // след = ЛИНИЯ с градиентом цвет→белый (угасает к хвосту)
+    var c=COL[i].replace('#',''),R=parseInt(c.substr(0,2),16),G=parseInt(c.substr(2,2),16),Bc=parseInt(c.substr(4,2),16);
+    return{type:'scatter3d',mode:'lines',x:[],y:[],z:[],hoverinfo:'skip',showlegend:false,
+      line:{width:6,color:[],cmin:0,cmax:1,cauto:false,colorscale:[[0,'rgb(255,255,255)'],[1,'rgb('+R+','+G+','+Bc+')']]}};
+  }));
   var comet=TRAJ.map(function(_,i){return base+i;});
-  var rgb=COL.map(function(h){h=h.replace('#','');return[parseInt(h.substr(0,2),16),parseInt(h.substr(2,2),16),parseInt(h.substr(4,2),16)];});
-  var head=TRAJ.map(function(){return 0;}), RUN=false, last=0;  // анимация ВЫКЛ по умолчанию (статичный вид)
-  var sp=document.getElementById('ssas'), speed=Math.max(1,Math.round(n/480)); sp.value=speed;
+  var pos=TRAJ.map(function(){return 0;}), RUN=false, last=0;  // pos — ДРОБНАЯ позиция головы; анимация ВЫКЛ по умолч.
+  var sp=document.getElementById('ssas'), speed=10; sp.value=speed;   // 10 ≈ полный проход ~20с; ползунок 1..40
   sp.oninput=function(){speed=+sp.value;};
   function empty(){return comet.map(function(){return[];});}
   var pb=document.getElementById('ssap');
   pb.onclick=function(){                                        // кнопка animate: вкл/выкл анимацию
    RUN=!RUN;
-   if(RUN){pb.innerHTML='&#9209; стоп'; Plotly.restyle(g,{opacity:0.16},TRAJ);}  // приглушить линии, пустить комет
+   if(RUN){pb.innerHTML='&#9209; стоп'; Plotly.restyle(g,{opacity:0.16},TRAJ);}  // приглушить линии, пустить след
    else{pb.innerHTML='&#9654; animate';                                          // вернуть статичный вид (полные треки)
-    for(var i=0;i<comet.length;i++)head[i]=0;
+    for(var i=0;i<pos.length;i++)pos[i]=0;
     Plotly.restyle(g,{x:empty(),y:empty(),z:empty()},comet);
     Plotly.restyle(g,{opacity:1},TRAJ);}
   };
   function step(ts){
    requestAnimationFrame(step);
-   if(!RUN||ts-last<33)return;                                 // ~30 к/с
-   last=ts;
-   var xs=[],ys=[],zs=[],cs=[],ss=[];
+   if(!RUN){last=ts;return;}
+   var dt=Math.min(64,ts-last); last=ts;                       // мс с прошлого кадра (кап против фризов/фона)
+   var vel=n*speed/200000;                                     // индексов/мс — время-зависимо (плавно, независимо от FPS)
+   var xs=[],ys=[],zs=[],cs=[];
    for(var i=0;i<comet.length;i++){
-    var p=paths[i],h=head[i],lo=Math.max(0,h-TAIL+1),r=rgb[i];
-    var wx=[],wy=[],wz=[],wc=[],ws=[];
-    for(var k=lo;k<=h;k++){
-     var a=1-(h-k)/(TAIL-1), t=1-a;                            // a: 1 голова .. 0 хвост; t=1-a
+    var p=paths[i],P=pos[i],hi=Math.floor(P),lo=Math.max(0,hi-TAIL);
+    var wx=[],wy=[],wz=[],wc=[];
+    for(var k=lo;k<=hi;k++){                                   // целые точки следа
      wx.push(p.x[k]);wy.push(p.y[k]);wz.push(p.z[k]);
-     wc.push('rgba('+Math.round(r[0]+(255-r[0])*t)+','+Math.round(r[1]+(255-r[1])*t)+','+Math.round(r[2]+(255-r[2])*t)+','+(0.2+0.8*a).toFixed(3)+')');
-     ws.push(2.5+7*a);                                         // размер 9.5 голова .. 2.5 хвост
+     wc.push(Math.max(0,1-(P-k)/TAIL));                        // 1 у головы → 0 (белый) у хвоста
     }
-    xs.push(wx);ys.push(wy);zs.push(wz);cs.push(wc);ss.push(ws);
-    head[i]=h+speed>=p.n?0:h+speed;                            // на конце — заново от плоскости инжекции
+    if(hi+1<p.n){var f=P-hi;                                   // ИНТЕРПОЛИРОВАННАЯ голова в точной позиции P — плавность
+     wx.push(p.x[hi]+(p.x[hi+1]-p.x[hi])*f);
+     wy.push(p.y[hi]+(p.y[hi+1]-p.y[hi])*f);
+     wz.push(p.z[hi]+(p.z[hi+1]-p.z[hi])*f); wc.push(1);}
+    xs.push(wx);ys.push(wy);zs.push(wz);cs.push(wc);
+    P+=vel*dt; if(P>=p.n-1)P=0; pos[i]=P;                      // на конце — заново от плоскости инжекции
    }
-   Plotly.restyle(g,{x:xs,y:ys,z:zs,'marker.color':cs,'marker.size':ss},comet);
+   Plotly.restyle(g,{x:xs,y:ys,z:zs,'line.color':cs},comet);
   }
   requestAnimationFrame(step);
  }
@@ -279,7 +286,8 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out):
     fig.update_layout(title=dict(text=f"SynchrotronSim — эксперимент {exp_id} "
                                       f"(решётка {lat}, {len(grouped)} типов магнитов; {mode}){sub}", y=0.96, yanchor="top"),
                       scene=dict(aspectmode="data", xaxis_title="X, м", yaxis_title="Y, м", zaxis_title="Z, м",
-                                 bgcolor="white", domain=dict(x=[0, 1], y=[0, 1])),  # сцена на всю область
+                                 bgcolor="white", domain=dict(x=[0, 1], y=[0, 1]),  # сцена на всю область
+                                 uirevision="keep"),            # СОХРАНЯТЬ камеру при обновлении кадров анимации (можно крутить во время)
                       autosize=True,                          # тянется на всю ширину окна браузера (без пустого поля справа)
                       legend=dict(title="частицы", x=0.99, xanchor="right", y=0.99, yanchor="top",  # оверлей, не резервирует колонку
                                   bgcolor="rgba(255,255,255,0.6)", bordercolor="lightgray", borderwidth=1),
