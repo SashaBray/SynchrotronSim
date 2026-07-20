@@ -66,15 +66,15 @@ _LINK_JS = """<script>
 
 def _anim_html(traj_idx, traj_col):
     """Кометная анимация 3D: по каждой трассе траектории бежит частица с УГАСАЮЩИМ следом (маркеры,
-    цвет→белый + размер→0 к хвосту). Статические линии приглушаются (ghost-контекст полного пути).
-    Панель: пауза/пуск, скорость, «полные треки» (вернуть яркость линий). Работает на УЖЕ встроенных
-    массивах траектории (g.data[i].x/y/z) — файл не растёт. traj_idx — индексы трасс, traj_col — их цвета."""
+    цвет→белый + размер→0 к хвосту). Кнопка «animate» ВКЛ/ВЫКЛ: по умолчанию статичный вид (полные треки),
+    по клику — линии приглушаются (ghost) и пускается комета; повторный клик возвращает статику. Панель:
+    animate, скорость. Работает на УЖЕ встроенных массивах траектории (g.data[i].x/y/z) — файл не растёт.
+    traj_idx — индексы трасс, traj_col — их цвета."""
     import json
     return (r"""<div id="ssac" style="position:fixed;left:12px;bottom:12px;z-index:9999;font:13px sans-serif;
 background:rgba(255,255,255,.9);border:1px solid #ccc;border-radius:8px;padding:8px 11px;box-shadow:0 1px 5px rgba(0,0,0,.15)">
-<button id="ssap" style="cursor:pointer;border:1px solid #888;border-radius:5px;background:#fff;padding:3px 9px;font:13px sans-serif">&#9208; пауза</button>
+<button id="ssap" style="cursor:pointer;border:1px solid #888;border-radius:5px;background:#fff;padding:3px 10px;font:13px sans-serif">&#9654; animate</button>
 &nbsp;скорость <input id="ssas" type="range" min="1" max="40" value="8" style="vertical-align:middle;width:90px">
-&nbsp;<label style="cursor:pointer;user-select:none"><input id="ssag" type="checkbox"> полные треки</label>
 </div>
 <script>
 (function(){
@@ -98,19 +98,24 @@ background:rgba(255,255,255,.9);border:1px solid #ccc;border-radius:8px;padding:
   var n=paths.length?paths[0].n:0;
   if(n<2)return;
   var TAIL=Math.min(300,Math.max(20,Math.round(n*0.1)));       // длина следа ~10% пути (голова→хвост)
-  Plotly.restyle(g,{opacity:0.16},TRAJ);                       // приглушить статические линии (ghost)
   var base=g.data.length;
   Plotly.addTraces(g,TRAJ.map(function(){return{type:'scatter3d',mode:'markers',x:[],y:[],z:[],
     hoverinfo:'skip',showlegend:false,marker:{size:[],color:[]}};}));
   var comet=TRAJ.map(function(_,i){return base+i;});
   var rgb=COL.map(function(h){h=h.replace('#','');return[parseInt(h.substr(0,2),16),parseInt(h.substr(2,2),16),parseInt(h.substr(4,2),16)];});
-  var head=TRAJ.map(function(){return 0;}), RUN=true, last=0;
+  var head=TRAJ.map(function(){return 0;}), RUN=false, last=0;  // анимация ВЫКЛ по умолчанию (статичный вид)
   var sp=document.getElementById('ssas'), speed=Math.max(1,Math.round(n/480)); sp.value=speed;
   sp.oninput=function(){speed=+sp.value;};
+  function empty(){return comet.map(function(){return[];});}
   var pb=document.getElementById('ssap');
-  pb.onclick=function(){RUN=!RUN;pb.innerHTML=RUN?'&#9208; пауза':'&#9654; пуск';};
-  var gh=document.getElementById('ssag');
-  gh.onchange=function(){Plotly.restyle(g,{opacity:gh.checked?1:0.16},TRAJ);};
+  pb.onclick=function(){                                        // кнопка animate: вкл/выкл анимацию
+   RUN=!RUN;
+   if(RUN){pb.innerHTML='&#9209; стоп'; Plotly.restyle(g,{opacity:0.16},TRAJ);}  // приглушить линии, пустить комет
+   else{pb.innerHTML='&#9654; animate';                                          // вернуть статичный вид (полные треки)
+    for(var i=0;i<comet.length;i++)head[i]=0;
+    Plotly.restyle(g,{x:empty(),y:empty(),z:empty()},comet);
+    Plotly.restyle(g,{opacity:1},TRAJ);}
+  };
   function step(ts){
    requestAnimationFrame(step);
    if(!RUN||ts-last<33)return;                                 // ~30 к/с
