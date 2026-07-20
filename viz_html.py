@@ -71,7 +71,9 @@ def _anim_html(traj_idx, traj_col):
     от FPS). Кнопка «animate» ВКЛ/ВЫКЛ: по умолчанию статичный вид (полные треки), по клику — линии
     приглушаются (ghost) и пускается след; повторный клик возвращает статику. Работает на УЖЕ встроенных
     массивах траектории (g.data[i].x/y/z) — файл не растёт. traj_idx — индексы трасс, traj_col — цвета.
-    NB: камера сохраняется при обновлении кадров через layout scene.uirevision — можно крутить во время анимации."""
+    ПРОИЗВОДИТЕЛЬНОСТЬ: следующий restyle только ПОСЛЕ завершения предыдущего (флаг rendering) — очередь не
+    копится ⇒ нет нарастающих тормозов, кадры адаптируются под машину. Зажатие мыши на сцене ставит анимацию
+    на паузу (тогда камеру можно крутить); во время хода камера не двигается (компромисс ради плавности)."""
     import json
     return (r"""<div id="ssac" style="position:fixed;left:12px;bottom:12px;z-index:9999;font:13px sans-serif;
 background:rgba(255,255,255,.9);border:1px solid #ccc;border-radius:8px;padding:8px 11px;box-shadow:0 1px 5px rgba(0,0,0,.15)">
@@ -120,24 +122,21 @@ background:rgba(255,255,255,.9);border:1px solid #ccc;border-radius:8px;padding:
     Plotly.restyle(g,{x:empty(),y:empty(),z:empty()},comet);
     Plotly.restyle(g,{opacity:1},TRAJ);}
   };
-  var dragging=false, dtimer=null;                             // пока двигают камеру — НЕ перерисовываем сцену
-  function hold(){dragging=true; if(dtimer){clearTimeout(dtimer); dtimer=null;}}      // кнопка зажата — пауза до отпускания
-  function release(){if(dtimer)clearTimeout(dtimer); dtimer=setTimeout(function(){dragging=false;},150);}
-  function pulse(){dragging=true; if(dtimer)clearTimeout(dtimer); dtimer=setTimeout(function(){dragging=false;},300);}
-  if(g.on)g.on('plotly_relayouting',pulse);                    // gl3d шлёт это ВО ВРЕМЯ вращения/зума камеры — надёжный сигнал
-  document.addEventListener('pointerdown',function(e){if(g.contains(e.target))hold();},true);   // на document+capture — не пропустим
+  var dragging=false, rendering=false, wtmr=null;              // rendering: НЕ копим очередь restyle (главная причина тормозов)
+  function hold(){dragging=true;}                              // зажали мышь на сцене — анимация встаёт (можно крутить камеру)
+  function release(){dragging=false;}
+  document.addEventListener('pointerdown',function(e){if(g.contains(e.target))hold();},true);
   document.addEventListener('mousedown',function(e){if(g.contains(e.target))hold();},true);
   document.addEventListener('touchstart',function(e){if(g.contains(e.target))hold();},{capture:true,passive:true});
   window.addEventListener('pointerup',release,true);
   window.addEventListener('mouseup',release,true);
   window.addEventListener('touchend',release,true);
-  g.addEventListener('wheel',pulse,{capture:true,passive:true});
+  window.addEventListener('wheel',function(e){if(g.contains(e.target)){dragging=true;clearTimeout(wtmr);wtmr=setTimeout(release,250);}},{capture:true,passive:true});
+  function done(){rendering=false;}
   function step(ts){
    requestAnimationFrame(step);
-   if(!RUN||dragging){last=ts;return;}                         // пауза перерисовки, пока крутят/зумят камеру
-   var dt=ts-last;
-   if(dt<33)return;                                            // троттлинг ~30 к/с — вдвое меньше нагрузки на поток
-   last=ts; dt=Math.min(64,dt);                                // мс с прошлого КАДРА (кап против фризов/фона)
+   if(!RUN||dragging||rendering){last=ts;return;}              // ЖДЁМ конца прошлой перерисовки — без очереди = без нарастающих тормозов
+   var dt=Math.min(64,ts-last); last=ts;                       // мс с прошлого КАДРА (кап против фризов/фона)
    var vel=n*factor/2000;                                      // индексов/мс: проход за 2/factor с (независимо от n и FPS)
    var xs=[],ys=[],zs=[],cs=[];
    for(var i=0;i<comet.length;i++){
@@ -154,7 +153,8 @@ background:rgba(255,255,255,.9);border:1px solid #ccc;border-radius:8px;padding:
     xs.push(wx);ys.push(wy);zs.push(wz);cs.push(wc);
     P+=vel*dt; if(P>=p.n-1)P=0; pos[i]=P;                      // на конце — заново от плоскости инжекции
    }
-   Plotly.restyle(g,{x:xs,y:ys,z:zs,'line.color':cs},comet);
+   rendering=true;                                             // разблокируется в done() по завершении перерисовки
+   Plotly.restyle(g,{x:xs,y:ys,z:zs,'line.color':cs},comet).then(done,done);
   }
   requestAnimationFrame(step);
  }
