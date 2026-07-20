@@ -64,6 +64,70 @@ def _rotz(v, a):
     return np.array([c * v[0] - s * v[1], s * v[0] + c * v[1], v[2]])
 
 
+def _foc(K, L):
+    """Линейная карта фокусирующего элемента силой K на длине L: (C, S, S') для [x1;px1]=[[C,S],[S',C]]·[x;px].
+    K>0 — фокус (cos/sin), K<0 — дефокус (cosh/sinh), K≈0 — дрейф. Общая для гор./верт. сектора+квадруполя."""
+    if K > 1e-12:
+        r = math.sqrt(K); p = r * L
+        return math.cos(p), math.sin(p) / r, -r * math.sin(p)
+    if K < -1e-12:
+        r = math.sqrt(-K); p = r * L
+        return math.cosh(p), math.sinh(p) / r, r * math.sinh(p)
+    return 1.0, L, 0.0                                          # дрейф
+
+
+# ---- СИМПЛЕКТИЧЕСКИЙ СЕКТОРНЫЙ ИНТЕГРАТОР (порт elegant CSBEND integrate_csbend_ordn) ------------
+# Точный гамильтониан изгиба: комбинированная функция (диполь+квадруполь+…) НЕЛИНЕЙНА — кривизна×градиент
+# рождает члены высших порядков. Линейная секторная карта (_body_sector) их теряет (DQ: ~8мкм остаток).
+# Здесь — дословный перенос elegant: точный секторный дрейф (движение по кругу в кривой раме) + кик поля с
+# фактором (1+X/ρ), расщепление Йошиды (порядок 2/4/6, N срезов). Координаты канонические (наш px ≡ elegant
+# QX = x'·(1+δ)/√(1+x'²+y'²)), опорная орбита = 0 в криволинейной рамке (fr_in/fr_out), конвертация не нужна.
+_YOSHIDA_BETA = 1.25992104989487316477            # 2^(1/3) — константа расщепления 4-го порядка (как в elegant)
+_SECTOR_LINEAR = os.environ.get("SS_SECTOR_LINEAR", "") == "1"   # откат на ЛИНЕЙНУЮ секторную карту (для сверки)
+# Срезов симплектического тела изгиба = N_SLICES из .lte (elegant единообразно ставит 5 всем элементам).
+# Бит-в-бит зависит от N: наш N обязан РАВНЯТЬСЯ elegant. БД держит n_slices=40 (дефолт сборки, для box-
+# модели квадов/секступолей), поэтому у сектора СВОЙ дефолт 5; env SS_SECTOR_NSL перекрывает для опытов.
+_SECTOR_NSLICES = 5
+
+
+def _yoshida(order):
+    """Коэффициенты (дрейф, кик) симплектического расщепления Йошиды — дословно из elegant integrate_csbend_ordn.
+    order 2 — leapfrog; 4 — Форест–Рут (BETA=2^(1/3)); 6 — из AOP-TN-2020-064. Последний кик каждого шага = 0."""
+    if order == 2:
+        return [0.5, 0.5], [1.0, 0.0]
+    if order == 4:
+        b = _YOSHIDA_BETA
+        d = [0.5 / (2 - b), (1 - b) / (2 - b) / 2, (1 - b) / (2 - b) / 2, 0.5 / (2 - b)]
+        k = [1.0 / (2 - b), -b / (2 - b), 1.0 / (2 - b), 0.0]
+        return d, k
+    if order == 6:
+        d = [0.39225680523878, 0.5100434119184585, -0.47105338540975655, 0.0687531682525181,
+             0.0687531682525181, -0.47105338540975655, 0.5100434119184585, 0.39225680523878]
+        k = [0.784513610477560, 0.235573213359357, -1.17767998417887, 1.3151863206839063,
+             -1.17767998417887, 0.235573213359357, 0.784513610477560, 0.0]
+        return d, k
+    raise ValueError(f"порядок интегрирования {order} — допустимы 2/4/6")
+
+
+def _csbend_fields(x, y, b1, b2, b3, b4, h):
+    """Нормированное поле (Fx, Fy) комбинированной функции до 4-го порядка — порт elegant computeCSBENDFields
+    для НОРМАЛЬНЫХ мультиполей (скью = 0). b_n = k_n·ρ (b1=градиент/квад, b2=секступоль, b3=октуполь), h=1/ρ.
+    Кривизна h подмешивает члены высших порядков (напр. Fy ⊃ −(h·b1)/2·y²; Fy ⊃ −(h³·b1)/2·x²y²) — вот
+    источник нелинейности изгиба, который линейная карта не видит. Fy чётно по y, Fx нечётно (нормальные)."""
+    h2 = h * h; h3 = h2 * h
+    x2 = x * x; y2 = y * y
+    Fy = (1.0
+          + b1 * x + 0.5 * b2 * x2 + (b3 / 6.0) * x2 * x + (b4 / 24.0) * x2 * x2
+          + (-(h * b1) / 2.0 - b2 / 2.0) * y2
+          + ((h2 * b1) / 2.0 - (h * b2) / 2.0 - b3 / 2.0) * x * y2
+          + (-(h3 * b1) / 2.0 + (h2 * b2) / 2.0 - (h * b3) / 4.0 - b4 / 4.0) * x2 * y2
+          + ((h3 * b1) / 24.0 - (h2 * b2) / 24.0 + (h * b3) / 12.0 + b4 / 24.0) * y2 * y2)
+    Fx = (b1 * y + b2 * x * y + (b3 / 2.0) * x2 * y + (b4 / 6.0) * x2 * x * y
+          + ((h2 * b1) / 6.0 - (h * b2) / 6.0 - b3 / 6.0) * y2 * y
+          + (-(h3 * b1) / 3.0 + (h2 * b2) / 3.0 - (h * b3) / 6.0 - b4 / 6.0) * x * y2 * y)
+    return Fx, Fy
+
+
 def _drift(st, ell):
     """Точный дрейф на длину ell вдоль локальной оси (δ-корректный, канонический)."""
     x, px, y, py, t, d = st
@@ -145,7 +209,7 @@ class Magnet:
         # плоскости ⊥ оси (как раньше). Для ДИПОЛЯ в секторном режиме — КРИВОЛИНЕЙНЫЕ рамки: грань ⊥
         # касательной опорной дуги, опорная орбита проходит через точку рамки (x=0). Тогда секторная карта
         # тела ложится напрямую (опорная = 0 на входе и выходе), а modified_drift стыкует к наклонной грани.
-        self.sector = SECTOR and self.kind == "dipole" and abs(self.theta0) > 0
+        self.sector = SECTOR and self.kind in ("dipole", "dq") and abs(self.theta0) > 0
         if self.sector:
             rho = self.Leff / self.theta0
             O = self.center + rho * self.uhat                  # центр кривизны дуги
@@ -155,6 +219,11 @@ class Magnet:
                           _rotz(self.uhat, -self.theta0 / 2.0), self.vhat)
             self.fr_out = (self.exit_pt, _rotz(self.axis, self.theta0 / 2.0),
                            _rotz(self.uhat, self.theta0 / 2.0), self.vhat)
+            # Симплектический интегратор: N срезов и порядок КАК В ELEGANT (бит-в-бит зависит от обоих).
+            # elegant CSBEND: N_SLICES=5 из .lte, INTEGRATION_ORDER=4 по умолчанию. Дефолт N — _SECTOR_NSLICES
+            # (5, зеркало .lte), НЕ self.nsl из БД (там 40 для box-модели); env SS_SECTOR_NSL перекрывает.
+            self._nsl_sector = int(os.environ.get("SS_SECTOR_NSL", "") or _SECTOR_NSLICES)
+            self._yoshida_dk = _yoshida(int(os.environ.get("SS_SECTOR_ORDER", "") or 4))
         else:
             self.fr_in = (self.entry, self.axis, self.uhat, self.vhat)
             self.fr_out = (self.exit, self.axis, self.uhat, self.vhat)
@@ -183,20 +252,83 @@ class Magnet:
 
     def _body_sector(self, st):
         """ТОЧНЫЙ СЕКТОР (линейная карта) в криволинейной рамке: опорная=0 на входе/выходе. Тело =
-        край(E1)·сектор(L,θ)·край(E2). Даёт R11/R12/R16/R21/R22/R26 аналитически (сверено с elegant).
-        Края — тонкие линзы на ⊥касательных гранях (kEdge1/2 = tan(E)/ρ). Верт. = дрейф по дуге."""
+        край(E1)·сектор·край(E2). КОМБИНИРОВАННАЯ функция (диполь+квадруполь): гор. фокусировка
+        K_x=1/ρ²+k1, верт. K_y=−k1v, через cos/cosh. Чистый диполь = частный случай k1=0 (K_x=1/ρ²).
+        Дисперсия R16=h(1−C_x)/K_x, R26=h·S_x, h=1/ρ. Края — тонкие линзы tan(E)/ρ на ⊥касат. гранях.
+        Даёт R11/R12/R16/R21/R22/R26/R33/R34/R43/R44 аналитически (сверено с elegant для DL и DQ)."""
         x, px, y, py, t, d = st
-        c = math.cos(self.theta0); s = math.sin(self.theta0)
-        rho = self.Leff / self.theta0
-        px += self.kEdge1 * x; py -= self.kEdge1 * y            # вход: край E1
+        h = self.theta0 / self.Leff                            # кривизна 1/ρ
+        Kx = h * h + self.k1                                   # гор. фокусировка (сектор + квадруполь)
+        Ky = -self.k1v                                         # верт. фокусировка (квадруполь; сектор верт. не фокус.)
+        Cx, Sx, Spx = _foc(Kx, self.Leff)
+        Cy, Sy, Spy = _foc(Ky, self.Leff)
+        R16 = h * (1.0 - Cx) / Kx if abs(Kx) > 1e-12 else h * self.Leff * self.Leff / 2.0
+        R26 = h * Sx
         disp = _SECTOR_DISP                                     # знак дисперсии под конвенцию «+x наружу»
-        x1 = c * x + rho * s * px + disp * rho * (1.0 - c) * d
-        px1 = -(s / rho) * x + c * px + disp * s * d
-        y1 = y + self.Leff * py
-        py1 = py
+        px += self.kEdge1 * x; py -= self.kEdge1 * y            # вход: край E1
+        x1 = Cx * x + Sx * px + disp * R16 * d
+        px1 = Spx * x + Cx * px + disp * R26 * d
+        y1 = Cy * y + Sy * py
+        py1 = Spy * y + Cy * py
         x, px, y, py = x1, px1, y1, py1
         px += self.kEdge2 * x; py -= self.kEdge2 * y            # выход: край E2
         return (x, px, y, py, t + self.Leff, d)
+
+    def _body_sector_symplectic(self, st):
+        """ТОЧНЫЙ секторный интегратор изгиба — дословный порт elegant CSBEND integrate_csbend_ordn.
+
+        Комбинированная функция (диполь+квадруполь) НЕЛИНЕЙНА: кривизна связывается с градиентом и рождает
+        члены x²/x·y²/… которые линейная карта _body_sector теряет (DQ давал ~8мкм на выходе). Здесь на каждом
+        срезе — симплектический drift-kick:
+          • ДРЕЙФ точный, по кругу в криволинейной рамке (asin/sin/cos, фактор (ρ+X)) — не прямой;
+          • КИК поля _csbend_fields с множителем (1+X/ρ) — вот он и делает линейный градиент нелинейным.
+        Опорная орбита = 0 на входе/выходе (рамки fr_in/fr_out криволинейны), координаты уже канонические
+        (px ≡ elegant QX) ⇒ конвертация slope↔canonical не нужна. N срезов и порядок Йошиды = как elegant.
+        Края E1/E2 — тонкие линзы tan(E)/ρ на ⊥касат. гранях (elegant edge_order=1, edge_effects=1)."""
+        x, px, y, py, t, d = st
+        # ρ0 в КОНВЕНЦИИ ELEGANT (положительный): elegant rho0=L/ANGLE, а наш θ0=−ANGLE ⇒ rho0=−Leff/θ0.
+        # Это КРИТИЧНО: знак ρ0 задаёт знак нелинейности изгиба (фактор (1+X/ρ), члены h·b в поле) и
+        # дисперсии. С нашим θ0<0 напрямую они выходили ЗЕРКАЛЬНЫМИ (DQ давал −16мкм вместо +8). При
+        # rho0=−Leff/θ0>0 всё совпадает с elegant бит-в-бит (b1=k1·rho0 ≡ elegant K1·rho0). Наши (x,px,δ)
+        # уже в знаках elegant (сверено по фокус./верт. R-блоку), геометрию поворота держат рамки fr_in/fr_out.
+        rho0 = -self.Leff / self.theta0                        # ρ>0 (конвенция elegant), θ0<0 у изгиба
+        h = 1.0 / rho0                                         # кривизна 1/ρ = −θ0/Leff
+        b1 = self.k1 * rho0; b2 = self.k2 * rho0; b3 = self.k3 * rho0; b4 = 0.0   # b_n = k_n·ρ (норм. мультиполи)
+        N = self._nsl_sector; s = self.Leff / N
+        dfrac, kfrac = self._yoshida_dk
+        px += self.kEdge1 * x; py -= self.kEdge1 * y           # вход: краевой фокус E1
+        X, QX, Y, QY, DP = x, px, y, py, d                     # elegant-обозначения (наши канонические координаты)
+        dist = 0.0
+        for _ in range(N):
+            for j in range(len(dfrac)):
+                dsh = s * dfrac[j]                             # -- точный секторный ДРЕЙФ (движение по кругу) --
+                f = (1.0 + DP) ** 2 - QY * QY
+                if f <= 0.0:
+                    raise ParticleLost("сектор: p⊥>p (потеря в дрейфе)")
+                f = math.sqrt(f)
+                if abs(QX / f) > 1.0:
+                    raise ParticleLost("сектор: |QX/f|>1 (потеря в дрейфе)")
+                sin_phi = QX / f
+                phi = math.asin(sin_phi)
+                sine = math.sin(dsh / rho0 + phi); cosi = math.cos(dsh / rho0 + phi)
+                if cosi == 0.0:
+                    raise ParticleLost("сектор: cos=0 (потеря в дрейфе)")
+                cos_phi = math.cos(phi)
+                QX = f * sine
+                factor = (rho0 + X) * cos_phi / f * (sine / cosi - sin_phi / cos_phi)
+                Y += QY * factor
+                dist += factor * (1.0 + DP)
+                fr = cos_phi / cosi
+                X = rho0 * (fr - 1.0) + fr * X
+                if kfrac[j] == 0.0:
+                    break
+                ds = s * kfrac[j]                              # -- КИК поля с фактором кривизны (1+X/ρ) --
+                Fx, Fy = _csbend_fields(X, Y, b1, b2, b3, b4, h)
+                QX += -ds * (1.0 + X / rho0) * Fy / rho0
+                QY += ds * (1.0 + X / rho0) * Fx / rho0
+        x, px, y, py, d = X, QX, Y, QY, DP
+        px += self.kEdge2 * x; py -= self.kEdge2 * y           # выход: краевой фокус E2
+        return (x, px, y, py, t + dist, d)
 
     def body(self, st):
         """Тело: N срезов drift-kick-drift по ЭФФЕКТИВНОЙ длине (ds_g=ds_f=L_eff/N) ⇒ полный изгиб/
@@ -205,8 +337,10 @@ class Magnet:
 
         У изгибающих элементов мультиполи и края берут u = x − xref (отклонение от ИЗОГНУТОЙ опорной),
         а не x от оси ящика — см. _ref_bow. Для неизгибающих xref=None ⇒ u≡x, поведение бит-в-бит."""
-        if self.sector:                                        # ДИПОЛЬ в секторном режиме — точная карта
-            return self._body_sector(st)
+        if self.sector:                                        # изгиб в секторном режиме
+            if _SECTOR_LINEAR:                                 # SS_SECTOR_LINEAR=1 — линейная карта (сверка/чистый диполь)
+                return self._body_sector(st)
+            return self._body_sector_symplectic(st)            # по умолчанию — точный симплектический интегратор
         if not self.nonzero:                                   # выключенный — дрейф (нулевой элемент)
             return _drift(st, self.L)
         th, k1, k1v, k2, k3, kE = self.theta0, self.k1, self.k1v, self.k2, self.k3, self.kEdge

@@ -1256,3 +1256,4 @@ DIP: LINE=(DL1A_5,DL1A_4,DL1A_3,DL1A_2,DL1A_1)
 
 ! участок: квадруполь + линейка 5 диполей + квадруполь
 SEC: LINE=(QD2A,DR_05,DL1A_5,DL1A_4,DL1A_3,DL1A_2,DL1A_1,DR_06,QD3A)
+DQBEND: LINE=(DQ1B)
