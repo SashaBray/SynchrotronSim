@@ -76,7 +76,7 @@ def _anim_html(traj_idx, traj_col):
     return (r"""<div id="ssac" style="position:fixed;left:12px;bottom:12px;z-index:9999;font:13px sans-serif;
 background:rgba(255,255,255,.9);border:1px solid #ccc;border-radius:8px;padding:8px 11px;box-shadow:0 1px 5px rgba(0,0,0,.15)">
 <button id="ssap" style="cursor:pointer;border:1px solid #888;border-radius:5px;background:#fff;padding:3px 10px;font:13px sans-serif">&#9654; animate</button>
-&nbsp;скорость <input id="ssas" type="range" min="1" max="40" value="8" style="vertical-align:middle;width:90px">
+&nbsp;скорость <input id="ssas" type="range" min="-100" max="100" value="0" style="vertical-align:middle;width:120px" title="÷20 … 2с … ×20">
 </div>
 <script>
 (function(){
@@ -108,8 +108,8 @@ background:rgba(255,255,255,.9);border:1px solid #ccc;border-radius:8px;padding:
   }));
   var comet=TRAJ.map(function(_,i){return base+i;});
   var pos=TRAJ.map(function(){return 0;}), RUN=false, last=0;  // pos — ДРОБНАЯ позиция головы; анимация ВЫКЛ по умолч.
-  var sp=document.getElementById('ssas'), speed=10; sp.value=speed;   // 10 ≈ полный проход ~20с; ползунок 1..40
-  sp.oninput=function(){speed=+sp.value;};
+  var sp=document.getElementById('ssas'), factor=1; sp.value=0;       // проход за 2с при factor=1 (ползунок в центре)
+  sp.oninput=function(){factor=Math.pow(20,(+sp.value)/100);};        // лог-шкала: −100→÷20 (40с) … 0→2с … +100→×20 (0.1с)
   function empty(){return comet.map(function(){return[];});}
   var pb=document.getElementById('ssap');
   pb.onclick=function(){                                        // кнопка animate: вкл/выкл анимацию
@@ -120,11 +120,17 @@ background:rgba(255,255,255,.9);border:1px solid #ccc;border-radius:8px;padding:
     Plotly.restyle(g,{x:empty(),y:empty(),z:empty()},comet);
     Plotly.restyle(g,{opacity:1},TRAJ);}
   };
+  var dragging=false;                                          // во время вращения/зума камеры НЕ перерисовываем сцену
+  g.addEventListener('mousedown',function(){dragging=true;},true);   // capture — сработает, даже если plotly гасит всплытие
+  g.addEventListener('touchstart',function(){dragging=true;},{capture:true,passive:true});
+  window.addEventListener('mouseup',function(){dragging=false;},true);
+  window.addEventListener('touchend',function(){dragging=false;},true);
+  g.addEventListener('wheel',function(){dragging=true;clearTimeout(g._ssw);g._ssw=setTimeout(function(){dragging=false;},200);},{capture:true,passive:true});
   function step(ts){
    requestAnimationFrame(step);
-   if(!RUN){last=ts;return;}
+   if(!RUN||dragging){last=ts;return;}                         // пауза перерисовки, пока крутят камеру
    var dt=Math.min(64,ts-last); last=ts;                       // мс с прошлого кадра (кап против фризов/фона)
-   var vel=n*speed/200000;                                     // индексов/мс — время-зависимо (плавно, независимо от FPS)
+   var vel=n*factor/2000;                                      // индексов/мс: проход за 2/factor с (независимо от n и FPS)
    var xs=[],ys=[],zs=[],cs=[];
    for(var i=0;i<comet.length;i++){
     var p=paths[i],P=pos[i],hi=Math.floor(P),lo=Math.max(0,hi-TAIL);
