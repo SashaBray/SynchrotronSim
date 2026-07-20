@@ -101,7 +101,7 @@ background:rgba(255,255,255,.9);border:1px solid #ccc;border-radius:8px;padding:
   var paths=TRAJ.map(function(ix){var t=g.data[ix],x=arr(t.x);return{x:x,y:arr(t.y),z:arr(t.z),n:x.length};});
   var n=paths.length?paths[0].n:0;
   if(n<2)return;
-  var TAIL=Math.min(300,Math.max(20,Math.round(n*0.1)));       // длина следа ~10% пути (голова→хвост)
+  var TAIL=Math.min(150,Math.max(10,Math.round(n*0.05)));      // длина следа ~5% пути (голова→хвост) — тает вдвое быстрее
   var base=g.data.length;
   Plotly.addTraces(g,TRAJ.map(function(ix,i){                  // след = ЛИНИЯ с градиентом цвет→белый (угасает к хвосту)
     var c=COL[i].replace('#',''),R=parseInt(c.substr(0,2),16),G=parseInt(c.substr(2,2),16),Bc=parseInt(c.substr(4,2),16);
