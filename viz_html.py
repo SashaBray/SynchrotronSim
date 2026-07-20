@@ -120,16 +120,24 @@ background:rgba(255,255,255,.9);border:1px solid #ccc;border-radius:8px;padding:
     Plotly.restyle(g,{x:empty(),y:empty(),z:empty()},comet);
     Plotly.restyle(g,{opacity:1},TRAJ);}
   };
-  var dragging=false;                                          // во время вращения/зума камеры НЕ перерисовываем сцену
-  g.addEventListener('mousedown',function(){dragging=true;},true);   // capture — сработает, даже если plotly гасит всплытие
-  g.addEventListener('touchstart',function(){dragging=true;},{capture:true,passive:true});
-  window.addEventListener('mouseup',function(){dragging=false;},true);
-  window.addEventListener('touchend',function(){dragging=false;},true);
-  g.addEventListener('wheel',function(){dragging=true;clearTimeout(g._ssw);g._ssw=setTimeout(function(){dragging=false;},200);},{capture:true,passive:true});
+  var dragging=false, dtimer=null;                             // пока двигают камеру — НЕ перерисовываем сцену
+  function hold(){dragging=true; if(dtimer){clearTimeout(dtimer); dtimer=null;}}      // кнопка зажата — пауза до отпускания
+  function release(){if(dtimer)clearTimeout(dtimer); dtimer=setTimeout(function(){dragging=false;},150);}
+  function pulse(){dragging=true; if(dtimer)clearTimeout(dtimer); dtimer=setTimeout(function(){dragging=false;},300);}
+  if(g.on)g.on('plotly_relayouting',pulse);                    // gl3d шлёт это ВО ВРЕМЯ вращения/зума камеры — надёжный сигнал
+  document.addEventListener('pointerdown',function(e){if(g.contains(e.target))hold();},true);   // на document+capture — не пропустим
+  document.addEventListener('mousedown',function(e){if(g.contains(e.target))hold();},true);
+  document.addEventListener('touchstart',function(e){if(g.contains(e.target))hold();},{capture:true,passive:true});
+  window.addEventListener('pointerup',release,true);
+  window.addEventListener('mouseup',release,true);
+  window.addEventListener('touchend',release,true);
+  g.addEventListener('wheel',pulse,{capture:true,passive:true});
   function step(ts){
    requestAnimationFrame(step);
-   if(!RUN||dragging){last=ts;return;}                         // пауза перерисовки, пока крутят камеру
-   var dt=Math.min(64,ts-last); last=ts;                       // мс с прошлого кадра (кап против фризов/фона)
+   if(!RUN||dragging){last=ts;return;}                         // пауза перерисовки, пока крутят/зумят камеру
+   var dt=ts-last;
+   if(dt<33)return;                                            // троттлинг ~30 к/с — вдвое меньше нагрузки на поток
+   last=ts; dt=Math.min(64,dt);                                // мс с прошлого КАДРА (кап против фризов/фона)
    var vel=n*factor/2000;                                      // индексов/мс: проход за 2/factor с (независимо от n и FPS)
    var xs=[],ys=[],zs=[],cs=[];
    for(var i=0;i<comet.length;i++){
