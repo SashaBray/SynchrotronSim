@@ -48,28 +48,37 @@ def _total_tris(lc, hw):                                     # оценка по
     return tot
 
 
-def _deviation_fig(dev, labels):
-    """2D-график отклонения пробного пучка от опорной орбиты: x(s) сверху, y(s) снизу, линия на частицу."""
+def _deviation_fig(dev, labels, meta):
+    """2D-график отклонения пробного пучка от опорной орбиты: x(s) сверху, y(s) снизу, линия на частицу.
+    Ховер: координаты + № элемента по порядку + имя + суперпериод (из meta, общего для всех частиц)."""
     col = ["#555555", "#e15759", "#f28e2b", "#4e79a7", "#59a14f"]     # опорная серая, ±x тёплые, ±y холодные
-    fig2 = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.09,
+    name, midx, msp = meta["name"], meta["idx"], meta["sp"]
+    fig2 = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1,
                          subplot_titles=("Горизонтальное отклонение x(s)", "Вертикальное отклонение y(s)"))
     for i, d in enumerate(dev):
         if len(d) < 2:
             continue
+        L = len(d)
         s = d[:, 0]; x = d[:, 1] * 1e3; y = d[:, 2] * 1e3            # мм
         nm = labels[i] if i < len(labels) else f"P{i+1}"
         c = col[i % len(col)]; w = 2.0 if i == 0 else 1.1
-        fig2.add_trace(go.Scattergl(x=s, y=x, mode="lines", line=dict(width=w, color=c),
-                                    name=nm, legendgroup=nm), row=1, col=1)
-        fig2.add_trace(go.Scattergl(x=s, y=y, mode="lines", line=dict(width=w, color=c),
-                                    name=nm, legendgroup=nm, showlegend=False), row=2, col=1)
+        text = name[:L]; cust = np.column_stack([midx[:L], msp[:L]])   # %{text}=имя, customdata[0]=№, [1]=СП
+        ht = ("s = %{x:.2f} м · {ax} = %{y:+.3f} мм<br>элемент №%{customdata[0]}: %{text}"
+              "<br>суперпериод %{customdata[1]}<extra>%{fullData.name}</extra>")
+        fig2.add_trace(go.Scattergl(x=s, y=x, mode="lines", line=dict(width=w, color=c), name=nm, legendgroup=nm,
+                                    text=text, customdata=cust, hovertemplate=ht.replace("{ax}", "x")), row=1, col=1)
+        fig2.add_trace(go.Scattergl(x=s, y=y, mode="lines", line=dict(width=w, color=c), name=nm, legendgroup=nm,
+                                    showlegend=False, text=text, customdata=cust,
+                                    hovertemplate=ht.replace("{ax}", "y")), row=2, col=1)
     fig2.update_xaxes(title_text="s, м", row=2, col=1)
     fig2.update_yaxes(title_text="x, мм", row=1, col=1); fig2.update_yaxes(title_text="y, мм", row=2, col=1)
     fig2.update_xaxes(gridcolor="#eee", zeroline=False)
     fig2.update_yaxes(gridcolor="#eee", zeroline=True, zerolinecolor="#bbb", zerolinewidth=1)
-    fig2.update_layout(title="Отклонение пробного пучка от опорной орбиты (±1мм по x и y)",
-                       margin=dict(l=60, r=20, t=70, b=45), plot_bgcolor="white",
-                       legend=dict(orientation="h", y=1.12, x=0.5, xanchor="center", title="частица"))
+    fig2.update_layout(title=dict(text="Отклонение пробного пучка от опорной орбиты (±1мм по x и y)",
+                                  x=0.5, xanchor="center", y=0.99, yanchor="top"),
+                       margin=dict(l=65, r=135, t=64, b=55), plot_bgcolor="white", hovermode="closest",
+                       legend=dict(orientation="v", x=1.005, y=1.0, xanchor="left", yanchor="top",
+                                   title="частица", bgcolor="rgba(255,255,255,0.7)", bordercolor="#ddd", borderwidth=1))
     return fig2
 
 
@@ -137,8 +146,8 @@ def build(exp_id, lat, hw, kind, lc, decimate, glyph, out):
     # 2D-график отклонения ПРОБНОГО пучка от опорной орбиты (перетрек x,y секторным телом) — под 3D-сценой.
     dev_html = ""
     try:
-        dev, dlabels = mte.deviation_paths(int(lat))
-        dev_html = _deviation_fig(dev, dlabels).to_html(
+        dev, dlabels, dmeta = mte.deviation_paths(int(lat))
+        dev_html = _deviation_fig(dev, dlabels, dmeta).to_html(
             include_plotlyjs=False, full_html=False, default_width="100%", default_height="640",
             config={"responsive": True})
     except Exception as e:                                        # не рушим 3D, если отклонение не собралось

@@ -116,7 +116,9 @@ def deviation_paths(lattice, radius=1e-3, source="physical", settings=None):
     осциллируют бетатронно). На частицу ndarray (M,3): (s, x, y), где x,y — ЛОКАЛЬНЫЕ поперечные
     (= отклонение от опорной, x≡0 на ней в секторной рамке), s — ОПОРНАЯ арк-длина (Σ L тел + Σ осевой
     зазор; монотонна, в отличие от пути частицы st[4]). Трекинг m.body()+modified_drift (секторный при
-    SS_SECTOR=1 — как бит-в-бит; боксовый body_global рассогласован с криволин. рамками). (пути, метки).
+    SS_SECTOR=1 — как бит-в-бит; боксовый body_global рассогласован с криволин. рамками).
+    Возврат (пути, метки, meta), meta=dict(name/idx/sp) — метаданные ТОЧЕК для ховера (имя элемента,
+    № по порядку, суперпериод; общие для всех частиц, длина = полная траектория 2·N магнитов).
 
     Инжектированный пучок опыта тут НЕ берём: он у нас near-reference (<0.03мм) ⇒ график был бы плоским,
     а точки инжекц./финиш-плоскости дают ложные спайки. Пробный пучок показывает бетатрон наглядно."""
@@ -126,19 +128,28 @@ def deviation_paths(lattice, radius=1e-3, source="physical", settings=None):
     beam = [(0, 0, 0, 0, 0, 0), (r, 0, 0, 0, 0, 0), (-r, 0, 0, 0, 0, 0),
             (0, 0, r, 0, 0, 0), (0, 0, -r, 0, 0, 0)]
     labels = ["опорная", "+x", "−x", "+y", "−y"]
+    # МЕТАДАННЫЕ по точкам (общие для всех частиц — те же элементы в том же порядке): имя, № по порядку,
+    # суперпериод. СП считаем по длинным прямым (осевой зазор >2м = граница суперпериода; в БД поля СП нет).
+    gaps = [float((mags[j].fr_in[0] - mags[j - 1].fr_out[0]) @ mags[j - 1].fr_out[1]) for j in range(1, len(mags))]
+    name = ["старт"]; idx = [0]; sp = [1]; cur = 1
+    name.append(mags[0].dev); idx.append(1); sp.append(cur)                     # выход mags[0]
+    for j in range(1, len(mags)):
+        if gaps[j - 1] > 2.0:
+            cur += 1                                                            # пересекли длинную прямую
+        name += [mags[j].dev, mags[j].dev]; idx += [j + 1, j + 1]; sp += [cur, cur]   # вход, выход mags[j]
+    meta = dict(name=name, idx=idx, sp=sp)
     out = []
     for st0 in beam:
         st = tuple(map(float, st0)); s = 0.0; dev = [(0.0, st[0], st[2])]
         try:
             st = mags[0].body(st); s += mags[0].L; dev.append((s, st[0], st[2]))
             for j in range(1, len(mags)):
-                gap = float((mags[j].fr_in[0] - mags[j - 1].fr_out[0]) @ mags[j - 1].fr_out[1])   # опорный зазор
-                st = mt.modified_drift(st, mags[j - 1], mags[j]); s += gap; dev.append((s, st[0], st[2]))
+                st = mt.modified_drift(st, mags[j - 1], mags[j]); s += gaps[j - 1]; dev.append((s, st[0], st[2]))
                 st = mags[j].body(st); s += mags[j].L; dev.append((s, st[0], st[2]))
         except mt.ParticleLost:
             pass
         out.append(np.asarray(dev, float))
-    return out, labels
+    return out, labels, meta
 
 
 def write_bin(particles_pts, path):
