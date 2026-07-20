@@ -64,6 +64,79 @@ _LINK_JS = """<script>
 </script>"""
 
 
+def _anim_html(traj_idx, traj_col):
+    """Кометная анимация 3D: по каждой трассе траектории бежит частица с УГАСАЮЩИМ следом (маркеры,
+    цвет→белый + размер→0 к хвосту). Статические линии приглушаются (ghost-контекст полного пути).
+    Панель: пауза/пуск, скорость, «полные треки» (вернуть яркость линий). Работает на УЖЕ встроенных
+    массивах траектории (g.data[i].x/y/z) — файл не растёт. traj_idx — индексы трасс, traj_col — их цвета."""
+    import json
+    return (r"""<div id="ssac" style="position:fixed;left:12px;bottom:12px;z-index:9999;font:13px sans-serif;
+background:rgba(255,255,255,.9);border:1px solid #ccc;border-radius:8px;padding:8px 11px;box-shadow:0 1px 5px rgba(0,0,0,.15)">
+<button id="ssap" style="cursor:pointer;border:1px solid #888;border-radius:5px;background:#fff;padding:3px 9px;font:13px sans-serif">&#9208; пауза</button>
+&nbsp;скорость <input id="ssas" type="range" min="1" max="40" value="8" style="vertical-align:middle;width:90px">
+&nbsp;<label style="cursor:pointer;user-select:none"><input id="ssag" type="checkbox"> полные треки</label>
+</div>
+<script>
+(function(){
+ var TRAJ=__IDX__, COL=__COL__;
+ function wire(){
+  var d=document.querySelectorAll('.plotly-graph-div');
+  if(!d.length||!window.Plotly){setTimeout(wire,160);return;}
+  var g=d[0];
+  if(!g.data||!g.on){setTimeout(wire,160);return;}
+  function arr(a){                                             // массив / типизир. / base64-спека plotly typed array
+   if(a&&a.length!==undefined)return a;                        // уже готов (plotly декодировал на newPlot)
+   if(a&&a.bdata){var b=atob(a.bdata),L=b.length,u=new Uint8Array(L);for(var q=0;q<L;q++)u[q]=b.charCodeAt(q);
+    var D=a.dtype,B=u.buffer;                                  // plotly пишет numpy-коды: f4/f8/i4/…
+    if(D==='f4')return new Float32Array(B); if(D==='f8')return new Float64Array(B);
+    if(D==='i4')return new Int32Array(B);   if(D==='u4')return new Uint32Array(B);
+    if(D==='i2')return new Int16Array(B);   if(D==='u2')return new Uint16Array(B);
+    if(D==='i1')return new Int8Array(B);    if(D==='u1'||D==='u1c')return new Uint8Array(B);}
+   return a;
+  }
+  var paths=TRAJ.map(function(ix){var t=g.data[ix],x=arr(t.x);return{x:x,y:arr(t.y),z:arr(t.z),n:x.length};});
+  var n=paths.length?paths[0].n:0;
+  if(n<2)return;
+  var TAIL=Math.min(300,Math.max(20,Math.round(n*0.1)));       // длина следа ~10% пути (голова→хвост)
+  Plotly.restyle(g,{opacity:0.16},TRAJ);                       // приглушить статические линии (ghost)
+  var base=g.data.length;
+  Plotly.addTraces(g,TRAJ.map(function(){return{type:'scatter3d',mode:'markers',x:[],y:[],z:[],
+    hoverinfo:'skip',showlegend:false,marker:{size:[],color:[]}};}));
+  var comet=TRAJ.map(function(_,i){return base+i;});
+  var rgb=COL.map(function(h){h=h.replace('#','');return[parseInt(h.substr(0,2),16),parseInt(h.substr(2,2),16),parseInt(h.substr(4,2),16)];});
+  var head=TRAJ.map(function(){return 0;}), RUN=true, last=0;
+  var sp=document.getElementById('ssas'), speed=Math.max(1,Math.round(n/480)); sp.value=speed;
+  sp.oninput=function(){speed=+sp.value;};
+  var pb=document.getElementById('ssap');
+  pb.onclick=function(){RUN=!RUN;pb.innerHTML=RUN?'&#9208; пауза':'&#9654; пуск';};
+  var gh=document.getElementById('ssag');
+  gh.onchange=function(){Plotly.restyle(g,{opacity:gh.checked?1:0.16},TRAJ);};
+  function step(ts){
+   requestAnimationFrame(step);
+   if(!RUN||ts-last<33)return;                                 // ~30 к/с
+   last=ts;
+   var xs=[],ys=[],zs=[],cs=[],ss=[];
+   for(var i=0;i<comet.length;i++){
+    var p=paths[i],h=head[i],lo=Math.max(0,h-TAIL+1),r=rgb[i];
+    var wx=[],wy=[],wz=[],wc=[],ws=[];
+    for(var k=lo;k<=h;k++){
+     var a=1-(h-k)/(TAIL-1), t=1-a;                            // a: 1 голова .. 0 хвост; t=1-a
+     wx.push(p.x[k]);wy.push(p.y[k]);wz.push(p.z[k]);
+     wc.push('rgba('+Math.round(r[0]+(255-r[0])*t)+','+Math.round(r[1]+(255-r[1])*t)+','+Math.round(r[2]+(255-r[2])*t)+','+(0.2+0.8*a).toFixed(3)+')');
+     ws.push(2.5+7*a);                                         // размер 9.5 голова .. 2.5 хвост
+    }
+    xs.push(wx);ys.push(wy);zs.push(wz);cs.push(wc);ss.push(ws);
+    head[i]=h+speed>=p.n?0:h+speed;                            // на конце — заново от плоскости инжекции
+   }
+   Plotly.restyle(g,{x:xs,y:ys,z:zs,'marker.color':cs,'marker.size':ss},comet);
+  }
+  requestAnimationFrame(step);
+ }
+ if(document.readyState!=='loading')wire();else document.addEventListener('DOMContentLoaded',wire);
+})();
+</script>""").replace("__IDX__", json.dumps(traj_idx)).replace("__COL__", json.dumps(traj_col))
+
+
 def _read(name):
     return list(csv.DictReader(open(os.path.join(WS, "tables", name), encoding="utf-8"), delimiter=";"))
 
@@ -168,17 +241,20 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out):
                                    marker=dict(size=3, color="black", symbol="diamond"), name=f"BPM ({len(bpm)})"))
 
     # ТРАЕКТОРИЯ = пробный пучок (глоб. X,Y,Z из dev[:,3:6]); ховер «имя · № · суперпериод · s»
+    traj_idx, traj_col = [], []                              # индексы/цвета трасс — для кометной анимации
     if dev:
         for i, d in enumerate(dev):
             if len(d) < 2:
                 continue
             ht = [f"{dmeta['name'][k]} · №{dmeta['idx'][k]} · суперпериод {dmeta['sp'][k]}<br>s = {d[k, 0]:.1f} м"
                   for k in range(len(d))]
+            col = DEV_COL[i % len(DEV_COL)]
             fig.add_trace(go.Scatter3d(x=d[:, 3].astype(np.float32), y=d[:, 4].astype(np.float32),
                                        z=d[:, 5].astype(np.float32), mode="lines",
-                                       line=dict(width=(6 if i == 0 else 4), color=DEV_COL[i % len(DEV_COL)]),
+                                       line=dict(width=(6 if i == 0 else 4), color=col),
                                        name=dlabels[i] if i < len(dlabels) else f"P{i+1}",
                                        text=ht, hovertemplate="%{text}<extra>%{fullData.name}</extra>"))
+            traj_idx.append(len(fig.data) - 1); traj_col.append(col)
 
     # ПОДЗАГОЛОВОК: сколько оборотов, замкнута ли орбита, невязка (секторным телом — как график отклонения).
     sub = ""
@@ -215,12 +291,13 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out):
 
     s3d = fig.to_html(include_plotlyjs="inline", full_html=False, default_width="100%",
                       default_height="78vh", config={"responsive": True})
+    anim = _anim_html(traj_idx, traj_col) if traj_idx else ""    # кометная анимация частиц с угасающим следом
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:                   # 3D сверху, график отклонения снизу — один файл
         f.write("<!doctype html><html><head><meta charset='utf-8'>"
                 f"<title>SynchrotronSim — эксперимент {exp_id}</title></head>"
                 f"<body style='margin:0;padding-top:16px;font-family:sans-serif'>{s3d}{dev_html}"
-                f"{_LINK_JS if dev_html else ''}</body></html>")
+                f"{_LINK_JS if dev_html else ''}{anim}</body></html>")
     print(f"[OK] {out}")
     print(f"     {os.path.getsize(out)/1e6:.1f} МБ ({mode}); {ntri:,} треуг. магнитов, "
           f"{len(dev) if dev else 0} частиц (пробный пучок){' + график отклонения' if dev_html else ''}. "
