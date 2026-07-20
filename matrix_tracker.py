@@ -210,6 +210,15 @@ class Magnet:
         # касательной опорной дуги, опорная орбита проходит через точку рамки (x=0). Тогда секторная карта
         # тела ложится напрямую (опорная = 0 на входе и выходе), а modified_drift стыкует к наклонной грани.
         self.sector = SECTOR and self.kind in ("dipole", "dq") and abs(self.theta0) > 0
+        # ПРЯМОЙ (не изгибающий) мультиполь в секторном режиме — симплектика KQUAD/KSEXT/KOCT (порт elegant
+        # integrate_kick_multipole_ordn, order 4, N=5). Даёт квады/секступоли/октуполи бит-в-бит с elegant
+        # (box-модель = order 2, N=40 давала ~0.13мкм/шт). Рамки — обычные ⊥оси (прямой элемент, ветка else).
+        self.kick_sector = (SECTOR and not self.sector and self.nonzero
+                            and self.kind in ("quad", "sext", "oct"))
+        if self.sector or self.kick_sector:
+            # N срезов и порядок Йошиды = как elegant (N_SLICES=5, INTEGRATION_ORDER=4); env перекрывает.
+            self._nsl_sector = int(os.environ.get("SS_SECTOR_NSL", "") or _SECTOR_NSLICES)
+            self._yoshida_dk = _yoshida(int(os.environ.get("SS_SECTOR_ORDER", "") or 4))
         if self.sector:
             rho = self.Leff / self.theta0
             O = self.center + rho * self.uhat                  # центр кривизны дуги
@@ -219,11 +228,6 @@ class Magnet:
                           _rotz(self.uhat, -self.theta0 / 2.0), self.vhat)
             self.fr_out = (self.exit_pt, _rotz(self.axis, self.theta0 / 2.0),
                            _rotz(self.uhat, self.theta0 / 2.0), self.vhat)
-            # Симплектический интегратор: N срезов и порядок КАК В ELEGANT (бит-в-бит зависит от обоих).
-            # elegant CSBEND: N_SLICES=5 из .lte, INTEGRATION_ORDER=4 по умолчанию. Дефолт N — _SECTOR_NSLICES
-            # (5, зеркало .lte), НЕ self.nsl из БД (там 40 для box-модели); env SS_SECTOR_NSL перекрывает.
-            self._nsl_sector = int(os.environ.get("SS_SECTOR_NSL", "") or _SECTOR_NSLICES)
-            self._yoshida_dk = _yoshida(int(os.environ.get("SS_SECTOR_ORDER", "") or 4))
         else:
             self.fr_in = (self.entry, self.axis, self.uhat, self.vhat)
             self.fr_out = (self.exit, self.axis, self.uhat, self.vhat)
@@ -330,6 +334,29 @@ class Magnet:
         px += self.kEdge2 * x; py -= self.kEdge2 * y           # выход: краевой фокус E2
         return (x, px, y, py, t + dist, d)
 
+    def _body_kick_symplectic(self, st):
+        """Прямой (не изгибающий) мультиполь — порт elegant `integrate_kick_multipole_ordn` (KQUAD/KSEXT/KOCT).
+
+        Дрейф по СЛОПУ (наш _drift: x+=x'·ds, x'=px/√((1+δ)²−px²−py²)) + канонический НОРМАЛЬНЫЙ мультипольный
+        кик, расщепление Йошиды порядка 4, N=5 срезов — ровно как elegant (INTEGRATION_ORDER=4, N_SLICES=5).
+        Наши px,py уже канонические (≡ elegant qx,qy), конвертация slope↔canonical встроена в _drift/кик. Кик
+        тот же нормальный мультиполь, что в box-теле (квад −k1·x/+k1v·y, секступоль, октуполь). ОТЛИЧИЕ от box:
+        порядок 4 (box = 2, leapfrog) и N=5 (box = 40) ⇒ бит-в-бит с elegant (box давал ~0.13мкм/шт на квадах).
+        Прямой квад фринджа не имеет (elegant EDGE1_EFFECTS=0 по умолчанию), краевых киков нет."""
+        x, px, y, py, t, d = st
+        k1, k1v, k2, k3 = self.k1, self.k1v, self.k2, self.k3
+        N = self._nsl_sector; ds = self.Leff / N
+        dfrac, kfrac = self._yoshida_dk
+        for _ in range(N):
+            for j in range(len(dfrac)):
+                x, px, y, py, t, d = _drift((x, px, y, py, t, d), ds * dfrac[j])   # дрейф по слопу
+                if kfrac[j] == 0.0:
+                    break
+                kf = ds * kfrac[j]                             # доля кика на этот подшаг × длина среза
+                px += (-k1 * x - 0.5 * k2 * (x * x - y * y) - (k3 / 6.0) * (x ** 3 - 3.0 * x * y * y)) * kf
+                py += (k1v * y + k2 * x * y + (k3 / 6.0) * (3.0 * x * x * y - y ** 3)) * kf
+        return (x, px, y, py, t, d)
+
     def body(self, st):
         """Тело: N срезов drift-kick-drift по ЭФФЕКТИВНОЙ длине (ds_g=ds_f=L_eff/N) ⇒ полный изгиб/
         фокус = k·L_eff (совпадает с .lte). Чистый диполь = только кик изгиба (без фокусировки);
@@ -341,6 +368,8 @@ class Magnet:
             if _SECTOR_LINEAR:                                 # SS_SECTOR_LINEAR=1 — линейная карта (сверка/чистый диполь)
                 return self._body_sector(st)
             return self._body_sector_symplectic(st)            # по умолчанию — точный симплектический интегратор
+        if self.kick_sector and not _SECTOR_LINEAR:            # прямой мультиполь — симплектика KQUAD/KSEXT/KOCT
+            return self._body_kick_symplectic(st)              # (при SS_SECTOR_LINEAR=1 падает на box-модель ниже)
         if not self.nonzero:                                   # выключенный — дрейф (нулевой элемент)
             return _drift(st, self.L)
         th, k1, k1v, k2, k3, kE = self.theta0, self.k1, self.k1v, self.k2, self.k3, self.kEdge
