@@ -513,19 +513,22 @@ PURE_DRIFT = os.environ.get("SS_PURE_DRIFT", "") == "1"    # ОПЫТ: elegant-�
 
 
 def _pure_drift(st, A, B):
-    """ЧИСТЫЙ дрейф (как в elegant): прямой отрезок вдоль оси A, выходная плоскость ПАРАЛЛЕЛЬНА входной
-    (обе ⊥ axis_A). Длина — до плоскости ⊥axis_A, проходящей через локальное начало B (B.entry).
-    Затем состояние переразлагается в рамке B при B.entry. Наклон грани B учитывается НЕ здесь, а
-    краевым киком в теле B (kEdge1) — так же, как отделяет дрейф от края elegant.
+    """ЧИСТЫЙ дрейф (как в elegant): прямой отрезок вдоль оси ВЫХОДА A, выходная плоскость ПАРАЛЛЕЛЬНА
+    входной (обе ⊥ axis_A). Длина — до плоскости ⊥axis_A, проходящей через начало рамки входа B.
+    Затем состояние переразлагается в рамке входа B. Наклон грани B учитывается НЕ здесь, а краевым
+    киком в теле B (kEdge1) — так же, как отделяет дрейф от края elegant. Рамки — fr_out(A)/fr_in(B):
+    у диполя-сектора это КРИВОЛИНЕЙНЫЕ грани (⊥ касательной опорной), у прочих — ⊥ оси ящика.
     δ-корректно (p_полный сохраняется). st в системе A → st в системе B, + путь."""
-    Ld = 0.0 if getattr(B, "same_plane_as_prev", False) else float((B.entry - A.exit) @ A.axis)
+    aP, aAx, aU, aV = A.fr_out
+    bP, bAx, bU, bV = B.fr_in
+    Ld = 0.0 if getattr(B, "same_plane_as_prev", False) else float((bP - aP) @ aAx)
     x2, px2, y2, py2, t2, d = _drift(st, Ld)                   # прямой δ-корректный дрейф вдоль axis_A
-    P = A.exit + Ld * A.axis + x2 * A.uhat + y2 * A.vhat       # глоб. позиция на выходной плоскости дрейфа
+    P = aP + Ld * aAx + x2 * aU + y2 * aV                      # глоб. позиция на выходной плоскости дрейфа
     ps = math.sqrt((1.0 + d) ** 2 - px2 * px2 - py2 * py2)
-    dir_ = (px2 * A.uhat + py2 * A.vhat + ps * A.axis) / (1.0 + d)
-    rel = P - B.entry                                         # плоскость дрейфа проходит через B.entry ⇒ rel·axis_B мал
-    x3 = float(rel @ B.uhat); y3 = float(rel @ B.vhat)
-    px3 = (1.0 + d) * float(dir_ @ B.uhat); py3 = (1.0 + d) * float(dir_ @ B.vhat)
+    dir_ = (px2 * aU + py2 * aV + ps * aAx) / (1.0 + d)
+    rel = P - bP                                              # плоскость дрейфа проходит через bP ⇒ rel·axis_B мал
+    x3 = float(rel @ bU); y3 = float(rel @ bV)
+    px3 = (1.0 + d) * float(dir_ @ bU); py3 = (1.0 + d) * float(dir_ @ bV)
     return (x3, px3, y3, py3, t2, d)
 
 
