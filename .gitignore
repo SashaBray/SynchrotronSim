@@ -89,3 +89,10 @@ workspace/tables/*.leff_tuned
 # сверка траекторий: архивы (генерируемые) и временные файлы elegant
 workspace/results/traj_compare/
 elegant_run/_trajcmp.*
+
+# gap-эксперимент (одноразовая диагностика дисперсии) и доп. снимки БД
+workspace/lte/configuration_v1_gap/
+elegant_run/syla_gap.lte
+elegant_run/gap_track.*
+elegant_run/sp1_gap_elegant.txt
+workspace/tables/snapshot_closed/
