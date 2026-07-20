@@ -109,6 +109,38 @@ class Thinner:
         return np.asarray(self.out, dtype=np.float64)
 
 
+def deviation_paths(lattice, radius=1e-3, source="physical", settings=None):
+    """Отклонение ПРОБНОГО пучка от ОПОРНОЙ орбиты вдоль решётки — для 2D-графиков x(s), y(s).
+
+    Пучок = [опорная(0), +x, −x, +y, −y] со смещением radius (наглядно: опорная лежит на 0, смещённые
+    осциллируют бетатронно). На частицу ndarray (M,3): (s, x, y), где x,y — ЛОКАЛЬНЫЕ поперечные
+    (= отклонение от опорной, x≡0 на ней в секторной рамке), s — ОПОРНАЯ арк-длина (Σ L тел + Σ осевой
+    зазор; монотонна, в отличие от пути частицы st[4]). Трекинг m.body()+modified_drift (секторный при
+    SS_SECTOR=1 — как бит-в-бит; боксовый body_global рассогласован с криволин. рамками). (пути, метки).
+
+    Инжектированный пучок опыта тут НЕ берём: он у нас near-reference (<0.03мм) ⇒ график был бы плоским,
+    а точки инжекц./финиш-плоскости дают ложные спайки. Пробный пучок показывает бетатрон наглядно."""
+    eff, phys, coup, trans = mt.load_db()
+    mags = mt.build_line(lattice, eff, phys, coup, trans, source=source, settings=settings)
+    r = float(radius)
+    beam = [(0, 0, 0, 0, 0, 0), (r, 0, 0, 0, 0, 0), (-r, 0, 0, 0, 0, 0),
+            (0, 0, r, 0, 0, 0), (0, 0, -r, 0, 0, 0)]
+    labels = ["опорная", "+x", "−x", "+y", "−y"]
+    out = []
+    for st0 in beam:
+        st = tuple(map(float, st0)); s = 0.0; dev = [(0.0, st[0], st[2])]
+        try:
+            st = mags[0].body(st); s += mags[0].L; dev.append((s, st[0], st[2]))
+            for j in range(1, len(mags)):
+                gap = float((mags[j].fr_in[0] - mags[j - 1].fr_out[0]) @ mags[j - 1].fr_out[1])   # опорный зазор
+                st = mt.modified_drift(st, mags[j - 1], mags[j]); s += gap; dev.append((s, st[0], st[2]))
+                st = mags[j].body(st); s += mags[j].L; dev.append((s, st[0], st[2]))
+        except mt.ParticleLost:
+            pass
+        out.append(np.asarray(dev, float))
+    return out, labels
+
+
 def write_bin(particles_pts, path):
     with open(path, "wb") as f:
         for pts in particles_pts:

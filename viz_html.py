@@ -12,11 +12,15 @@
 форсит полный STL, --decimate 0.9 — вручную.
 Запуск: py -3.14 viz_html.py <exp_id> [--both | --glyph] [--decimate 0..1] [--out путь.html]"""
 import sys, os, csv, argparse
+os.environ.setdefault("SS_SECTOR", "1")     # график отклонения считаем СЕКТОРНЫМ телом (бит-в-бит; иначе
+#                                             боксовое тело + криволин. рамки разбегаются). 3D из bin не зависит.
 import numpy as np
 import pyvista as pv
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from collections import defaultdict, Counter
 import visualize as vz
+import matrix_traj_export as mte
 
 WS = "workspace"
 HTML_DIR = os.path.join(WS, "results", "html")               # отдельная папка для передаваемых HTML-экспортов
@@ -42,6 +46,31 @@ def _total_tris(lc, hw):                                     # оценка по
         if os.path.exists(p):
             tot += max(0, (os.path.getsize(p) - 84) // 50) * n
     return tot
+
+
+def _deviation_fig(dev, labels):
+    """2D-график отклонения пробного пучка от опорной орбиты: x(s) сверху, y(s) снизу, линия на частицу."""
+    col = ["#555555", "#e15759", "#f28e2b", "#4e79a7", "#59a14f"]     # опорная серая, ±x тёплые, ±y холодные
+    fig2 = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.09,
+                         subplot_titles=("Горизонтальное отклонение x(s)", "Вертикальное отклонение y(s)"))
+    for i, d in enumerate(dev):
+        if len(d) < 2:
+            continue
+        s = d[:, 0]; x = d[:, 1] * 1e3; y = d[:, 2] * 1e3            # мм
+        nm = labels[i] if i < len(labels) else f"P{i+1}"
+        c = col[i % len(col)]; w = 2.0 if i == 0 else 1.1
+        fig2.add_trace(go.Scattergl(x=s, y=x, mode="lines", line=dict(width=w, color=c),
+                                    name=nm, legendgroup=nm), row=1, col=1)
+        fig2.add_trace(go.Scattergl(x=s, y=y, mode="lines", line=dict(width=w, color=c),
+                                    name=nm, legendgroup=nm, showlegend=False), row=2, col=1)
+    fig2.update_xaxes(title_text="s, м", row=2, col=1)
+    fig2.update_yaxes(title_text="x, мм", row=1, col=1); fig2.update_yaxes(title_text="y, мм", row=2, col=1)
+    fig2.update_xaxes(gridcolor="#eee", zeroline=False)
+    fig2.update_yaxes(gridcolor="#eee", zeroline=True, zerolinecolor="#bbb", zerolinewidth=1)
+    fig2.update_layout(title="Отклонение пробного пучка от опорной орбиты (±1мм по x и y)",
+                       margin=dict(l=60, r=20, t=70, b=45), plot_bgcolor="white",
+                       legend=dict(orientation="h", y=1.12, x=0.5, xanchor="center", title="частица"))
+    return fig2
 
 
 def build(exp_id, lat, hw, kind, lc, decimate, glyph, out):
@@ -105,12 +134,26 @@ def build(exp_id, lat, hw, kind, lc, decimate, glyph, out):
                       legend=dict(title="частицы", x=0.99, xanchor="right", y=0.99, yanchor="top",  # оверлей, не резервирует колонку
                                   bgcolor="rgba(255,255,255,0.6)", bordercolor="lightgray", borderwidth=1),
                       margin=dict(l=0, r=0, t=40, b=0))
+    # 2D-график отклонения ПРОБНОГО пучка от опорной орбиты (перетрек x,y секторным телом) — под 3D-сценой.
+    dev_html = ""
+    try:
+        dev, dlabels = mte.deviation_paths(int(lat))
+        dev_html = _deviation_fig(dev, dlabels).to_html(
+            include_plotlyjs=False, full_html=False, default_width="100%", default_height="640",
+            config={"responsive": True})
+    except Exception as e:                                        # не рушим 3D, если отклонение не собралось
+        print(f"[!] график отклонения пропущен: {type(e).__name__}: {e}")
+
+    s3d = fig.to_html(include_plotlyjs="inline", full_html=False, default_width="100%",
+                      default_height="78vh", config={"responsive": True})
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    fig.write_html(out, include_plotlyjs="inline", default_width="100%", default_height="100vh",
-                   config={"responsive": True})
+    with open(out, "w", encoding="utf-8") as f:                   # 3D сверху, график отклонения снизу — один файл
+        f.write("<!doctype html><html><head><meta charset='utf-8'>"
+                f"<title>SynchrotronSim — эксперимент {exp_id}</title></head>"
+                f"<body style='margin:0;font-family:sans-serif'>{s3d}{dev_html}</body></html>")
     print(f"[OK] {out}")
-    print(f"     {os.path.getsize(out)/1e6:.1f} МБ ({mode}); {ntri:,} треуг. магнитов, {len(parts)} частиц. "
-          f"Самодостаточный — крутить/зумить в браузере, передавать файлом.")
+    print(f"     {os.path.getsize(out)/1e6:.1f} МБ ({mode}); {ntri:,} треуг. магнитов, {len(parts)} частиц"
+          f"{' + график отклонения' if dev_html else ''}. Самодостаточный — крутить/зумить, передавать файлом.")
     return out, ntri
 
 
