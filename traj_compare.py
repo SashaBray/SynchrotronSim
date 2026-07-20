@@ -83,7 +83,12 @@ def run_ours(lattice, probe, turns, stop_s):
     st = (x0, px0, y0, py0, 0.0, d0); s = 0.0; recs = []
     for j, m in enumerate(mags):
         if j > 0:
-            st = mt.modified_drift(st, mags[j - 1], m); s = st[4]
+            A = mags[j - 1]
+            # s ВЫРАВНИВАНИЯ = длина ОПОРНОЙ орбиты (как у elegant), НЕ путь частицы st[4]: последний несёт
+            # бетатронный избыток ∫x'²/2·ds и уводит s на ~0.5мм за оборот ⇒ elegant-точка бралась не на той s
+            # (мнимая Δx на осцилляции). Опорный зазор = осевая проекция стыка на ось выхода A (= drift L elegant).
+            gap = float((m.fr_in[0] - A.fr_out[0]) @ A.fr_out[1])
+            st = mt.modified_drift(st, A, m); s += gap
         st_in, s_in = st, s
         st = m.body(st); s = s_in + m.L
         recs.append(("+".join(m.devs), s_in, st_in, s, st))
