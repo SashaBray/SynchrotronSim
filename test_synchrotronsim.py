@@ -34,12 +34,17 @@ import matrix_tracker as mt
 
 
 # ------------------------------------------------------------------ фикстуры/утилиты
-def make_magnet(kind, Leff, angle=0.0, k1=0.0, k2=0.0, k3=0.0, edge1=0.0, edge2=0.0, nsl=5):
+def make_magnet(kind, Leff, angle=0.0, k1=0.0, k2=0.0, k3=0.0, edge1=0.0, edge2=0.0, nsl=5,
+                center=(0.0, 0.0, 0.0), yaw=0.0, pitch=0.0, roll=0.0):
     """Синтетический Magnet БЕЗ БД: физика прямо в mat_* (mat_B=−angle/(QP·L), mat_G=k1/QP, …).
-    Геометрия (x,y,z,yaw=0) на тело не влияет — тело работает в локальных θ0/k из mat_*."""
+    center/yaw/pitch/roll — положение и ориентация (для тестов рассогласования установки);
+    на само тело они не влияют (тело в локальных θ0/k), но задают рамки fr_in/fr_out."""
     QP = mt.QP
     matB = -angle / (QP * Leff) if angle else 0.0
-    insts = [dict(x="0", y="0", z="0", yaw="0", device_type_id="TEST", instance_id="1",
+    cx, cy, cz = center
+    insts = [dict(x=repr(float(cx)), y=repr(float(cy)), z=repr(float(cz)),
+                  yaw=repr(float(yaw)), pitch=repr(float(pitch)), roll=repr(float(roll)),
+                  device_type_id="TEST", instance_id="1",
                   eff_length=repr(float(Leff)), kind=kind, n_slices=str(nsl),
                   edge1=repr(float(edge1)), edge2=repr(float(edge2)),
                   mat_B=repr(matB), mat_G=repr(k1 / QP), mat_Gv=repr(k1 / QP),
@@ -187,7 +192,83 @@ class TestFieldYoshida(unittest.TestCase):
         self.assertAlmostEqual(Fy, 1.0, places=12)
 
 
-# ================================================================== 7. конвейер БД (gated)
+# ================================================================== 7. рассогласование установки
+class TestMisalignment(unittest.TestCase):
+    """3D-ориентация frame(yaw,pitch,roll) + корректный стык луч-в-плоскости при рассогласовании.
+    Инварианты дрейфа (прямая в глобале) держатся при ЛЮБОЙ ориентации — проверка БЕЗ elegant."""
+
+    def _global(self, st, fr):
+        """Глобальные (положение, единичное направление импульса) из локального состояния и рамки."""
+        x, px, y, py, t, d = st; pt, ax, u, v = fr
+        ps = math.sqrt((1 + d) ** 2 - px * px - py * py)
+        return pt + x * u + y * v, (px * u + py * v + ps * ax) / (1 + d)
+
+    # --- frame() ---
+    def test_frame_yaw_backward_compat(self):
+        # frame(yaw) без pitch/roll = прежняя формула (бит-в-бит)
+        for yaw in (0.0, 0.1, -0.37):
+            ax, u, v = mt.frame(yaw)
+            np.testing.assert_allclose(ax, [math.cos(yaw), math.sin(yaw), 0.0], atol=1e-14)
+            np.testing.assert_allclose(u, [-math.sin(yaw), math.cos(yaw), 0.0], atol=1e-14)
+            np.testing.assert_allclose(v, [0.0, 0.0, 1.0], atol=1e-14)
+
+    def test_frame_orthonormal_righthanded(self):
+        # тройка ортонормирована и правая при любых yaw/pitch/roll
+        for yaw, pitch, roll in [(0.1, 0.05, -0.03), (0.3, -0.2, 0.15), (-0.5, 0.4, 0.6)]:
+            ax, u, v = mt.frame(yaw, pitch, roll)
+            for a in (ax, u, v):
+                self.assertAlmostEqual(np.linalg.norm(a), 1.0, places=12)
+            self.assertAlmostEqual(float(ax @ u), 0.0, places=12)
+            self.assertAlmostEqual(float(ax @ v), 0.0, places=12)
+            self.assertAlmostEqual(float(u @ v), 0.0, places=12)
+            np.testing.assert_allclose(np.cross(ax, u), v, atol=1e-12)   # правая: ось×uhat=vhat
+
+    def test_pitch_roll_tilt_out_of_plane(self):
+        ax, _, _ = mt.frame(0.0, 0.1, 0.0)
+        self.assertAlmostEqual(abs(ax[2]), math.sin(0.1), places=12)     # pitch наклоняет ось по вертикали
+        _, u, _ = mt.frame(0.0, 0.0, 0.1)
+        self.assertAlmostEqual(abs(u[2]), math.sin(0.1), places=12)      # roll выводит uhat из горизонтали
+
+    # --- луч-в-плоскость при рассогласовании ---
+    def _check_junction(self, A, B, st):
+        P_A, dA = self._global(st, A.fr_out)
+        stB = mt.modified_drift(st, A, B)
+        P_B, dB = self._global(stB, B.fr_in)
+        self.assertLess(float(np.linalg.norm(dA - dB)), 1e-12, "дрейф изменил направление импульса")
+        self.assertLess(float(np.linalg.norm(np.cross(P_B - P_A, dA))), 1e-9, "выход НЕ на луче из входа")
+        self.assertLess(abs(float((P_B - B.fr_in[0]) @ B.fr_in[1])), 1e-9, "выход НЕ на плоскости входа B")
+        return stB
+
+    def test_raytoplane_connects_misaligned_dipole(self):
+        # стык квадруполь → диполь при рассогласовании (yaw/pitch/roll + сдвиг): инварианты держатся
+        A = make_magnet("quad", 0.2, k1=1.0, center=(-0.1, 0, 0))
+        st = (0.4e-3, 0.7e-3, 0.2e-3, -0.1e-3, 0.0, 1e-3)
+        cases = [(0, 0, 0, 0, 0, 0),                       # на месте
+                 (0.005, 0, 0, 0.003, 0.002, 0),           # yaw + гор.сдвиг
+                 (0, 0.004, 0, 0, 0, 0.001),               # pitch + верт.сдвиг
+                 (0, 0, 0.02, 0.001, 0, 0),                # roll (крен)
+                 (0.006, -0.003, 0.015, 0.002, -0.001, 0.0015)]  # всё сразу
+        for yaw, pitch, roll, dx, dy, dz in cases:
+            with self.subTest(yaw=yaw, pitch=pitch, roll=roll):
+                B = make_magnet("dipole", 0.5, angle=0.02,
+                                center=(2 + dx, dy, dz), yaw=yaw, pitch=pitch, roll=roll)
+                self._check_junction(A, B, st)
+
+    def test_transverse_shift_enters_off_center(self):
+        # сдвиг диполя на Δ⊥ ⇒ опорный луч входит в B со смещением РОВНО −Δ (по гор. и по верт.)
+        A = make_magnet("quad", 0.2, k1=1.0, center=(-0.1, 0, 0))
+        st0 = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        base = mt.modified_drift(st0, A, make_magnet("dipole", 0.5, angle=0.02, center=(2, 0, 0)))
+        # горизонтальный сдвиг dy=+1мм (глоб Y ≡ uhat при yaw=0): Δx_local ≈ −Δ, с малым сцеплением
+        # через наклонённую на θ0/2 входную грань (член ∼θ0²) — потому допуск ослаблен до ~мкм.
+        sh = mt.modified_drift(st0, A, make_magnet("dipole", 0.5, angle=0.02, center=(2, 1e-3, 0)))
+        self.assertAlmostEqual((sh[0] - base[0]) * 1e3, -1.0, places=3)   # ≈ −Δ
+        # вертикальный сдвиг dz=+1мм (глоб Z ≡ vhat, грань по вертикали НЕ наклонена): Δy_local = −Δ точно
+        sv = mt.modified_drift(st0, A, make_magnet("dipole", 0.5, angle=0.02, center=(2, 0, 1e-3)))
+        self.assertAlmostEqual((sv[2] - base[2]) * 1e3, -1.0, places=6)   # ровно −Δ
+
+
+# ================================================================== 8. конвейер БД (gated)
 @unittest.skipUnless(os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")),
                      "БД (lattice_configs.csv) не загружена")
 class TestDBPipeline(unittest.TestCase):
@@ -201,7 +282,7 @@ class TestDBPipeline(unittest.TestCase):
         self.assertIn("dq", kinds); self.assertIn("dipole", kinds); self.assertIn("quad", kinds)
 
 
-# ================================================================== 8. C++ диффурное ядро (gated)
+# ================================================================== 9. C++ диффурное ядро (gated)
 class TestCppKernel(unittest.TestCase):
     """C++ SynchrotronTracker.exe (диффурное ядро). Наличие бинаря + smoke-прогон."""
     EXE = next((p for p in (os.path.join(ROOT, "build", "SynchrotronTracker.exe"),

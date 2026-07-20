@@ -45,10 +45,26 @@ def _edge_ff(dev):
     return _EDGEFF.get(dev, 0.0)
 
 
-def frame(yaw):
-    axis = np.array([math.cos(yaw), math.sin(yaw), 0.0])
-    uhat = np.array([-math.sin(yaw), math.cos(yaw), 0.0])
-    vhat = np.array([0.0, 0.0, 1.0])
+def _rot(v, n, a):
+    """Поворот вектора v вокруг ЕДИНИЧНОЙ оси n на угол a (формула Родрига)."""
+    c, s = math.cos(a), math.sin(a)
+    return v * c + np.cross(n, v) * s + n * float(n @ v) * (1.0 - c)
+
+
+def frame(yaw, pitch=0.0, roll=0.0):
+    """Ортонормальная тройка (ось, uhat, vhat) элемента из углов установки (для рассогласований).
+    Порядок: yaw → pitch → roll, каждый вокруг УЖЕ повёрнутой оси (Tait–Bryan):
+      • yaw   — вокруг вертикали vhat (горизонтальный увод); при pitch=roll=0 совпадает с прежним frame(yaw);
+      • pitch — вокруг поперечной uhat (вертикальный наклон оси, «клевок»);
+      • roll  — вокруг самой оси (крен: uhat/vhat вокруг луча).
+    Опорная тройка: ось вдоль X, uhat поперёк по Y, vhat вверх по Z."""
+    axis = np.array([1.0, 0.0, 0.0]); uhat = np.array([0.0, 1.0, 0.0]); vhat = np.array([0.0, 0.0, 1.0])
+    if yaw:
+        axis, uhat = _rot(axis, vhat, yaw), _rot(uhat, vhat, yaw)
+    if pitch:
+        axis, vhat = _rot(axis, uhat, pitch), _rot(vhat, uhat, pitch)
+    if roll:
+        uhat, vhat = _rot(uhat, axis, roll), _rot(vhat, axis, roll)
     return axis, uhat, vhat
 
 
@@ -56,12 +72,6 @@ SECTOR = os.environ.get("SS_SECTOR", "") == "1"    # ОПЫТ: диполь = т
 _SECTOR_DISP = -1.0                                # знак дисперсии секторной карты (под «+x наружу»); сверить с elegant
 _PARA_TOL = 1e-4                                   # |axis_A × axis_B| ниже ⇒ оси параллельны (стык дуги ~1e-6,
 #                                                   дрейф =0); настоящий клин диполь→элемент ~мрад >> порога
-
-
-def _rotz(v, a):
-    """Поворот вектора v вокруг вертикали (z) на угол a."""
-    c, s = math.cos(a), math.sin(a)
-    return np.array([c * v[0] - s * v[1], s * v[0] + c * v[1], v[2]])
 
 
 def _foc(K, L):
@@ -147,7 +157,9 @@ class Magnet:
         r0 = insts[0]
         self.center = np.array([float(r0["x"]), float(r0["y"]), float(r0["z"])])
         self.yaw = float(r0["yaw"])
-        self.axis, self.uhat, self.vhat = frame(self.yaw)
+        self.pitch = float(r0.get("pitch") or 0.0)         # установочные наклоны (рассогласование); дефолт 0
+        self.roll = float(r0.get("roll") or 0.0)
+        self.axis, self.uhat, self.vhat = frame(self.yaw, self.pitch, self.roll)
         self.dev = r0["device_type_id"]
         # ЕДИНЫЙ ИСТОЧНИК — структурные метаданные из lattice_configs (eff_length/kind/n_slices/edge1/edge2).
         # Fallback на hardware_library/element_transforms — только для неполной БД (те же значения).
@@ -222,12 +234,13 @@ class Magnet:
         if self.sector:
             rho = self.Leff / self.theta0
             O = self.center + rho * self.uhat                  # центр кривизны дуги
-            self.entry_pt = O + _rotz(self.center - O, -self.theta0 / 2.0)   # точка входа НА ДУГЕ
-            self.exit_pt = O + _rotz(self.center - O, self.theta0 / 2.0)
-            self.fr_in = (self.entry_pt, _rotz(self.axis, -self.theta0 / 2.0),
-                          _rotz(self.uhat, -self.theta0 / 2.0), self.vhat)
-            self.fr_out = (self.exit_pt, _rotz(self.axis, self.theta0 / 2.0),
-                           _rotz(self.uhat, self.theta0 / 2.0), self.vhat)
+            # изгиб идёт вокруг ЛОКАЛЬНОЙ вертикали vhat (при pitch/roll плоскость изгиба наклонена/повёрнута);
+            # для yaw-only vhat=[0,0,1] ⇒ _rot(·,vhat,·) ≡ прежний _rotz, поведение бит-в-бит сохраняется.
+            v = self.vhat; th2 = self.theta0 / 2.0
+            self.entry_pt = O + _rot(self.center - O, v, -th2)   # точка входа НА ДУГЕ
+            self.exit_pt = O + _rot(self.center - O, v, th2)
+            self.fr_in = (self.entry_pt, _rot(self.axis, v, -th2), _rot(self.uhat, v, -th2), v)
+            self.fr_out = (self.exit_pt, _rot(self.axis, v, th2), _rot(self.uhat, v, th2), v)
         else:
             self.fr_in = (self.entry, self.axis, self.uhat, self.vhat)
             self.fr_out = (self.exit, self.axis, self.uhat, self.vhat)
