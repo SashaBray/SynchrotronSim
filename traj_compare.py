@@ -107,16 +107,20 @@ def build_table(ours, eleg):
     hdr = ["n", "elem_SS", "elem_elegant", "s_in_m", "s_out_m", "faza",
            "x_elegant_mm", "x_SS_mm", "dx_um", "xp_elegant_mrad", "px_SS_mrad", "dpx_urad",
            "y_elegant_mm", "y_SS_mm", "dy_um", "yp_elegant_mrad", "py_SS_mrad", "dpy_urad", "dipol"]
+    # ПОЖЕЛАНИЕ пользователя: запятая как десятичный разделитель (удобно в русском Excel). Поле = ';',
+    # так что запятая в числах не конфликтует. Касается ТОЛЬКО table.csv (manifest/summary — точка).
+    f5 = lambda v: f"{v:+.6f}".replace(".", ",")           # мм/мрад, 6 знаков
+    f2 = lambda v: f"{v:+.2f}".replace(".", ",")           # Δ, мкм/мкрад
+    fs = lambda v: f"{v:.6f}".replace(".", ",")            # s, м
     rows = []
     for n, (dev, s_in, sti, s_out, sto) in enumerate(ours, 1):
         for faza, s, stt in (("вход", s_in, sti), ("выход", s_out, sto)):
             nm, ex, exp_, ey, eyp = eleg_at(es, eleg, s)
-            f5 = lambda v: f"{v:+.6f}"
-            rows.append([n, dev, nm, f"{s_in:.6f}", f"{s_out:.6f}", faza,
-                         f5(ex * 1e3), f5(stt[0] * 1e3), f"{(stt[0] - ex) * 1e6:+.2f}",
-                         f5(exp_ * 1e3), f5(stt[1] * 1e3), f"{(stt[1] - exp_) * 1e6:+.2f}",
-                         f5(ey * 1e3), f5(stt[2] * 1e3), f"{(stt[2] - ey) * 1e6:+.2f}",
-                         f5(eyp * 1e3), f5(stt[3] * 1e3), f"{(stt[3] - eyp) * 1e6:+.2f}",
+            rows.append([n, dev, nm, fs(s_in), fs(s_out), faza,
+                         f5(ex * 1e3), f5(stt[0] * 1e3), f2((stt[0] - ex) * 1e6),
+                         f5(exp_ * 1e3), f5(stt[1] * 1e3), f2((stt[1] - exp_) * 1e6),
+                         f5(ey * 1e3), f5(stt[2] * 1e3), f2((stt[2] - ey) * 1e6),
+                         f5(eyp * 1e3), f5(stt[3] * 1e3), f2((stt[3] - eyp) * 1e6),
                          "ДИПОЛЬ" if ("DP_" in dev or "DQ_" in dev) else ""])
     return hdr, rows
 
@@ -154,10 +158,12 @@ def main():
     with open(os.path.join(outdir, "table.csv"), "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";"); w.writerow(hdr); w.writerows(rows)
 
-    # сводка: макс |Δ| по не-дипольным выходам (кадры диполей разные — там Δ не показатель)
+    # сводка: макс |Δ| по не-дипольным выходам (кадры диполей разные — там Δ не показатель).
+    # Δx в table.csv — с запятой (для Excel), для арифметики возвращаем к точке.
+    _dx = lambda r: abs(float(r[8].replace(",", ".")))
     nd = [r for r in rows if r[5] == "выход" and not r[18]]
-    dxs = [abs(float(r[8])) for r in nd]
-    worst = max(nd, key=lambda r: abs(float(r[8]))) if nd else None
+    dxs = [_dx(r) for r in nd]
+    worst = max(nd, key=_dx) if nd else None
     summary = [f"SynchrotronSim vs elegant — {tag}",
                f"дата: {datetime.datetime.now():%Y-%m-%d %H:%M}, коммит {_git_commit()}, режим ядра {mode}",
                f"луч: x0={a.x0}мм px0={a.px0}мрад y0={a.y0}мм py0={a.py0}мрад δ0={a.d0}, оборотов {a.turns}",
