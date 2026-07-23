@@ -310,10 +310,8 @@ class TestLocalNpz(unittest.TestCase):
         import matrix_traj_export as mte, tempfile
         loc = [np.arange(8 * 3, dtype=float).reshape(3, 8), np.arange(8 * 2, dtype=float).reshape(2, 8) + 100]
         glo = [np.arange(3 * 3, dtype=float).reshape(3, 3), np.arange(3 * 2, dtype=float).reshape(2, 3) + 50]
-        tt = [np.arange(4 * 5, dtype=float).reshape(5, 4), np.arange(4 * 3, dtype=float).reshape(3, 4) + 7]
-        r = dict(locals=loc, globals=glo, turnbyturn=tt, surv_turns=[4, 2], n_turns=4,
-                 elem_names=["плоскость инжекции", "A", "B"], closed=True, thin_eps=0.0,
-                 ring_len=123.4, lattice=1, group=2)
+        r = dict(locals=loc, globals=glo, surv_turns=[4, 2], n_turns=4,
+                 elem_names=["плоскость инжекции", "A", "B"], closed=True, ring_len=123.4, lattice=1, group=2)
         with tempfile.TemporaryDirectory() as td:
             p = os.path.join(td, "loc.npz")
             mte.write_local_npz(p, r)
@@ -324,11 +322,10 @@ class TestLocalNpz(unittest.TestCase):
         self.assertEqual(d["n_turns"], 4)
         self.assertTrue(d["parts"][0]["survived"])          # surv_turns 4 >= n_turns 4
         self.assertFalse(d["parts"][1]["survived"])         # surv_turns 2 < 4
-        self.assertEqual(len(d["parts"][0]["tt_x"]), 5)     # турн-by-turn сохранён и нарезан
         self.assertAlmostEqual(d["ring_len"], 123.4)
         self.assertEqual(d["elem_names"], r["elem_names"])
         np.testing.assert_allclose(d["parts"][1]["x"], loc[1][:, 1])    # колонка x = столбец 1 записи
-        np.testing.assert_allclose(d["parts"][0]["tt_y"], tt[0][:, 2])  # турн-by-turn y = столбец 2
+        np.testing.assert_allclose(d["parts"][0]["Z"], glo[0][:, 2])    # глоб. Z сохранён
 
 
 if __name__ == "__main__":

@@ -222,15 +222,14 @@ def experiment_closure(lattice, group, source="physical", settings=None):
                 residual_mm=(max(res) * 1e3 if res else None))
 
 
-def local_trajectories(lattice, group, source="physical", thin_eps=0.0, settings=None, n_turns=1):
+def local_trajectories(lattice, group, source="physical", settings=None, n_turns=1, target=30000):
     """ЛОКАЛЬНЫЕ координаты СЕКТОРНОЙ модели (m.body при SS_SECTOR=1; x = отклонение от ОПОРНОЙ ОРБИТЫ,
-    бит-в-бит elegant) вдоль трека инжектированного пучка плоскость→кольцо→финиш. На точку (границы
-    элементов, вход/выход): S (опорная арк-длина, м), x, x'≡px, y, y'≡py, ct, δ + индекс элемента; плюс
-    глоб. XYZ (сверка/3D). Прореживание по кривизне (thin_eps, м). Возврат dict для write_local_npz.
+    бит-в-бит elegant) вдоль трека инжектированного пучка. На точку (границы элементов, вход/выход):
+    S (опорная арк-длина, м), x, x'≡px, y, y'≡py, ct, δ + индекс элемента; плюс глоб. XYZ (сверка/3D).
 
-    n_turns>1: пучок гоняется n_turns оборотов; ИНТРА-оборотная траектория пишется только за оборот 0
-    (форма x(S)), а дополнительно на КАЖДОМ обороте у плоскости инжекции пишется состояние (x,x',y,y') —
-    ТУРН-BY-TURN (для дробного тюна и выживания за n_turns). surv_turns — сколько оборотов частица прошла.
+    n_turns>1: ПОЛНАЯ траектория за все n_turns оборотов (S копится: оборот k на S=k·кольцо..(k+1)·кольцо);
+    равномерное прореживание шагом до ≤target точек/частицу (сохраняет бетатрон и FFT, ограничивает вес).
+    surv_turns — сколько оборотов частица прошла до потери (=n_turns у выжившей).
 
     NB: боксовый body_global тут НЕ годится — у диполей его x = отклонение от ПРЯМОЙ оси (растёт с изгибом,
     ~сотни мм), а не бетатрон от опорной орбиты. Поэтому трекаем через m.body()+modified_drift (сектор).
@@ -251,43 +250,38 @@ def local_trajectories(lattice, group, source="physical", thin_eps=0.0, settings
         p = fr[0] + x * fr[2] + y * fr[3]
         return float(p[0]), float(p[1]), float(p[2])
 
-    def rec(S, st, elem):                                        # локальная запись точки (payload для Thinner)
-        return (S, st[0], st[1], st[2], st[3], st[4], st[5], elem)
-
     elem_names = ["плоскость инжекции"] + [m.dev for m in ordered]
     n_turns = max(1, int(n_turns))
     if n_turns > 1 and not closed:
         n_turns = 1                                              # открытый сегмент не зациклить
-    locals_all = []; globals_all = []; tt_all = []; surv_turns = []
+    locals_all = []; globals_all = []; surv_turns = []
     for st0 in states:
-        st = tuple(map(float, st0)); th = Thinner(thin_eps); done = 0
-        tt = []                                                  # турн-by-turn: (x, x', y, y') у плоскости на оборот
-        th.add(gp(plane.fr_out, st[0], st[2]), rec(0.0, st, 0))  # ИНТРА-оборотная запись — только оборот 0
+        st = tuple(map(float, st0)); done = 0
+        loc = [(0.0, st[0], st[1], st[2], st[3], st[4], st[5], 0)]; glo = [gp(plane.fr_out, st[0], st[2])]
         try:
             for turn in range(n_turns):
-                tt.append((st[0], st[1], st[2], st[3]))          # состояние у плоскости на СТАРТЕ оборота
-                first = (turn == 0)
+                base = turn * ring_len
                 st = mt.modified_drift(st, plane, ordered[0])
-                if first: th.add(gp(ordered[0].fr_in, st[0], st[2]), rec(entry_arc[0], st, 1))
+                loc.append((base + entry_arc[0], st[0], st[1], st[2], st[3], st[4], st[5], 1)); glo.append(gp(ordered[0].fr_in, st[0], st[2]))
                 st = ordered[0].body(st)
-                if first: th.add(gp(ordered[0].fr_out, st[0], st[2]), rec(entry_arc[0] + ordered[0].L, st, 1))
+                loc.append((base + entry_arc[0] + ordered[0].L, st[0], st[1], st[2], st[3], st[4], st[5], 1)); glo.append(gp(ordered[0].fr_out, st[0], st[2]))
                 for j in range(1, len(ordered)):
                     st = mt.modified_drift(st, ordered[j - 1], ordered[j])
-                    if first: th.add(gp(ordered[j].fr_in, st[0], st[2]), rec(entry_arc[j], st, j + 1))
+                    loc.append((base + entry_arc[j], st[0], st[1], st[2], st[3], st[4], st[5], j + 1)); glo.append(gp(ordered[j].fr_in, st[0], st[2]))
                     st = ordered[j].body(st)
-                    if first: th.add(gp(ordered[j].fr_out, st[0], st[2]), rec(entry_arc[j] + ordered[j].L, st, j + 1))
+                    loc.append((base + entry_arc[j] + ordered[j].L, st[0], st[1], st[2], st[3], st[4], st[5], j + 1)); glo.append(gp(ordered[j].fr_out, st[0], st[2]))
                 if closed:                                       # финиш = плоскость (замыкание) → следующий оборот
                     st = mt.modified_drift(st, ordered[-1], finish)
-                    if first: th.add(gp(finish.fr_in, st[0], st[2]), rec(ring_len, st, 0))
+                    loc.append((base + ring_len, st[0], st[1], st[2], st[3], st[4], st[5], 0)); glo.append(gp(finish.fr_in, st[0], st[2]))
                 done = turn + 1
-            tt.append((st[0], st[1], st[2], st[3]))              # финальное состояние у плоскости
         except mt.ParticleLost:
             pass
-        locals_all.append(th.result_local()); globals_all.append(th.result())
-        tt_all.append(np.asarray(tt, float) if tt else np.zeros((0, 4))); surv_turns.append(done)
-    return dict(locals=locals_all, globals=globals_all, turnbyturn=tt_all, surv_turns=surv_turns,
-                n_turns=n_turns, elem_names=elem_names, closed=closed, thin_eps=thin_eps,
-                ring_len=ring_len, lattice=lattice, group=group)
+        L = np.asarray(loc, float); G = np.asarray(glo, float)
+        if target and len(L) > target:                          # равномерное прореживание (сохраняет форму и FFT)
+            step = int(np.ceil(len(L) / target)); L = L[::step]; G = G[::step]
+        locals_all.append(L); globals_all.append(G); surv_turns.append(done)
+    return dict(locals=locals_all, globals=globals_all, surv_turns=surv_turns, n_turns=n_turns,
+                elem_names=elem_names, closed=closed, ring_len=ring_len, lattice=lattice, group=group)
 
 
 def write_bin(particles_pts, path):
@@ -305,41 +299,34 @@ LOCAL_COLS = ("S", "x", "xp", "y", "yp", "ct", "delta", "elem")
 
 
 def write_local_npz(path, r):
-    """r — dict из local_trajectories: интра-оборотные locals (M_i,8)/globals (M_i,3) за оборот 0 + турн-by-turn
-    turnbyturn[i] (T_i,4)=(x,x',y,y') у плоскости на оборот + surv_turns/n_turns/elem_names/…. Concat+counts, без pickle."""
-    loc, glo, tt = r["locals"], r["globals"], r["turnbyturn"]
+    """r — dict из local_trajectories: ПОЛНАЯ траектория locals[i] (M_i,8)=(S,x,x',y,y',ct,δ,elem) +
+    globals[i] (M_i,3) XYZ + surv_turns/n_turns/elem_names/… Concat по частицам + counts, без ragged/pickle."""
+    loc, glo = r["locals"], r["globals"]
     counts = np.array([len(a) for a in loc], np.int64)
     L = np.concatenate(loc, axis=0) if loc else np.zeros((0, 8))
     G = np.concatenate(glo, axis=0) if glo else np.zeros((0, 3))
-    tt_counts = np.array([len(a) for a in tt], np.int64)
-    T = np.concatenate(tt, axis=0) if tt else np.zeros((0, 4))
     np.savez(path, counts=counts,
              S=L[:, 0], x=L[:, 1], xp=L[:, 2], y=L[:, 3], yp=L[:, 4], ct=L[:, 5], delta=L[:, 6],
              elem=L[:, 7].astype(np.int64), X=G[:, 0], Y=G[:, 1], Z=G[:, 2],
-             tt_counts=tt_counts, tt_x=T[:, 0], tt_xp=T[:, 1], tt_y=T[:, 2], tt_yp=T[:, 3],
              elem_names=np.asarray(r["elem_names"]), surv_turns=np.asarray(r["surv_turns"], np.int64),
-             n_turns=int(r["n_turns"]), closed=bool(r["closed"]), thin_eps=float(r["thin_eps"]),
+             n_turns=int(r["n_turns"]), closed=bool(r["closed"]),
              ring_len=float(r["ring_len"]), lattice=int(r["lattice"]), group=int(r["group"]))
 
 
 def read_local_npz(path):
-    """Загрузка .npz → dict(parts=[{...интра S,x,xp,y,yp,elem,X,Y,Z + турн-by-turn tt_x,tt_xp,tt_y,tt_yp +
-    surv_turns, survived} на частицу], elem_names, n_turns, ring_len, ...)."""
+    """Загрузка .npz → dict(parts=[{S,x,xp,y,yp,ct,delta,elem,X,Y,Z, surv_turns, survived} на частицу],
+    elem_names, n_turns, ring_len, closed, lattice, group)."""
     d = np.load(path, allow_pickle=False)
     counts = d["counts"]; off = np.concatenate([[0], np.cumsum(counts)]).astype(int)
     cols = ("S", "x", "xp", "y", "yp", "ct", "delta", "elem", "X", "Y", "Z")
-    tt_counts = d["tt_counts"]; toff = np.concatenate([[0], np.cumsum(tt_counts)]).astype(int)
     n_turns = int(d["n_turns"]); surv = d["surv_turns"]
     parts = []
     for i in range(len(counts)):
         a, b = off[i], off[i + 1]; p = {c: d[c][a:b] for c in cols}
-        ta, tb = toff[i], toff[i + 1]
-        p["tt_x"] = d["tt_x"][ta:tb]; p["tt_xp"] = d["tt_xp"][ta:tb]
-        p["tt_y"] = d["tt_y"][ta:tb]; p["tt_yp"] = d["tt_yp"][ta:tb]
         p["surv_turns"] = int(surv[i]); p["survived"] = bool(surv[i] >= n_turns)
         parts.append(p)
     return dict(parts=parts, elem_names=[str(s) for s in d["elem_names"]], closed=bool(d["closed"]),
-                thin_eps=float(d["thin_eps"]), ring_len=float(d["ring_len"]), n_turns=n_turns,
+                ring_len=float(d["ring_len"]), n_turns=n_turns,
                 lattice=int(d["lattice"]), group=int(d["group"]))
 
 
