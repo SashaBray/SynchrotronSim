@@ -222,6 +222,15 @@ def experiment_closure(lattice, group, source="physical", settings=None):
                 residual_mm=(max(res) * 1e3 if res else None))
 
 
+def _radiation_meta(rf=None):
+    """Сводка учёта синхротронного излучения для .npz/анализатора: включён ли SR/ISR (env),
+    режим ВЧ (параметр rf), проектная энергия для SR (МэВ). Пишется в результат трекинга."""
+    return dict(sr=int(os.environ.get("SS_SR", "") == "1"),
+                isr=int(os.environ.get("SS_ISR", "") == "1"),
+                rf=str(rf or "none"),
+                design_mev=float(os.environ.get("SS_DESIGN_MEV", "") or 6000.0))
+
+
 def local_trajectories(lattice, group, source="physical", settings=None, n_turns=1, target=30000,
                        states_override=None):
     """ЛОКАЛЬНЫЕ координаты СЕКТОРНОЙ модели (m.body при SS_SECTOR=1; x = отклонение от ОПОРНОЙ ОРБИТЫ,
@@ -286,7 +295,8 @@ def local_trajectories(lattice, group, source="physical", settings=None, n_turns
             step = int(np.ceil(len(L) / target)); L = L[::step]; G = G[::step]
         locals_all.append(L); globals_all.append(G); surv_turns.append(done)
     return dict(mode="full", locals=locals_all, globals=globals_all, surv_turns=surv_turns, n_turns=n_turns,
-                elem_names=elem_names, closed=closed, ring_len=ring_len, lattice=lattice, group=group)
+                elem_names=elem_names, closed=closed, ring_len=ring_len, lattice=lattice, group=group,
+                **_radiation_meta())
 
 
 def long_trajectories(lattice, group, source="physical", settings=None, n_turns=1000, states_override=None, rf=None):
@@ -330,7 +340,7 @@ def long_trajectories(lattice, group, source="physical", settings=None, n_turns=
         tt_all.append(np.asarray(tt, float)); surv_turns.append(done)
     return dict(mode="long", turnbyturn=tt_all, surv_turns=surv_turns, n_turns=n_turns,
                 elem_names=["плоскость инжекции"] + [m.dev for m in ordered], closed=closed,
-                ring_len=ring_len, lattice=lattice, group=group)
+                ring_len=ring_len, lattice=lattice, group=group, **_radiation_meta(rf))
 
 
 def write_bin(particles_pts, path):
@@ -354,7 +364,9 @@ def write_local_npz(path, r):
     meta = dict(mode=str(mode), elem_names=np.asarray(r["elem_names"]),
                 surv_turns=np.asarray(r["surv_turns"], np.int64), n_turns=int(r["n_turns"]),
                 closed=bool(r["closed"]), ring_len=float(r["ring_len"]),
-                lattice=int(r["lattice"]), group=int(r["group"]))
+                lattice=int(r["lattice"]), group=int(r["group"]),
+                sr=int(r.get("sr", 0)), isr=int(r.get("isr", 0)),           # учёт синхротронного излучения
+                rf=str(r.get("rf", "none")), design_mev=float(r.get("design_mev", 6000.0)))
     if mode == "long":
         tt = r["turnbyturn"]; tt_counts = np.array([len(a) for a in tt], np.int64)
         T = np.concatenate(tt, axis=0) if tt else np.zeros((0, 4))
@@ -376,7 +388,10 @@ def read_local_npz(path):
     mode = str(d["mode"]) if "mode" in d else "full"
     n_turns = int(d["n_turns"]); surv = d["surv_turns"]
     out = dict(mode=mode, elem_names=[str(s) for s in d["elem_names"]], closed=bool(d["closed"]),
-               ring_len=float(d["ring_len"]), n_turns=n_turns, lattice=int(d["lattice"]), group=int(d["group"]))
+               ring_len=float(d["ring_len"]), n_turns=n_turns, lattice=int(d["lattice"]), group=int(d["group"]),
+               sr=int(d["sr"]) if "sr" in d else 0, isr=int(d["isr"]) if "isr" in d else 0,
+               rf=str(d["rf"]) if "rf" in d else "none",
+               design_mev=float(d["design_mev"]) if "design_mev" in d else None)
     if mode == "long":
         tt_counts = d["tt_counts"]; toff = np.concatenate([[0], np.cumsum(tt_counts)]).astype(int)
         parts = []

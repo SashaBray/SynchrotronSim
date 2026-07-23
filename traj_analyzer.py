@@ -22,7 +22,18 @@ import plotly.graph_objects as go
 import matrix_traj_export as mte
 
 RESULTS = os.path.join("workspace", "results")
-COLORS = ["#555555", "#e15759", "#f28e2b", "#4e79a7", "#59a14f", "#b07aa1", "#9c755f", "#edc948"]
+COLORS = ["#2b7bba", "#e15759", "#f28e2b", "#59a14f", "#b07aa1", "#9c755f", "#edc948", "#76b7b2"]
+GRID = "#e9e9e9"                                             # цвет фоновой сетки графиков
+
+
+def _grid(fig, legend=True):
+    """Единый стиль осей: светлая сетка на фон + (по умолч.) принудительная легенда — plotly скрывает её
+    при единственной кривой, а нам нужна всегда. legend=False для панелей с цветовой шкалой (фазовый портрет)."""
+    fig.update_xaxes(showgrid=True, gridcolor=GRID, gridwidth=1)
+    fig.update_yaxes(showgrid=True, gridcolor=GRID, gridwidth=1)
+    if legend:
+        fig.update_layout(showlegend=True)
+    return fig
 
 
 def fft_spectrum(S, v):
@@ -101,7 +112,7 @@ def _fig_dev(parts, comp, title):
                       legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
     fig.update_xaxes(title_text="S, м")
     fig.update_yaxes(title_text=f"отклонение {comp}, мм", zeroline=True, zerolinecolor="#bbb")
-    return fig
+    return _grid(fig)
 
 
 LIGHT_C = 299792458.0                                            # м/с — пучок ультрарелятивистский (v≈c)
@@ -185,23 +196,39 @@ def _fig_spectrum(res, ring_len):
     fig.update_xaxes(title_text="частота, МГц", range=[0, xmax])
     ytop = peaks[0][1] * 1.3 if peaks else None                  # запас сверху под подписи (пики заполняют панель полнее)
     fig.update_yaxes(title_text="амплитуда, мм", range=([0, ytop] if ytop else None))
-    return fig
+    return _grid(fig)
 
 
 # --- ДЛИННЫЙ режим (много оборотов): огибающая амплитуды / фазовый портрет / затухание ------------
+def _running_mean(a, W):
+    """Скользящее среднее окном W (медленная РАВНОВЕСНАЯ орбита). Центрированное, с краевой нормировкой
+    (convolve 'same' занижает концы — делим на число реально усреднённых точек)."""
+    if W < 2 or len(a) <= W:
+        return np.full_like(a, float(np.mean(a)) if len(a) else 0.0)
+    k = np.ones(W) / W
+    return np.convolve(a, k, mode="same") / np.convolve(np.ones_like(a), k, mode="same")
+
+
 def metrics_long(p):
-    """Метрики частицы в ДЛИННОМ режиме (turn-by-turn у плоскости): положение по оборотам + нормированная
-    амплитуда Ax=√(x²+(x'·σx/σx')²) (радиус в фазовом пр-ве) — её спад = затухание."""
+    """Метрики частицы в ДЛИННОМ режиме (turn-by-turn у плоскости): положение по оборотам + огибающая
+    БЕТАТРОННОЙ амплитуды Ax=√(xb²+(xb'·σ/σ')²) (радиус в фазовом пр-ве), где xb = x − равновесная орбита
+    (вычет скользящего среднего). Спад Ax = затухание. Вычет орбиты делает метрику устойчивой к сдвигу
+    равновесной орбиты от потерь энергии на излучение (иначе офсет маскирует затухание колебания)."""
     x = np.asarray(p["tt_x"]) * 1e3; xp = np.asarray(p["tt_xp"]) * 1e3      # мм, мрад
     y = np.asarray(p["tt_y"]) * 1e3; yp = np.asarray(p["tt_yp"]) * 1e3
     turns = np.arange(len(x), dtype=float)
-    sx = np.std(x) or 1.0; sxp = np.std(xp) or 1.0
-    sy = np.std(y) or 1.0; syp = np.std(yp) or 1.0
-    Ax = np.sqrt(x ** 2 + (xp * sx / sxp) ** 2); Ay = np.sqrt(y ** 2 + (yp * sy / syp) ** 2)
+    W = int(np.clip(len(x) // 40, 8, 200))                                  # окно ~ несколько бетатронных периодов
+    xb = x - _running_mean(x, W); xpb = xp - _running_mean(xp, W)           # бетатрон = вычет равновесной орбиты
+    yb = y - _running_mean(y, W); ypb = yp - _running_mean(yp, W)
+    sx = np.std(xb) or 1.0; sxp = np.std(xpb) or 1.0
+    sy = np.std(yb) or 1.0; syp = np.std(ypb) or 1.0
+    Ax = np.sqrt(xb ** 2 + (xpb * sx / sxp) ** 2); Ay = np.sqrt(yb ** 2 + (ypb * sy / syp) ** 2)
+    awin = lambda A: (float(np.mean(A[:W])), float(np.mean(A[-W:]))) if len(A) >= W else (
+        float(A[0]) if len(A) else 0.0, float(A[-1]) if len(A) else 0.0)   # оконная амплитуда старт/конец (не 1 точка)
+    Ax0, Axend = awin(Ax)
     return dict(survived=p["survived"], surv_turns=p["surv_turns"], turns=turns, x=x, xp=xp, y=y, yp=yp,
                 Ax=Ax, Ay=Ay, x0=float(x[0]) if len(x) else 0.0,
-                xmax=float(np.max(np.abs(x))) if len(x) else 0.0,
-                Ax0=float(Ax[0]) if len(Ax) else 0.0, Axend=float(Ax[-1]) if len(Ax) else 0.0)
+                xmax=float(np.max(np.abs(x))) if len(x) else 0.0, Ax0=Ax0, Axend=Axend)
 
 
 def _fig_info_long(res, n_turns):
@@ -220,7 +247,7 @@ def _fig_info_long(res, n_turns):
 
 
 def _fig_tbt(res, comp, title, unit):
-    """Turn-by-turn: положение (x или y) у плоскости инжекции по номеру оборота."""
+    """Turn-by-turn: положение (x или y) у плоскости старта по номеру оборота."""
     fig = go.Figure()
     for i, r in enumerate(res):
         c = COLORS[i % len(COLORS)]
@@ -231,7 +258,7 @@ def _fig_tbt(res, comp, title, unit):
                       legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
     fig.update_xaxes(title_text="номер оборота")
     fig.update_yaxes(title_text=unit, zeroline=True, zerolinecolor="#bbb")
-    return fig
+    return _grid(fig)
 
 
 def _fig_envelope(res):
@@ -242,14 +269,14 @@ def _fig_envelope(res):
         fig.add_trace(go.Scattergl(x=r["turns"].astype(np.float32), y=r["Ax"].astype(np.float32), mode="lines",
                                    name=f"ч{i} · Ax", line=dict(color=c, width=1.6)))
         fig.add_trace(go.Scattergl(x=r["turns"].astype(np.float32), y=r["Ay"].astype(np.float32), mode="lines",
-                                   name=f"ч{i} · Ay", line=dict(color=c, width=1.1, dash="dot"), showlegend=False))
-    fig.update_layout(title=dict(text="Огибающая амплитуды по оборотам  (сплошная — Ax, пунктир — Ay) — спад = затухание",
+                                   name=f"ч{i} · Ay", line=dict(color=c, width=1.1, dash="dot")))
+    fig.update_layout(title=dict(text="Огибающая амплитуды по оборотам  (сплошная — Ax, пунктир — Ay)",
                                  x=0.5, xanchor="center", y=0.97, yanchor="top", font=dict(size=14)),
                       margin=dict(l=62, r=18, t=34, b=42), plot_bgcolor="white", hovermode="closest",
                       legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
     fig.update_xaxes(title_text="номер оборота")
     fig.update_yaxes(title_text="амплитуда (норм.), мм", rangemode="tozero")
-    return fig
+    return _grid(fig)
 
 
 def _fig_phase(res):
@@ -266,13 +293,13 @@ def _fig_phase(res):
             c = COLORS[i % len(COLORS)]
             fig.add_trace(go.Scattergl(x=r["x"].astype(np.float32), y=r["xp"].astype(np.float32), mode="markers",
                                        marker=dict(size=2.2, color=c), name=f"ч{i}", hoverinfo="skip"))
-    fig.update_layout(title=dict(text="Фазовый портрет (x, x') у плоскости инжекции  (эллипс — сохранение, спираль — затухание/рост)",
+    fig.update_layout(title=dict(text="Фазовый портрет (x, x') в плоскости старта  (эллипс — сохранение, спираль — затухание/рост)",
                                  x=0.5, xanchor="center", y=0.97, yanchor="top", font=dict(size=14)),
                       margin=dict(l=62, r=18, t=34, b=42), plot_bgcolor="white", hovermode="closest",
                       legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
     fig.update_xaxes(title_text="x, мм", zeroline=True, zerolinecolor="#bbb")
     fig.update_yaxes(title_text="x', мрад", zeroline=True, zerolinecolor="#bbb")
-    return fig
+    return _grid(fig, legend=False)                          # фазовый портрет: легенда-эквивалент = цветовая шкала
 
 
 # JS: перетаскиваемые разделители между панелями (row-resize) + reflow графиков (Plotly.Plots.resize).
@@ -339,6 +366,21 @@ __WRAP__
 </body></html>"""
 
 
+def _rad_str(d):
+    """Поле «фотонное излучение» для подзаголовка: учтён ли SR/ISR + режим ВЧ + проектная энергия SR."""
+    if not d.get("sr"):
+        return "фотонное излучение: не учитывается"
+    tags = ["SR"]
+    if d.get("isr"):
+        tags.append("ISR")
+    rf = d.get("rf") or "none"
+    if rf != "none":
+        tags.append(f"ВЧ {rf}")
+    e = d.get("design_mev")
+    etxt = f", {e / 1000:.1f} ГэВ" if e else ""
+    return f"фотонное излучение: учтено ({' + '.join(tags)}{etxt})"
+
+
 def build_html(d, res):
     """Самодостаточный HTML: заголовок + 4 панели (таблица · x(S) · y(S) · спектр) с перетаскиваемыми
     разделителями высоты. Каждая панель — отдельный plotly-график, растягивается под контейнер. Для
@@ -351,10 +393,10 @@ def build_html(d, res):
     title = f"SynchrotronSim — анализ траектории, эксперимент {d['lattice']}·{d['group']} ({kind})"
     if nt > 1:
         subtitle = (f"{nt} оборотов · выжило {surv}/{P} за все {nt} об · кольцо {ring:.1f} м · частиц {P} · "
-                    f"ср.откл. {mean_all:.3f} мм · макс {max_all:.3f} мм · ПОЛНАЯ траектория (склейка {nt} оборотов)")
+                    f"ср.откл. {mean_all:.3f} мм · макс {max_all:.3f} мм · ПОЛНАЯ траектория (склейка {nt} оборотов) · {_rad_str(d)}")
     else:
         subtitle = (f"оборот {ring:.1f} м · элементов {len(d['elem_names'])-1} · частиц {P} · выжило {surv}/{P} · "
-                    f"ср.откл. {mean_all:.3f} мм · макс {max_all:.3f} мм · локальные координаты (отклонение от опорной орбиты)")
+                    f"ср.откл. {mean_all:.3f} мм · макс {max_all:.3f} мм · отклонение от опорной орбиты · {_rad_str(d)}")
     xt = f" ({nt} оборотов)" if nt > 1 else ""
     figs = [(_fig_info(res, nt), 0.16),
             (_fig_dev(parts, "x", f"Отклонение по X от опорной орбиты: x(S) по частицам{xt}"), 0.26),
@@ -387,13 +429,14 @@ def build_long_html(d, res):
     dA = [(r["Axend"] / r["Ax0"] - 1) * 100 for r in res if r["Ax0"] > 0]
     dA_txt = f"Δампл. {min(dA):+.1f}…{max(dA):+.1f}%" if dA else "Δампл. —"
     kind = "замкнутое кольцо" if d["closed"] else "открытый сегмент"
-    title = f"SynchrotronSim — ДЛИННЫЙ анализ (много оборотов), эксперимент {d['lattice']}·{d['group']} ({kind})"
-    subtitle = (f"{nt} оборотов (turn-by-turn у плоскости инжекции) · выжило {surv}/{P} за все {nt} об · "
-                f"кольцо {d['ring_len']:.1f} м · частиц {P} · {dA_txt} (спад = затухание)")
-    figs = [(_fig_info_long(res, nt), 0.14),
-            (_fig_tbt(res, "x", "Положение x у плоскости инжекции по оборотам", "x, мм"), 0.24),
-            (_fig_envelope(res), 0.28),
-            (_fig_phase(res), 0.34)]
+    title = f"SynchrotronSim — анализ траектории, эксперимент {d['lattice']}·{d['group']} ({kind})"
+    subtitle = (f"{nt} оборотов · выжило {surv}/{P} за все {nt} об · кольцо {d['ring_len']:.1f} м · "
+                f"частиц {P} · {dA_txt} (спад = затухание) · {_rad_str(d)}")
+    figs = [(_fig_info_long(res, nt), 0.11),
+            (_fig_tbt(res, "x", "Положение в плоскости старта по оборотам", "x, мм"), 0.19),
+            (_fig_tbt(res, "y", "Положение в плоскости старта по оборотам", "y, мм"), 0.19),
+            (_fig_envelope(res), 0.24),
+            (_fig_phase(res), 0.27)]
     return _assemble(d["lattice"], d["group"], title, subtitle, figs)
 
 
@@ -416,8 +459,8 @@ def main():
     if long_mode:                                           # === ДЛИННЫЙ режим: огибающая / фазовый портрет ===
         res = [metrics_long(p) for p in d["parts"]]
         surv = sum(r["survived"] for r in res)
-        print(f"=== ДЛИННЫЙ анализ — эксперимент {a.exp} (решётка {d['lattice']}, {nt} оборотов, turn-by-turn) ===")
-        print(f"кольцо {d['ring_len']:.2f}м, частиц {len(res)}, выжило {surv}/{len(res)}")
+        print(f"=== анализ траектории — эксперимент {a.exp} (решётка {d['lattice']}, {nt} оборотов) ===")
+        print(f"кольцо {d['ring_len']:.2f}м, частиц {len(res)}, выжило {surv}/{len(res)} · {_rad_str(d)}")
         print("\n№  оборотов    нач|x|,мм  макс|x|,мм  ампл_нач  ампл_кон  Δампл,%")
         for i, r in enumerate(res):
             dA = f"{(r['Axend']/r['Ax0']-1)*100:+.1f}" if r["Ax0"] > 0 else "—"
