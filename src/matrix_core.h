@@ -34,6 +34,7 @@ constexpr double MC2_MEV       = 0.51099895069;              // энергия �
 constexpr double R_E           = 2.8179403262e-15;           // классический радиус электрона, м
 constexpr double RAD_K         = 2.0 / 3.0 * R_E;            // rad_coef = (2/3)·r_e·γ³/ρ²
 constexpr double YOSHIDA_BETA  = 1.25992104989487316477;     // 2^(1/3) — расщепление Йошиды 4-го порядка
+constexpr int    SECTOR_NSLICES = 5;                        // срезов сектор/кик-тела (_nsl_sector, как elegant N_SLICES=5)
 
 struct ParticleLost : std::runtime_error {
     explicit ParticleLost(const std::string& m) : std::runtime_error(m) {}
