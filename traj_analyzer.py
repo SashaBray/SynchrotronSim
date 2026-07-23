@@ -178,7 +178,7 @@ def _fig_spectrum(res, ring_len):
                            font=dict(size=10, color="#333"), bgcolor="rgba(255,255,255,0.8)",
                            bordercolor="#ccc", borderwidth=1, borderpad=1)
         prev_f = f
-    fig.update_layout(title=dict(text="Спектр колебаний (Фурье): амплитуда по ЧАСТОТЕ  (сплошная — x, пунктир — y)",
+    fig.update_layout(title=dict(text="Спектр колебаний (Фурье)  (сплошная — x, пунктир — y)",
                                  x=0.5, xanchor="center", y=0.97, yanchor="top", font=dict(size=14)),
                       margin=dict(l=62, r=18, t=48, b=44), plot_bgcolor="white",
                       legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
