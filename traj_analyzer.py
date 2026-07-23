@@ -121,9 +121,12 @@ def _spectrum_peaks(res, n=6, rel=0.10, sep=2):
     убирает соседние бины одного пика ВНУТРИ компоненты. Возврат [(Q, amp, comp)] по убыванию амплитуды."""
     if not res or min(len(r["ax"]) for r in res) < 3:
         return []
+    L = min(min(len(r["ax"]) for r in res), min(len(r["ay"]) for r in res),
+            len(res[0]["kx"]), len(res[0]["ky"]))
+    qx = np.asarray(res[0]["kx"])[:L]; qy = np.asarray(res[0]["ky"])[:L]   # ось Q ЗА ОБОРОТ (гармоника/n_turns)
 
     def env(key):
-        L = min(len(r[key]) for r in res); e = np.zeros(L)
+        e = np.zeros(L)
         for r in res:
             e = np.maximum(e, np.asarray(r[key])[:L])
         return e
@@ -131,11 +134,11 @@ def _spectrum_peaks(res, n=6, rel=0.10, sep=2):
     ex, ey = env("ax"), env("ay")
     gmax = max(float(ex.max()), float(ey.max()), 1e-30)
 
-    def local(e, comp):
-        return [(j, float(e[j]), comp) for j in range(1, len(e) - 1)
+    def local(e, qgrid, comp):                                   # позиция пика — Q ЗА ОБОРОТ, не сырой индекс
+        return [(float(qgrid[j]), float(e[j]), comp) for j in range(1, len(e) - 1)
                 if e[j] > e[j - 1] and e[j] >= e[j + 1] and e[j] >= rel * gmax]
 
-    cand = sorted(local(ex, "x") + local(ey, "y"), key=lambda t: -t[1])
+    cand = sorted(local(ex, qx, "x") + local(ey, qy, "y"), key=lambda t: -t[1])
     sel = []
     for q, a, comp in cand:
         if all(not (comp == s[2] and abs(q - s[0]) < sep) for s in sel):   # раздвижка только внутри x или y
@@ -148,15 +151,16 @@ def _spectrum_peaks(res, n=6, rel=0.10, sep=2):
 def _fig_spectrum(res, ring_len):
     """Спектр Фурье: амплитуда по частоте (число колебаний за оборот), x — сплошная, y — пунктир; легенда по
     частицам. У самых явных пиков — вертикальный пунктир, ранг (#1..) и частота в Гц (Q·c/длина кольца)."""
-    fig = go.Figure(); qmax = 0
+    fig = go.Figure()
     for i, r in enumerate(res):
         c = COLORS[i % len(COLORS)]
         fig.add_trace(go.Scattergl(x=r["kx"].astype(np.float32), y=r["ax"].astype(np.float32), mode="lines",
                                    name=f"ч{i}", legendgroup=f"ч{i}", line=dict(color=c, width=1.4)))   # сплошная = x
         fig.add_trace(go.Scattergl(x=r["ky"].astype(np.float32), y=r["ay"].astype(np.float32), mode="lines",
                                    name=f"ч{i} · y", legendgroup=f"ч{i}", line=dict(color=c, width=1.1, dash="dot"), showlegend=False))
-        qmax = max(qmax, r["dqx"], r["dqy"])
-    peaks = _spectrum_peaks(res)                                 # разметка самых явных частот
+    tunemax = max((max(r["dqx"], r["dqy"]) for r in res), default=40.0)   # видимая зона — по ТЮНАМ, не по гармоникам
+    xmax = max(40.0, tunemax * 1.6)
+    peaks = [p for p in _spectrum_peaks(res) if p[0] <= xmax]    # подписываем только пики В видимой зоне
     lab = sorted([(q, a, comp, rk) for rk, (q, a, comp) in enumerate(peaks, 1)], key=lambda t: t[0])
     prev_q = -1e9; row = 0                                       # близкие по Q подписи разносим по высоте (цикл 0/28/56)
     for q, a, comp, rk in lab:
@@ -168,12 +172,12 @@ def _fig_spectrum(res, ring_len):
                            text=f"<b>#{rk}</b> · Q{comp}={round(q, 2):g}<br>{hz}",
                            font=dict(size=10, color="#333"), bgcolor="rgba(255,255,255,0.8)",
                            bordercolor="#ccc", borderwidth=1, borderpad=1)
-        prev_q = q; qmax = max(qmax, q)
+        prev_q = q
     fig.update_layout(title=dict(text="Спектр колебаний (Фурье): амплитуда по Q  (сплошная — x, пунктир — y)",
                                  x=0.5, xanchor="center", y=0.97, yanchor="top", font=dict(size=14)),
                       margin=dict(l=62, r=18, t=48, b=44), plot_bgcolor="white",
                       legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
-    fig.update_xaxes(title_text="Q — число колебаний за оборот", range=[0, max(40, qmax * 1.5)])
+    fig.update_xaxes(title_text="Q — число колебаний за оборот", range=[0, xmax])
     ytop = peaks[0][1] * 1.6 if peaks else None                  # запас сверху под подписи (в т.ч. разнесённые)
     fig.update_yaxes(title_text="амплитуда, мм", range=([0, ytop] if ytop else None))
     return fig
