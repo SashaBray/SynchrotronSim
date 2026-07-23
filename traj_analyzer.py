@@ -188,6 +188,93 @@ def _fig_spectrum(res, ring_len):
     return fig
 
 
+# --- ДЛИННЫЙ режим (много оборотов): огибающая амплитуды / фазовый портрет / затухание ------------
+def metrics_long(p):
+    """Метрики частицы в ДЛИННОМ режиме (turn-by-turn у плоскости): положение по оборотам + нормированная
+    амплитуда Ax=√(x²+(x'·σx/σx')²) (радиус в фазовом пр-ве) — её спад = затухание."""
+    x = np.asarray(p["tt_x"]) * 1e3; xp = np.asarray(p["tt_xp"]) * 1e3      # мм, мрад
+    y = np.asarray(p["tt_y"]) * 1e3; yp = np.asarray(p["tt_yp"]) * 1e3
+    turns = np.arange(len(x), dtype=float)
+    sx = np.std(x) or 1.0; sxp = np.std(xp) or 1.0
+    sy = np.std(y) or 1.0; syp = np.std(yp) or 1.0
+    Ax = np.sqrt(x ** 2 + (xp * sx / sxp) ** 2); Ay = np.sqrt(y ** 2 + (yp * sy / syp) ** 2)
+    return dict(survived=p["survived"], surv_turns=p["surv_turns"], turns=turns, x=x, xp=xp, y=y, yp=yp,
+                Ax=Ax, Ay=Ay, x0=float(x[0]) if len(x) else 0.0,
+                xmax=float(np.max(np.abs(x))) if len(x) else 0.0,
+                Ax0=float(Ax[0]) if len(Ax) else 0.0, Axend=float(Ax[-1]) if len(Ax) else 0.0)
+
+
+def _fig_info_long(res, n_turns):
+    P = len(res)
+    hdr = ["№", "оборотов", "нач. |x|, мм", "макс |x|, мм", "ампл Ax нач", "ампл Ax кон", "Δампл, %"]
+    col = [[str(i) for i in range(P)], [f"{r['surv_turns']}/{n_turns}" for r in res],
+           [f"{abs(r['x0']):.3f}" for r in res], [f"{r['xmax']:.3f}" for r in res],
+           [f"{r['Ax0']:.3f}" for r in res], [f"{r['Axend']:.3f}" for r in res],
+           [f"{(r['Axend']/r['Ax0']-1)*100:+.1f}" if r['Ax0'] > 0 else "—" for r in res]]
+    fig = go.Figure(go.Table(columnwidth=[26, 60, 65, 65, 65, 65, 60],
+        header=dict(values=hdr, fill_color="#4e79a7", font=dict(color="white", size=12), align="center", height=26),
+        cells=dict(values=col, align="center", height=22,
+                   fill_color=[["#f4f6f8" if i % 2 else "white" for i in range(P)]])))
+    fig.update_layout(margin=dict(l=6, r=6, t=6, b=6))
+    return fig
+
+
+def _fig_tbt(res, comp, title, unit):
+    """Turn-by-turn: положение (x или y) у плоскости инжекции по номеру оборота."""
+    fig = go.Figure()
+    for i, r in enumerate(res):
+        c = COLORS[i % len(COLORS)]
+        fig.add_trace(go.Scattergl(x=r["turns"].astype(np.float32), y=r[comp].astype(np.float32), mode="lines",
+                                   name=f"ч{i}", line=dict(color=c, width=1.0)))
+    fig.update_layout(title=dict(text=title, x=0.5, xanchor="center", y=0.97, yanchor="top", font=dict(size=14)),
+                      margin=dict(l=62, r=18, t=34, b=42), plot_bgcolor="white", hovermode="closest",
+                      legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
+    fig.update_xaxes(title_text="номер оборота")
+    fig.update_yaxes(title_text=unit, zeroline=True, zerolinecolor="#bbb")
+    return fig
+
+
+def _fig_envelope(res):
+    """Огибающая амплитуды Ax/Ay по оборотам — прямой индикатор затухания (спад) или роста."""
+    fig = go.Figure()
+    for i, r in enumerate(res):
+        c = COLORS[i % len(COLORS)]
+        fig.add_trace(go.Scattergl(x=r["turns"].astype(np.float32), y=r["Ax"].astype(np.float32), mode="lines",
+                                   name=f"ч{i} · Ax", line=dict(color=c, width=1.6)))
+        fig.add_trace(go.Scattergl(x=r["turns"].astype(np.float32), y=r["Ay"].astype(np.float32), mode="lines",
+                                   name=f"ч{i} · Ay", line=dict(color=c, width=1.1, dash="dot"), showlegend=False))
+    fig.update_layout(title=dict(text="Огибающая амплитуды по оборотам  (сплошная — Ax, пунктир — Ay) — спад = затухание",
+                                 x=0.5, xanchor="center", y=0.97, yanchor="top", font=dict(size=14)),
+                      margin=dict(l=62, r=18, t=34, b=42), plot_bgcolor="white", hovermode="closest",
+                      legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
+    fig.update_xaxes(title_text="номер оборота")
+    fig.update_yaxes(title_text="амплитуда (норм.), мм", rangemode="tozero")
+    return fig
+
+
+def _fig_phase(res):
+    """Фазовый портрет (x, x') у плоскости. Одна частица — цвет по обороту (эллипс=сохранение, спираль=затухание)."""
+    fig = go.Figure()
+    single = len(res) == 1
+    for i, r in enumerate(res):
+        if single:
+            fig.add_trace(go.Scattergl(x=r["x"].astype(np.float32), y=r["xp"].astype(np.float32), mode="markers",
+                                       marker=dict(size=2.6, color=r["turns"], colorscale="Viridis", showscale=True,
+                                                   colorbar=dict(title="оборот", thickness=12, len=0.9)),
+                                       name="(x, x')", hoverinfo="skip"))
+        else:
+            c = COLORS[i % len(COLORS)]
+            fig.add_trace(go.Scattergl(x=r["x"].astype(np.float32), y=r["xp"].astype(np.float32), mode="markers",
+                                       marker=dict(size=2.2, color=c), name=f"ч{i}", hoverinfo="skip"))
+    fig.update_layout(title=dict(text="Фазовый портрет (x, x') у плоскости инжекции  (эллипс — сохранение, спираль — затухание/рост)",
+                                 x=0.5, xanchor="center", y=0.97, yanchor="top", font=dict(size=14)),
+                      margin=dict(l=62, r=18, t=34, b=42), plot_bgcolor="white", hovermode="closest",
+                      legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
+    fig.update_xaxes(title_text="x, мм", zeroline=True, zerolinecolor="#bbb")
+    fig.update_yaxes(title_text="x', мрад", zeroline=True, zerolinecolor="#bbb")
+    return fig
+
+
 # JS: перетаскиваемые разделители между панелями (row-resize) + reflow графиков (Plotly.Plots.resize).
 _RESIZE_JS = r"""
 (function(){
@@ -273,6 +360,13 @@ def build_html(d, res):
             (_fig_dev(parts, "x", f"Отклонение по X от опорной орбиты: x(S) по частицам{xt}"), 0.26),
             (_fig_dev(parts, "y", f"Отклонение по Y от опорной орбиты: y(S) по частицам{xt}"), 0.26),
             (_fig_spectrum(res, ring), 0.32)]
+    return _assemble(d["lattice"], d["group"], title, subtitle, figs)
+
+
+def _assemble(lattice, group, title, subtitle, figs):
+    """Собрать самодостаточный HTML из списка (fig, вес): панели с перетаскиваемыми разделителями высоты.
+    plotly.js встроен ОДИН раз (первая панель). figs — [(go.Figure, доля_высоты)]."""
+    import json
     sw = sum(w for _, w in figs); props = [round(w / sw, 4) for _, w in figs]
     to = dict(full_html=False, default_width="100%", default_height="100%", config={"responsive": True})
     panels = [fig.to_html(include_plotlyjs=("inline" if i == 0 else False), **to) for i, (fig, _) in enumerate(figs)]
@@ -282,10 +376,25 @@ def build_html(d, res):
         if i < len(panels) - 1:
             wrap.append(f'<div class="splitter" data-a="p{i}" data-b="p{i+1}" title="потяните, чтобы изменить высоту"></div>')
     js = _RESIZE_JS.replace("__IDS__", json.dumps([f"p{i}" for i in range(len(panels))])).replace("__PROP__", json.dumps(props))
-    return (_PAGE.replace("__JS__", js)
-            .replace("__TITLE_ATTR__", f"Анализ траектории {d['lattice']}·{d['group']}")
-            .replace("__TITLE__", title).replace("__SUBTITLE__", subtitle)
-            .replace("__WRAP__", "\n".join(wrap)))
+    return (_PAGE.replace("__JS__", js).replace("__TITLE_ATTR__", f"Анализ траектории {lattice}·{group}")
+            .replace("__TITLE__", title).replace("__SUBTITLE__", subtitle).replace("__WRAP__", "\n".join(wrap)))
+
+
+def build_long_html(d, res):
+    """ДЛИННЫЙ отчёт (много оборотов, turn-by-turn): таблица · x(оборот) · огибающая амплитуды · фазовый портрет.
+    Отвечает на вопрос «угасают ли колебания»: спад огибающей / спираль фазового портрета = затухание."""
+    nt = d["n_turns"]; P = len(res); surv = sum(r["survived"] for r in res)
+    dA = [(r["Axend"] / r["Ax0"] - 1) * 100 for r in res if r["Ax0"] > 0]
+    dA_txt = f"Δампл. {min(dA):+.1f}…{max(dA):+.1f}%" if dA else "Δампл. —"
+    kind = "замкнутое кольцо" if d["closed"] else "открытый сегмент"
+    title = f"SynchrotronSim — ДЛИННЫЙ анализ (много оборотов), эксперимент {d['lattice']}·{d['group']} ({kind})"
+    subtitle = (f"{nt} оборотов (turn-by-turn у плоскости инжекции) · выжило {surv}/{P} за все {nt} об · "
+                f"кольцо {d['ring_len']:.1f} м · частиц {P} · {dA_txt} (спад = затухание)")
+    figs = [(_fig_info_long(res, nt), 0.14),
+            (_fig_tbt(res, "x", "Положение x у плоскости инжекции по оборотам", "x, мм"), 0.24),
+            (_fig_envelope(res), 0.28),
+            (_fig_phase(res), 0.34)]
+    return _assemble(d["lattice"], d["group"], title, subtitle, figs)
 
 
 def main():
@@ -300,9 +409,28 @@ def main():
     if not os.path.exists(path):
         sys.exit(f"[!] нет {path} — сначала: py -3.14 track3.py --mode kick-phys --exp {a.exp} --local")
     d = mte.read_local_npz(path)
-    nt = d["n_turns"]
-    res = [metrics(p, d["closed"], nt) for p in d["parts"]]
+    nt = d["n_turns"]; long_mode = d.get("mode") == "long"
+    out = a.out or os.path.join(RESULTS, f"traj_analysis_exp{a.exp}.html")
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
 
+    if long_mode:                                           # === ДЛИННЫЙ режим: огибающая / фазовый портрет ===
+        res = [metrics_long(p) for p in d["parts"]]
+        surv = sum(r["survived"] for r in res)
+        print(f"=== ДЛИННЫЙ анализ — эксперимент {a.exp} (решётка {d['lattice']}, {nt} оборотов, turn-by-turn) ===")
+        print(f"кольцо {d['ring_len']:.2f}м, частиц {len(res)}, выжило {surv}/{len(res)}")
+        print("\n№  оборотов    нач|x|,мм  макс|x|,мм  ампл_нач  ампл_кон  Δампл,%")
+        for i, r in enumerate(res):
+            dA = f"{(r['Axend']/r['Ax0']-1)*100:+.1f}" if r["Ax0"] > 0 else "—"
+            print(f"{i:<2} {r['surv_turns']:>5}/{nt:<6} {abs(r['x0']):>7.3f}   {r['xmax']:>8.3f}   "
+                  f"{r['Ax0']:>7.3f}  {r['Axend']:>7.3f}   {dA:>6}")
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(build_long_html(d, res))
+        print(f"\n[окно] {out}  (панели тянутся мышкой; фазовый портрет — эллипс=сохранение, спираль=затухание)")
+        if not a.no_open:
+            webbrowser.open("file:///" + os.path.abspath(out).replace(os.sep, "/"))
+        return
+
+    res = [metrics(p, d["closed"], nt) for p in d["parts"]]
     # --- краткая сводка в консоль ---
     surv = sum(r["survived"] for r in res)
     print(f"=== Анализ траектории — эксперимент {a.exp} (решётка {d['lattice']}, пучок {d['group']}, "
@@ -321,8 +449,6 @@ def main():
                   f"{r['min_mm']:>6.3f}   {r['dqx']:>5.0f}  {r['dqy']:>6.0f}   {clo:>8}")
 
     # --- интерактивное окно (HTML) ---
-    out = a.out or os.path.join(RESULTS, f"traj_analysis_exp{a.exp}.html")
-    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
         f.write(build_html(d, res))
     print(f"\n[окно] {out}  (панели тянутся мышкой за разделители)")
