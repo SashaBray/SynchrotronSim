@@ -155,9 +155,9 @@ def _fig_spectrum(res, ring_len):
     for i, r in enumerate(res):
         c = COLORS[i % len(COLORS)]
         fig.add_trace(go.Scattergl(x=r["kx"].astype(np.float32), y=r["ax"].astype(np.float32), mode="lines",
-                                   name=f"ч{i}", legendgroup=f"ч{i}", line=dict(color=c, width=1.4)))   # сплошная = x
+                                   name=f"ч{i}", legendgroup=f"ч{i}", line=dict(color=c, width=2.6)))   # толще — узкие пики видны
         fig.add_trace(go.Scattergl(x=r["ky"].astype(np.float32), y=r["ay"].astype(np.float32), mode="lines",
-                                   name=f"ч{i} · y", legendgroup=f"ч{i}", line=dict(color=c, width=1.1, dash="dot"), showlegend=False))
+                                   name=f"ч{i} · y", legendgroup=f"ч{i}", line=dict(color=c, width=2.0, dash="dot"), showlegend=False))
     tunemax = max((max(r["dqx"], r["dqy"]) for r in res), default=40.0)   # видимая зона — по ТЮНАМ, не по гармоникам
     xmax = max(40.0, tunemax * 1.6)
     peaks = [p for p in _spectrum_peaks(res) if p[0] <= xmax]    # подписываем только пики В видимой зоне
@@ -178,7 +178,7 @@ def _fig_spectrum(res, ring_len):
                       margin=dict(l=62, r=18, t=48, b=44), plot_bgcolor="white",
                       legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
     fig.update_xaxes(title_text="Q — число колебаний за оборот", range=[0, xmax])
-    ytop = peaks[0][1] * 1.6 if peaks else None                  # запас сверху под подписи (в т.ч. разнесённые)
+    ytop = peaks[0][1] * 1.3 if peaks else None                  # запас сверху под подписи (пики заполняют панель полнее)
     fig.update_yaxes(title_text="амплитуда, мм", range=([0, ytop] if ytop else None))
     return fig
 
