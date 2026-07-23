@@ -1,0 +1,196 @@
+// matrix_core.h — ФИЗИЧЕСКИЙ ДВИЖОК матричного ядра SynchrotronSim на C++.
+//
+// Дословный порт локальной физики Python-ядра matrix_tracker.py (симплектический секторный интегратор —
+// порт elegant CSBEND integrate_csbend_ordn — + мультипольный кик KQUAD/KSEXT/KOCT + распределённое
+// синхротронное излучение). Канонические координаты (x, px, y, py, t, delta): px,py нормированы на p0,
+// delta=Δp/p0. Все выражения и порядок операций сохранены как в Python, чтобы результат совпадал с
+// эталоном (matrix_tracker.py) — см. регрессию test_matrix_core_cpp.py.
+//
+// Python-ядро остаётся эталоном для разработки/опытов; нововведения переносятся сюда и валидируются.
+#pragma once
+#include <cmath>
+#include <string>
+#include <stdexcept>
+
+namespace mc {
+
+// ---- физические константы ПУЧКА (сурогат) — дословно как bip_matrix.py -------------------------
+constexpr double C_LIGHT = 299792458.0;
+constexpr double ME      = 9.1093837e-31;     // масса электрона, кг
+constexpr double E_CH    = 1.602176634e-19;   // элементарный заряд, Кл
+constexpr double Q_E     = -E_CH;             // заряд электрона
+constexpr double V_BEAM  = 2.967e8;           // скорость сурогатного пучка, м/с (particle_groups.csv)
+
+// q/p0 (опорная жёсткость). Считается ровно как bip_matrix.QP — beta,gamma,p_mom,QP той же формулой.
+inline double qp() {
+    double beta  = V_BEAM / C_LIGHT;
+    double gamma = 1.0 / std::sqrt(1.0 - beta * beta);
+    double p_mom = gamma * ME * V_BEAM;
+    return Q_E / p_mom;
+}
+
+// ---- константы РАДИАЦИИ — как matrix_tracker.py ------------------------------------------------
+constexpr double MC2_MEV       = 0.51099895069;              // энергия покоя электрона, МэВ
+constexpr double R_E           = 2.8179403262e-15;           // классический радиус электрона, м
+constexpr double RAD_K         = 2.0 / 3.0 * R_E;            // rad_coef = (2/3)·r_e·γ³/ρ²
+constexpr double YOSHIDA_BETA  = 1.25992104989487316477;     // 2^(1/3) — расщепление Йошиды 4-го порядка
+
+struct ParticleLost : std::runtime_error {
+    explicit ParticleLost(const std::string& m) : std::runtime_error(m) {}
+};
+
+struct State { double x, px, y, py, t, delta; };
+
+// Коэффициенты (дрейф, кик) Йошиды порядка 4 — дословно matrix_tracker._yoshida(4).
+struct Yoshida4 {
+    double d[4], k[4];
+    Yoshida4() {
+        double b = YOSHIDA_BETA;
+        d[0] = 0.5 / (2 - b); d[1] = (1 - b) / (2 - b) / 2;
+        d[2] = (1 - b) / (2 - b) / 2; d[3] = 0.5 / (2 - b);
+        k[0] = 1.0 / (2 - b); k[1] = -b / (2 - b); k[2] = 1.0 / (2 - b); k[3] = 0.0;
+    }
+};
+
+// Точный дрейф на длину ell (δ-корректный, канонический) — matrix_tracker._drift.
+inline State drift(const State& st, double ell) {
+    double arg = (1.0 + st.delta) * (1.0 + st.delta) - st.px * st.px - st.py * st.py;
+    if (arg <= 0.0) throw ParticleLost("p_perp>p (drift)");
+    double ps = std::sqrt(arg);
+    return { st.x + ell * st.px / ps, st.px, st.y + ell * st.py / ps, st.py,
+             st.t + ell * (1.0 + st.delta) / ps, st.delta };
+}
+
+// Нормированное поле (Fx,Fy) комбинированной функции до 4-го порядка — matrix_tracker._csbend_fields.
+inline void csbend_fields(double x, double y, double b1, double b2, double b3, double b4, double h,
+                          double& Fx, double& Fy) {
+    double h2 = h * h, h3 = h2 * h;
+    double x2 = x * x, y2 = y * y;
+    Fy = (1.0
+          + b1 * x + 0.5 * b2 * x2 + (b3 / 6.0) * x2 * x + (b4 / 24.0) * x2 * x2
+          + (-(h * b1) / 2.0 - b2 / 2.0) * y2
+          + ((h2 * b1) / 2.0 - (h * b2) / 2.0 - b3 / 2.0) * x * y2
+          + (-(h3 * b1) / 2.0 + (h2 * b2) / 2.0 - (h * b3) / 4.0 - b4 / 4.0) * x2 * y2
+          + ((h3 * b1) / 24.0 - (h2 * b2) / 24.0 + (h * b3) / 12.0 + b4 / 24.0) * y2 * y2);
+    Fx = (b1 * y + b2 * x * y + (b3 / 2.0) * x2 * y + (b4 / 6.0) * x2 * x * y
+          + ((h2 * b1) / 6.0 - (h * b2) / 6.0 - b3 / 6.0) * y2 * y
+          + (-(h3 * b1) / 3.0 + (h2 * b2) / 3.0 - (h * b3) / 6.0 - b4 / 6.0) * x * y2 * y);
+}
+
+struct Element {
+    std::string kind;
+    double Leff = 0.0;
+    int    nsl  = 5;
+    double theta0 = 0, k1 = 0, k1v = 0, k2 = 0, k3 = 0;   // силы по опорной жёсткости
+    double kEdge1 = 0, kEdge2 = 0;                        // краевые линзы E1/E2
+    bool   sector = false;                                // изгиб (dipole/dq) с theta0≠0 → секторный интегратор
+    bool   kick   = false;                                // прямой мультиполь (quad/sext/oct)
+    double rad_coef = 0;                                  // распределённое СИ (классическое); ISR пока не портирован
+    Yoshida4 ys;
+
+    // Сборка из физкоэф. mat_* (B,G,Gv,S,O — суммы обмоток) + Leff + проектной энергии — как Magnet.__init__.
+    static Element make(const std::string& kind, double Leff, double B, double G, double Gv,
+                        double S, double O, double edge1, double edge2, int nsl,
+                        double design_mev, bool sr) {
+        Element e; e.kind = kind; e.Leff = Leff; e.nsl = nsl;
+        double b = B, g = G, gv = Gv, s = S, o = O;
+        if (kind == "dipole") { g *= b; gv *= b; s *= b; o *= b; }   // градиенты диполя заданы относит. поля
+        double QP = qp();
+        e.theta0 = QP * b * Leff;
+        e.k1 = QP * g; e.k1v = QP * gv; e.k2 = QP * s; e.k3 = QP * o;
+        double rinv = (Leff > 0) ? e.theta0 / Leff : 0.0;
+        e.kEdge1 = std::tan(edge1) * rinv;
+        e.kEdge2 = std::tan(edge2) * rinv;
+        bool bend = (kind == "dipole" || kind == "dq") && std::fabs(e.theta0) > 0.0;
+        e.sector = bend;
+        bool nonzero = e.theta0 || e.k1 || e.k1v || e.k2 || e.k3 || e.kEdge1 || e.kEdge2;
+        e.kick = (!bend) && nonzero && (kind == "quad" || kind == "sext" || kind == "oct");
+        if (e.sector && sr) {                                        // распределённое СИ (классическое)
+            double gamma = design_mev / MC2_MEV;
+            double rho0  = -Leff / e.theta0;                         // ρ>0 (конвенция elegant)
+            e.rad_coef = RAD_K * gamma * gamma * gamma / (rho0 * rho0);
+        }
+        return e;
+    }
+
+    // Диспетчер тела: изгиб → секторный интегратор; прямой мультиполь → кик; иначе дрейф.
+    State body(const State& st) const {
+        if (sector) return body_sector(st);
+        if (kick)   return body_kick(st);
+        return drift(st, Leff);
+    }
+
+private:
+    // Секторный интегратор изгиба (+ классическое СИ) — matrix_tracker._body_sector_symplectic.
+    State body_sector(const State& st) const {
+        double x = st.x, px = st.px, y = st.y, py = st.py, t = st.t, d = st.delta;
+        double rho0 = -Leff / theta0;              // ρ>0 (конвенция elegant), θ0<0 у изгиба
+        double h = 1.0 / rho0;
+        double b1 = k1 * rho0, b2 = k2 * rho0, b3 = k3 * rho0, b4 = 0.0;
+        int N = nsl; double s = Leff / N;
+        px += kEdge1 * x; py -= kEdge1 * y;        // вход: краевой фокус E1
+        double X = x, QX = px, Y = y, QY = py, DP = d;
+        double dist = 0.0;
+        for (int i = 0; i < N; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                double dsh = s * ys.d[j];          // -- точный секторный ДРЕЙФ (движение по кругу) --
+                double f = (1.0 + DP) * (1.0 + DP) - QY * QY;
+                if (f <= 0.0) throw ParticleLost("sector: p_perp>p (drift)");
+                f = std::sqrt(f);
+                if (std::fabs(QX / f) > 1.0) throw ParticleLost("sector: |QX/f|>1 (drift)");
+                double sin_phi = QX / f;
+                double phi = std::asin(sin_phi);
+                double sine = std::sin(dsh / rho0 + phi), cosi = std::cos(dsh / rho0 + phi);
+                if (cosi == 0.0) throw ParticleLost("sector: cos=0 (drift)");
+                double cos_phi = std::cos(phi);
+                QX = f * sine;
+                double factor = (rho0 + X) * cos_phi / f * (sine / cosi - sin_phi / cos_phi);
+                Y += QY * factor;
+                dist += factor * (1.0 + DP);
+                double fr = cos_phi / cosi;
+                X = rho0 * (fr - 1.0) + fr * X;
+                if (ys.k[j] == 0.0) break;
+                double ds = s * ys.k[j];           // -- КИК поля с фактором кривизны (1+X/ρ) --
+                double Fx, Fy; csbend_fields(X, Y, b1, b2, b3, b4, h, Fx, Fy);
+                QX += -ds * (1.0 + X / rho0) * Fy / rho0;
+                QY +=  ds * (1.0 + X / rho0) * Fx / rho0;
+                if (rad_coef != 0.0) {             // -- РАДИАЦИЯ (СИ): классическая потеря энергии --
+                    double denom = (1.0 + DP) * (1.0 + DP) - QX * QX - QY * QY;
+                    if (denom <= 0.0) throw ParticleLost("sector: p_perp>p (radiation)");
+                    double ff = (1.0 + X / rho0) / std::sqrt(denom);
+                    double xp = QX * ff, yp = QY * ff;
+                    double ds_factor = std::sqrt((1.0 + X / rho0) * (1.0 + X / rho0) + xp * xp + yp * yp);
+                    double F2 = Fx * Fx + Fy * Fy;
+                    double delta_factor = (1.0 + DP) * (1.0 + DP);
+                    QX /= (1.0 + DP); QY /= (1.0 + DP);           // канонич. → наклон
+                    DP -= rad_coef * delta_factor * F2 * ds * ds_factor;
+                    QX *= (1.0 + DP); QY *= (1.0 + DP);           // наклон → канонич. при новой энергии
+                }
+            }
+        }
+        x = X; px = QX; y = Y; py = QY; d = DP;
+        px += kEdge2 * x; py -= kEdge2 * y;        // выход: краевой фокус E2
+        return { x, px, y, py, t + dist, d };
+    }
+
+    // Прямой мультиполь (KQUAD/KSEXT/KOCT) — matrix_tracker._body_kick_symplectic.
+    State body_kick(const State& st) const {
+        State p = st;
+        int N = nsl; double ds = Leff / N;
+        for (int i = 0; i < N; ++i) {
+            for (int j = 0; j < 4; ++j) {
+                p = drift(p, ds * ys.d[j]);        // дрейф по слопу
+                if (ys.k[j] == 0.0) break;
+                double kf = ds * ys.k[j];
+                double x = p.x, y = p.y;
+                p.px += (-k1 * x - 0.5 * k2 * (x * x - y * y)
+                         - (k3 / 6.0) * (x * x * x - 3.0 * x * y * y)) * kf;
+                p.py += (k1v * y + k2 * x * y
+                         + (k3 / 6.0) * (3.0 * x * x * y - y * y * y)) * kf;
+            }
+        }
+        return p;
+    }
+};
+
+} // namespace mc
