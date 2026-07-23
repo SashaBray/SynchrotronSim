@@ -64,7 +64,7 @@ def build_figure(d, res):
     parts, closed, ring = d["parts"], d["closed"], d["ring_len"]
     P = len(parts)
     fig = make_subplots(
-        rows=3, cols=1, row_heights=[0.22, 0.40, 0.38], vertical_spacing=0.09,
+        rows=3, cols=1, row_heights=[0.20, 0.42, 0.38], vertical_spacing=0.135,
         specs=[[{"type": "table"}], [{"type": "xy"}], [{"type": "xy"}]],
         subplot_titles=("", "Координаты: отклонение от опорной орбиты  x(S), y(S)",
                         "Спектр колебаний (Фурье): амплитуда по числу колебаний за оборот"))
@@ -101,7 +101,7 @@ def build_figure(d, res):
         qmax = max(qmax, r["dqx"], r["dqy"])
     fig.update_xaxes(title_text="S, м", row=2, col=1)
     fig.update_yaxes(title_text="отклонение, мм", row=2, col=1, zeroline=True, zerolinecolor="#bbb")
-    fig.update_xaxes(title_text="число колебаний за оборот (Q)", row=3, col=1,
+    fig.update_xaxes(title_text="Q — число колебаний за оборот", row=3, col=1, title_standoff=8,
                      range=[0, max(40, qmax * 3)])            # видимая зона у пиков; интерактивно зумится дальше
     fig.update_yaxes(title_text="амплитуда, мм", row=3, col=1)
 
@@ -113,8 +113,8 @@ def build_figure(d, res):
                         f"({kind})<br><sub>оборот {ring:.1f} м · элементов {len(d['elem_names'])-1} · частиц {P} · "
                         f"выжило {surv}/{P} · ср.откл. {mean_all:.3f} мм · макс {max_all:.3f} мм · "
                         f"локальные координаты (отклонение от опорной орбиты)</sub>", x=0.5, xanchor="center"),
-        margin=dict(l=70, r=30, t=90, b=50), plot_bgcolor="white", hovermode="closest",
-        legend=dict(orientation="h", y=-0.04, x=0.5, xanchor="center"))
+        margin=dict(l=70, r=30, t=95, b=110), plot_bgcolor="white", hovermode="closest",
+        legend=dict(orientation="h", y=-0.16, x=0.5, xanchor="center", yanchor="top"))
     return fig
 
 
