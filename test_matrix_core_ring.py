@@ -97,6 +97,23 @@ class TestMatrixCoreRing(unittest.TestCase):
         self.assertLess(worst, 1e-9, f".npz tt расходится с эталоном: {worst:.2e}")
         print(f"  [СИЛА exp1, .npz] numpy читает OK; tt vs эталон: {worst:.2e}; ring_len={r['ring_len']:.1f}м")
 
+    def test_full_mode(self):
+        # ПОЛНЫЙ режим (x(S)/спектр/тюны): C++ --full пишет mode=full npz — сверяем с local_trajectories.
+        subprocess.run([EXE, "--full", "1", "1"], capture_output=True, text=True)
+        r = mte.read_local_npz(NPZ1)
+        self.assertEqual(r["mode"], "full")
+        d = mte.local_trajectories(1, 1, n_turns=1)                    # Python эталон (SS_SR=1 в env)
+        worst = 0.0
+        for cp, loc, glo in zip(r["parts"], d["locals"], d["globals"]):
+            self.assertEqual(len(cp["S"]), len(loc), "разное число точек (прореживание?)")
+            for k, col in enumerate(("S", "x", "xp", "y", "yp", "ct", "delta")):
+                worst = max(worst, float(np.max(np.abs(np.asarray(cp[col]) - loc[:, k]))))
+            self.assertTrue(np.array_equal(np.asarray(cp["elem"]), loc[:, 7].astype(int)), "elem-индексы разошлись")
+            for k, col in enumerate(("X", "Y", "Z")):
+                worst = max(worst, float(np.max(np.abs(np.asarray(cp[col]) - glo[:, k]))))
+        self.assertLess(worst, 1e-9, f"full-режим расходится с эталоном: {worst:.2e}")
+        print(f"  [СИЛА exp1, full] точек/частицу {len(r['parts'][0]['S'])}; локальн.+глоб. vs эталон: {worst:.2e}")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

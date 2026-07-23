@@ -144,6 +144,82 @@ static int runTrack(const std::string& ws, int exp, int turns, double x0_mm, dou
     return 0;
 }
 
+// Чтение конфига опыта (лат/группа/Settings/радиация) — общее для --track и --full.
+struct ExpCfg { int lattice = -1, group = -1; mc::Settings stg; bool sr = false, rf_ideal = false; double design = 6000.0; };
+static bool readExpCfg(const std::string& ws, int exp, ExpCfg& c) {
+    mc::Table ex = mc::readTable(ws + "tables/experiments.csv");
+    int ce = ex.col("exp_id"), cl = ex.col("lattice_id"), cg = ex.col("group_id");
+    int clr = ex.col("loss_radius_mm"), cps = ex.col("plane_same_tol_mm"),
+        cptl = ex.col("plane_parallel_tol"), cns = ex.col("n_slices");
+    for (auto& r : ex.rows) if (mc::cell(r, ce) == std::to_string(exp)) {
+        c.lattice = std::stoi(mc::cell(r, cl)); c.group = std::stoi(mc::cell(r, cg));
+        if (!mc::cell(r, clr).empty())  c.stg.loss_radius_m      = std::stod(mc::cell(r, clr)) * 1e-3;
+        if (!mc::cell(r, cps).empty())  c.stg.plane_same_tol_m   = std::stod(mc::cell(r, cps)) * 1e-3;
+        if (!mc::cell(r, cptl).empty()) c.stg.plane_parallel_tol = std::stod(mc::cell(r, cptl));
+        if (!mc::cell(r, cns).empty())  c.stg.n_slices           = std::stoi(mc::cell(r, cns));
+        break;
+    }
+    if (c.lattice < 0) return false;
+    mc::Table rp = mc::readTable(ws + "tables/radiation_params.csv");   // строка → СИ вкл (энергия/ВЧ оттуда)
+    int re = rp.col("exp_id"), rd = rp.col("design_energy_mev"), rrf = rp.col("rf");
+    for (auto& r : rp.rows) if (mc::cell(r, re) == std::to_string(exp)) {
+        c.sr = true;
+        if (!mc::cell(r, rd).empty()) c.design = std::stod(mc::cell(r, rd));
+        c.rf_ideal = (mc::cell(r, rrf) == "ideal");
+        break;
+    }
+    return true;
+}
+
+// --full <exp> <turns> [x0_mm y0_mm] — ПОЛНЫЙ трек (x(S)/спектр/тюны): запись на границах элементов за все
+// обороты → results/trajectories_local_exp<exp>.npz (mode=full). БЕЗ ВЧ (как local_trajectories).
+static int runFull(const std::string& ws, int exp, int turns, double x0_mm, double y0_mm) {
+    ExpCfg c;
+    if (!readExpCfg(ws, exp, c)) { std::cerr << "Experiment " << exp << " not found\n"; return 1; }
+    const int TARGET = 30000;
+    mc::Injection inj = mc::inject(ws, c.lattice, c.group, c.design, c.sr, c.stg);
+    if (x0_mm != 0.0 || y0_mm != 0.0) {
+        inj.states.clear(); inj.states.push_back({ x0_mm * 1e-3, 0.0, y0_mm * 1e-3, 0.0, 0.0, 0.0 });
+    }
+    std::vector<std::string> elem_names; elem_names.push_back("INJ_PLANE");
+    for (auto& nd : inj.ordered) elem_names.push_back(nd.dev.empty() ? "?" : nd.dev);
+    std::printf("# exp %d lattice %d group %d: %zu particles, %s, %zu elements, sr=%d design=%.0f turns=%d (mode=full)\n",
+                exp, c.lattice, c.group, inj.states.size(), inj.closed ? "closed" : "open",
+                inj.ordered.size(), (int)c.sr, c.design, turns);
+    std::vector<double> S, x, px, y, py, ct, delta, X, Y, Z;
+    std::vector<int64_t> elem, counts, surv;
+    for (size_t i = 0; i < inj.states.size(); ++i) {
+        mc::FullResult fr = mc::trackFull(inj, inj.states[i], turns, TARGET);
+        counts.push_back((int64_t)fr.size()); surv.push_back(fr.surv_turns);
+        S.insert(S.end(), fr.S.begin(), fr.S.end());       px.insert(px.end(), fr.px.begin(), fr.px.end());
+        x.insert(x.end(), fr.x.begin(), fr.x.end());       y.insert(y.end(), fr.y.begin(), fr.y.end());
+        py.insert(py.end(), fr.py.begin(), fr.py.end());   ct.insert(ct.end(), fr.ct.begin(), fr.ct.end());
+        delta.insert(delta.end(), fr.delta.begin(), fr.delta.end());  elem.insert(elem.end(), fr.elem.begin(), fr.elem.end());
+        X.insert(X.end(), fr.X.begin(), fr.X.end());       Y.insert(Y.end(), fr.Y.begin(), fr.Y.end());
+        Z.insert(Z.end(), fr.Z.begin(), fr.Z.end());
+        std::printf("%zu points=%zu surv=%d\n", i, fr.size(), fr.surv_turns);
+    }
+    mc::NpzWriter npz;
+    npz.addVecI8("counts", counts);
+    npz.addVecF8("S", S); npz.addVecF8("x", x); npz.addVecF8("xp", px); npz.addVecF8("y", y);
+    npz.addVecF8("yp", py); npz.addVecF8("ct", ct); npz.addVecF8("delta", delta); npz.addVecI8("elem", elem);
+    npz.addVecF8("X", X); npz.addVecF8("Y", Y); npz.addVecF8("Z", Z);
+    npz.addVecStr("elem_names", elem_names);
+    npz.addVecI8("surv_turns", surv);
+    npz.addScalarStr("mode", "full");
+    npz.addScalarI8("n_turns", turns);
+    npz.addScalarBool("closed", inj.closed);
+    npz.addScalarF8("ring_len", inj.ring_len);
+    npz.addScalarI8("lattice", c.lattice); npz.addScalarI8("group", c.group);
+    npz.addScalarI8("sr", c.sr ? 1 : 0); npz.addScalarI8("isr", 0);
+    npz.addScalarStr("rf", "none"); npz.addScalarF8("design_mev", c.design);
+    std::error_code ec; std::filesystem::create_directories(ws + "results", ec);
+    std::string npzPath = ws + "results/trajectories_local_exp" + std::to_string(exp) + ".npz";
+    if (npz.write(npzPath)) std::printf("# npz: %s\n", npzPath.c_str());
+    else std::fprintf(stderr, "npz write failed: %s\n", npzPath.c_str());
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
     #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
@@ -151,17 +227,20 @@ int main(int argc, char* argv[]) {
     if (argc >= 2 && std::string(argv[1]) == "--element") {
         return runElement(argc, argv);
     }
-    if (argc >= 4 && std::string(argv[1]) == "--track") {
+    if ((argc >= 4) && (std::string(argv[1]) == "--track" || std::string(argv[1]) == "--full")) {
         std::string ws = findWorkspace(argv[0]);
         double x0 = (argc >= 5) ? std::stod(argv[4]) : 0.0;
         double y0 = (argc >= 6) ? std::stod(argv[5]) : 0.0;
-        return runTrack(ws, std::stoi(argv[2]), std::stoi(argv[3]), x0, y0);
+        int exp = std::stoi(argv[2]), turns = std::stoi(argv[3]);
+        return (std::string(argv[1]) == "--full") ? runFull(ws, exp, turns, x0, y0)
+                                                   : runTrack(ws, exp, turns, x0, y0);
     }
     std::cout << "MatrixTracker (SynchrotronSim matrix core, C++)\n"
                  "  --element <kind Leff B G Gv S O edge1 edge2 nsl design_mev sr> <x px y py t delta>\n"
                  "      прогнать тело одного элемента (валидация против Python-эталона)\n"
                  "  --track <exp_id> <turns> [x0_mm y0_mm]\n"
-                 "      автономный трек кольца из БД (инжекция + N об. + ВЧ по radiation_params.csv) →\n"
-                 "      results/trajectories_local_exp<exp>.npz для traj_analyzer; x0/y0 ⇒ одна частица (скан)\n";
+                 "      автономный трек кольца: turn-by-turn у плоскости + ВЧ → .npz (mode=long, затухание)\n"
+                 "  --full <exp_id> <turns> [x0_mm y0_mm]\n"
+                 "      полный трек: запись на границах элементов, x(S)/спектр/тюны → .npz (mode=full)\n";
     return (argc < 2) ? 1 : 0;
 }

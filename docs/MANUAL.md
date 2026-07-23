@@ -203,9 +203,11 @@ py -3.14 traj_analyzer.py 1                           # Python ТОЛЬКО ри
 C++ ядро (`src/matrix_core.h` физдвижок + `src/matrix_ring.h` кольцо) считает **автономно**: читает БД
 (`experiments`/`lattice_configs`/`element_connectivity`/`particle_groups`/`radiation_params`), строит кольцо
 с полной геометрией (`frame`/`_rot`, секторные дуги, `modified_drift`), инжектирует пучок, трекает N оборотов
-с СИ+ВЧ (правило `radiation_params.csv`) и пишет `results/trajectories_local_exp<exp>.npz` (mode=long) для
-`traj_analyzer`. Python больше **не считает** — только БД/анализ/визуализация. Режимы: `--track <exp> <turns>
-[x0_mm y0_mm]` (кольцо, x0/y0 ⇒ одна частица); `--element …` (тело одного элемента, для валидации).
+с СИ+ВЧ (правило `radiation_params.csv`) и пишет `results/trajectories_local_exp<exp>.npz` для `traj_analyzer`.
+Python больше **не считает** — только БД/анализ/визуализация. Режимы:
+- `--track <exp> <turns> [x0_mm y0_mm]` — turn-by-turn у плоскости + ВЧ → mode=long (затухание/огибающая);
+- `--full <exp> <turns> [x0_mm y0_mm]` — запись на границах элементов → mode=full (x(S)/спектр/тюны, без ВЧ);
+- `--element …` — тело одного элемента (валидация). x0/y0 ⇒ одна частица (скан).
 
 Python-ядро `matrix_tracker.py` — **эталон** для разработки/опытов: новое явление сначала в Python, потом порт
 в C++; регрессия `test_matrix_core_cpp.py` (элемент, бит-в-бит) и `test_matrix_core_ring.py` (кольцо+npz,

@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <fstream>
+#include <algorithm>
 
 namespace mc {
 
@@ -50,6 +51,14 @@ public:
         std::vector<uint8_t> buf(s.size() * 4, 0);
         for (size_t i = 0; i < s.size(); ++i) buf[i * 4] = (uint8_t)s[i];  // ASCII → кодпоинт в младшем байте
         add(name, "<U" + std::to_string(s.size()), "()", buf.data(), buf.size());
+    }
+    void addVecStr(const std::string& name, const std::vector<std::string>& v) {   // 1-D <U(maxlen)
+        size_t maxlen = 1;
+        for (const auto& s : v) maxlen = std::max(maxlen, s.size());
+        std::vector<uint8_t> buf(v.size() * maxlen * 4, 0);
+        for (size_t i = 0; i < v.size(); ++i)
+            for (size_t k = 0; k < v[i].size(); ++k) buf[(i * maxlen + k) * 4] = (uint8_t)v[i][k];
+        add(name, "<U" + std::to_string(maxlen), "(" + std::to_string(v.size()) + ",)", buf.data(), buf.size());
     }
 
     bool write(const std::string& path) const {

@@ -245,7 +245,7 @@ inline State toCanonical(const Particle& p, const Node& plane) {
 
 // Результат инжекции: плоскость-старт, упорядоченное кольцо, финиш, канон. состояния, замкнутость, периметр.
 struct Injection { Node plane; std::vector<Node> ordered; Node finish; std::vector<State> states;
-                   bool closed; double ring_len = 0.0; };
+                   bool closed; double ring_len = 0.0; std::vector<double> entry_arc; };
 
 inline Injection inject(const std::string& ws, int lattice, int group, double design_mev, bool sr,
                         const Settings& stg) {
@@ -288,14 +288,16 @@ inline Injection inject(const std::string& ws, int lattice, int group, double de
         inj.closed = false;
     }
     for (auto& p : parts) inj.states.push_back(toCanonical(p, inj.plane));
-    // периметр (ring_len) = зазоры (проекция на ось рамки) + длины элементов — как long_trajectories.
+    // опорная арк-длина входа каждого элемента (entry_arc) + периметр (ring_len) — как local_trajectories.
     const auto& O = inj.ordered;
-    double rl = dot(O[0].fr_in.p - inj.plane.fr_out.p, inj.plane.fr_out.axis);          // gap_in
-    for (size_t j = 1; j < O.size(); ++j)
-        rl += dot(O[j].fr_in.p - O[j - 1].fr_out.p, O[j - 1].fr_out.axis);              // ord_gaps
-    if (inj.closed) rl += dot(inj.finish.fr_in.p - O.back().fr_out.p, O.back().fr_out.axis);  // gap_out
-    for (const auto& nd : O) rl += nd.phys.Leff;
-    inj.ring_len = rl;
+    inj.entry_arc.resize(O.size());
+    inj.entry_arc[0] = dot(O[0].fr_in.p - inj.plane.fr_out.p, inj.plane.fr_out.axis);   // gap_in
+    for (size_t j = 1; j < O.size(); ++j) {
+        double ord_gap = dot(O[j].fr_in.p - O[j - 1].fr_out.p, O[j - 1].fr_out.axis);
+        inj.entry_arc[j] = inj.entry_arc[j - 1] + O[j - 1].phys.Leff + ord_gap;
+    }
+    double gap_out = inj.closed ? dot(inj.finish.fr_in.p - O.back().fr_out.p, O.back().fr_out.axis) : 0.0;
+    inj.ring_len = inj.entry_arc.back() + O.back().phys.Leff + gap_out;
     return inj;
 }
 
@@ -348,6 +350,63 @@ inline LongResult trackLong(const Injection& inj, const State& st0, int n_turns,
         }
     } catch (const ParticleLost&) { r.lost = true; }
     r.final_state = s;
+    return r;
+}
+
+// Локальные (x,y) в рамке fr → глобальные XYZ (matrix_traj_export.gp).
+inline void gp(const Frame& fr, double x, double y, double& X, double& Y, double& Z) {
+    Vec3 p = fr.p + fr.u * x + fr.v * y; X = p.x; Y = p.y; Z = p.z;
+}
+
+// ПОЛНЫЙ трек: запись (S,x,px,y,py,ct,delta,elem)+глоб.XYZ на ГРАНИЦАХ каждого элемента за все обороты
+// (для анализа x(S)/спектра/тюнов) с равномерным прореживанием до target точек. БЕЗ ВЧ — как local_trajectories.
+struct FullResult {
+    std::vector<double> S, x, px, y, py, ct, delta, X, Y, Z;
+    std::vector<int64_t> elem;
+    int surv_turns = 0;
+    size_t size() const { return S.size(); }
+};
+
+inline FullResult trackFull(const Injection& inj, const State& st0, int n_turns, int target) {
+    FullResult r; State st = st0;
+    const auto& O = inj.ordered; const auto& ea = inj.entry_arc;
+    auto rec = [&](double s, const State& p, int64_t el, const Frame& fr) {
+        r.S.push_back(s); r.x.push_back(p.x); r.px.push_back(p.px); r.y.push_back(p.y);
+        r.py.push_back(p.py); r.ct.push_back(p.t); r.delta.push_back(p.delta); r.elem.push_back(el);
+        double X, Y, Z; gp(fr, p.x, p.y, X, Y, Z); r.X.push_back(X); r.Y.push_back(Y); r.Z.push_back(Z);
+    };
+    rec(0.0, st, 0, inj.plane.fr_out);                                   // старт у плоскости
+    try {
+        for (int turn = 0; turn < n_turns; ++turn) {
+            double base = turn * inj.ring_len;
+            st = modified_drift(st, inj.plane.fr_out, O[0].fr_in, O[0].same_plane_as_prev);
+            rec(base + ea[0], st, 1, O[0].fr_in);                        // вход эл.0
+            st = O[0].body(st);
+            rec(base + ea[0] + O[0].phys.Leff, st, 1, O[0].fr_out);      // выход эл.0
+            for (size_t j = 1; j < O.size(); ++j) {
+                st = modified_drift(st, O[j - 1].fr_out, O[j].fr_in, O[j].same_plane_as_prev);
+                rec(base + ea[j], st, (int64_t)(j + 1), O[j].fr_in);
+                st = O[j].body(st);
+                rec(base + ea[j] + O[j].phys.Leff, st, (int64_t)(j + 1), O[j].fr_out);
+            }
+            if (inj.closed) {                                           // финиш = плоскость (замыкание)
+                st = modified_drift(st, O.back().fr_out, inj.finish.fr_in, inj.finish.same_plane_as_prev);
+                rec(base + inj.ring_len, st, 0, inj.finish.fr_in);
+            }
+            r.surv_turns = turn + 1;
+        }
+    } catch (const ParticleLost&) {}
+    size_t n = r.size();                                                 // равномерное прореживание (шаг ceil(n/target))
+    if (target > 0 && (int)n > target) {
+        size_t step = (n + (size_t)target - 1) / (size_t)target;
+        FullResult ds; ds.surv_turns = r.surv_turns;
+        for (size_t i = 0; i < n; i += step) {
+            ds.S.push_back(r.S[i]); ds.x.push_back(r.x[i]); ds.px.push_back(r.px[i]); ds.y.push_back(r.y[i]);
+            ds.py.push_back(r.py[i]); ds.ct.push_back(r.ct[i]); ds.delta.push_back(r.delta[i]);
+            ds.elem.push_back(r.elem[i]); ds.X.push_back(r.X[i]); ds.Y.push_back(r.Y[i]); ds.Z.push_back(r.Z[i]);
+        }
+        return ds;
+    }
     return r;
 }
 
