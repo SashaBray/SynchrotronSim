@@ -92,8 +92,43 @@ def _fig_dev(parts, comp, title):
     return fig
 
 
-def _fig_spectrum(res):
-    """Спектр Фурье: амплитуда по частоте (число колебаний за оборот), x — сплошная, y — пунктир; легенда по частицам."""
+LIGHT_C = 299792458.0                                            # м/с — пучок ультрарелятивистский (v≈c)
+
+
+def _hz(f):
+    if f >= 1e6:
+        return f"{f/1e6:.2f} МГц"
+    if f >= 1e3:
+        return f"{f/1e3:.1f} кГц"
+    return f"{f:.0f} Гц"
+
+
+def _spectrum_peaks(res, n=5, rel=0.10, sep=3):
+    """Самые явные пики ОГИБАЮЩЕЙ спектра (max по частицам и по x/y на каждой гармонике).
+    Возврат [(Q, amp)] по убыванию амплитуды, с мин. раздвижкой sep и порогом rel·max."""
+    lens = [len(r["ax"]) for r in res] + [len(r["ay"]) for r in res]
+    L = min(lens) if lens else 0
+    if L < 3:
+        return []
+    env = np.zeros(L)
+    for r in res:
+        env = np.maximum(env, np.asarray(r["ax"])[:L]); env = np.maximum(env, np.asarray(r["ay"])[:L])
+    mx = float(env.max())
+    cand = [(j, float(env[j])) for j in range(1, L - 1)
+            if env[j] > env[j - 1] and env[j] >= env[j + 1] and env[j] >= rel * mx]
+    cand.sort(key=lambda t: -t[1])
+    sel = []
+    for q, a in cand:
+        if all(abs(q - s[0]) >= sep for s in sel):
+            sel.append((q, a))
+        if len(sel) >= n:
+            break
+    return sel
+
+
+def _fig_spectrum(res, ring_len):
+    """Спектр Фурье: амплитуда по частоте (число колебаний за оборот), x — сплошная, y — пунктир; легенда по
+    частицам. У самых явных пиков — вертикальный пунктир, ранг (#1..) и частота в Гц (Q·c/длина кольца)."""
     fig = go.Figure(); qmax = 0
     for i, r in enumerate(res):
         c = COLORS[i % len(COLORS)]
@@ -102,12 +137,22 @@ def _fig_spectrum(res):
         fig.add_trace(go.Scattergl(x=r["ky"], y=r["ay"], mode="lines", name=f"ч{i} · y", legendgroup=f"ч{i}",
                                    line=dict(color=c, width=1.1, dash="dot"), showlegend=False))   # пунктир = y
         qmax = max(qmax, r["dqx"], r["dqy"])
+    peaks = _spectrum_peaks(res)                                 # разметка самых явных частот
+    for rank, (q, a) in enumerate(peaks, 1):
+        fig.add_vline(x=q, line=dict(color="#6b6b6b", width=1, dash="dash"))
+        hz = _hz(q * LIGHT_C / ring_len) if ring_len > 0 else "—"
+        fig.add_annotation(x=q, y=a, yanchor="bottom", yshift=4, showarrow=False, align="center",
+                           text=f"<b>#{rank}</b> · Q={q}<br>{hz}",
+                           font=dict(size=10, color="#333"), bgcolor="rgba(255,255,255,0.75)",
+                           bordercolor="#ccc", borderwidth=1, borderpad=1)
+        qmax = max(qmax, q)
     fig.update_layout(title=dict(text="Спектр колебаний (Фурье): амплитуда по Q  (сплошная — x, пунктир — y)",
                                  x=0.5, xanchor="center", y=0.97, yanchor="top", font=dict(size=14)),
-                      margin=dict(l=62, r=18, t=34, b=44), plot_bgcolor="white",
+                      margin=dict(l=62, r=18, t=48, b=44), plot_bgcolor="white",
                       legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
-    fig.update_xaxes(title_text="Q — число колебаний за оборот", range=[0, max(40, qmax * 3)])
-    fig.update_yaxes(title_text="амплитуда, мм")
+    fig.update_xaxes(title_text="Q — число колебаний за оборот", range=[0, max(40, qmax * 1.5)])
+    ytop = peaks[0][1] * 1.22 if peaks else None                 # запас сверху под подпись #1
+    fig.update_yaxes(title_text="амплитуда, мм", range=([0, ytop] if ytop else None))
     return fig
 
 
@@ -195,7 +240,7 @@ def build_html(d, res):
     info = _fig_info(res).to_html(include_plotlyjs="inline", **to)      # plotly.js встроен ОДИН раз (первая панель)
     devx = _fig_dev(parts, "x", "Отклонение по X от опорной орбиты: x(S) по частицам").to_html(include_plotlyjs=False, **to)
     devy = _fig_dev(parts, "y", "Отклонение по Y от опорной орбиты: y(S) по частицам").to_html(include_plotlyjs=False, **to)
-    spec = _fig_spectrum(res).to_html(include_plotlyjs=False, **to)
+    spec = _fig_spectrum(res, ring).to_html(include_plotlyjs=False, **to)
     return (_PAGE.replace("__JS__", _RESIZE_JS)
             .replace("__TITLE_ATTR__", f"Анализ траектории {d['lattice']}·{d['group']}")
             .replace("__TITLE__", title).replace("__SUBTITLE__", subtitle)
