@@ -17,6 +17,8 @@
          python track3.py --mode kick-phys --exp 99 --lattice 1 --group 1   (создать/переопределить эксперимент)
 """
 import os
+os.environ.setdefault("SS_SECTOR", "1")     # СЕКТОРНАЯ модель (m.body, бит-в-бит elegant) — нужна для локальных
+#                                             координат (x=отклонение от опорной орбиты); SS_SECTOR=0 форсит боксовую
 import sys
 import csv
 import argparse
@@ -30,10 +32,12 @@ TB = os.path.join("workspace", "tables")
 RESULTS = os.path.join("workspace", "results")
 
 
-def run_kick(lattice, group, source, exp_id=None, n_turns=1, thin_eps=0.0, settings=None):
+def run_kick(lattice, group, source, exp_id=None, n_turns=1, thin_eps=0.0, settings=None, save_local=False):
     """Режим 2: глобальный трек инжектированного пучка старт→финиш, n_turns оборотов. Возврат сводки.
     Замкнут (финиш=старт) ⇒ оборот(ы) + невязка; открыт (финиш≠старт) ⇒ путь до конца сегмента (n_turns=1).
-    thin_eps>0 (м) ⇒ потоковое прореживание траектории по кривизне (лёгкие длинные многооборотные треки)."""
+    thin_eps>0 (м) ⇒ потоковое прореживание траектории по кривизне (лёгкие длинные многооборотные треки).
+    save_local ⇒ доп. писать trajectories_local_exp{id}.npz — ЛОКАЛЬНЫЕ координаты (СЕКТОРНАЯ модель m.body,
+    x=отклонение от опорной орбиты) для анализатора; глоб. .bin остаётся боксовым (body_global)."""
     plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings)
     finish = info.get("finish", plane); closed = info.get("closed", True)
     if n_turns > 1 and not closed:
@@ -58,6 +62,11 @@ def run_kick(lattice, group, source, exp_id=None, n_turns=1, thin_eps=0.0, setti
     if exp_id is not None:
         os.makedirs(RESULTS, exist_ok=True)
         mte.write_bin(trajs, os.path.join(RESULTS, f"trajectories_exp{exp_id}.bin"))
+        if save_local:                                     # ЛОКАЛЬНЫЕ координаты — отдельным секторным треком (см. mte)
+            r = mte.local_trajectories(lattice, group, source=source, thin_eps=thin_eps, settings=settings)
+            mte.write_local_npz(os.path.join(RESULTS, f"trajectories_local_exp{exp_id}.npz"),
+                                r["locals"], r["globals"], r["elem_names"], r["closed"], r["thin_eps"],
+                                lattice, group, r["survived"], r["ring_len"])
         mte.ensure_experiment(exp_id, lattice)
     return dict(n=len(states), survived=survived, residuals=residuals, info=info, closed=closed,
                 turns=n_turns, lost_turns=lost_turns,
@@ -146,6 +155,7 @@ def main():
     ap.add_argument("--group", type=int, default=None, help="переопределить пучок (иначе — из experiments.csv[exp])")
     ap.add_argument("--turns", type=int, default=1, help="число оборотов (kick-phys, только замкнутый; >1 ⇒ авто-прореживание)")
     ap.add_argument("--thin", type=float, default=0.0, help="прореживание траектории по кривизне, ε в мм (0=авто: выкл для 1 об., 0.5мм для многих)")
+    ap.add_argument("--local", action="store_true", help="доп. писать локальные координаты матядра (S,x,x',y,y',ct,δ) в trajectories_local_exp{id}.npz — для traj_analyzer.py")
     # ПАРАМЕТРЫ ЯДРА: дефолт ← experiments.csv[exp] ← этот аргумент (приоритет справа налево)
     ap.add_argument("--loss-mm", type=float, default=None,
                     help="порог потери пучка, мм (иначе experiments.csv[loss_radius_mm], иначе дефолт ядра)")
@@ -183,7 +193,7 @@ def main():
         author_experiment(lattice, group, a.exp, loss_mm=settings.loss_radius_m * 1e3)
         print(f"  параметры ядра: {settings}")
         res = run_kick(lattice, group, "physical", exp_id=a.exp, n_turns=turns, thin_eps=thin_eps,
-                       settings=settings)
+                       settings=settings, save_local=a.local)
         kind = "замкнут" if res["closed"] else "ОТКРЫТ (старт→финиш сегмента)"
         print(f"\nРежим 2 ({a.mode}): {res['turns']} об., выжило {res['survived']}/{res['n']} частиц — путь {kind}.")
         print(f"  плоскость старта: '{res['after']}' → '{res['before']}'")
@@ -195,6 +205,8 @@ def main():
             print(f"  невязка замыкания за оборот (поперечн.): макс {max(rr)*1e3:.3f} мм, средн {np.mean(rr)*1e3:.3f} мм")
         if thin_eps > 0:
             print(f"  траектория прорежена по кривизне (ε={thin_eps*1e3:.2f}мм) — лёгкий bin для визуализации")
+        if a.local:
+            print(f"  локальные координаты матядра → results/trajectories_local_exp{a.exp}.npz (для traj_analyzer.py)")
 
 
 if __name__ == "__main__":

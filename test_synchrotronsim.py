@@ -302,5 +302,29 @@ class TestCppKernel(unittest.TestCase):
         self.assertEqual(r.returncode, 0, f"exe упал: {(r.stderr or r.stdout)[-400:]}")
 
 
+# ================================================================== 10. Локальный экспорт .npz (анализатор)
+class TestLocalNpz(unittest.TestCase):
+    """write_local_npz ↔ read_local_npz round-trip: формат локальных координат для traj_analyzer."""
+
+    def test_npz_roundtrip(self):
+        import matrix_traj_export as mte, tempfile
+        loc = [np.arange(8 * 3, dtype=float).reshape(3, 8), np.arange(8 * 2, dtype=float).reshape(2, 8) + 100]
+        glo = [np.arange(3 * 3, dtype=float).reshape(3, 3), np.arange(3 * 2, dtype=float).reshape(2, 3) + 50]
+        names = ["плоскость инжекции", "A", "B"]
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, "loc.npz")
+            mte.write_local_npz(p, loc, glo, names, True, 0.0, 1, 2, [True, False], 123.4)
+            d = mte.read_local_npz(p)
+        self.assertEqual(len(d["parts"]), 2)
+        self.assertEqual(len(d["parts"][0]["S"]), 3)
+        self.assertEqual(len(d["parts"][1]["S"]), 2)
+        self.assertTrue(d["parts"][0]["survived"])
+        self.assertFalse(d["parts"][1]["survived"])
+        self.assertAlmostEqual(d["ring_len"], 123.4)
+        self.assertEqual(d["elem_names"], names)
+        np.testing.assert_allclose(d["parts"][1]["x"], loc[1][:, 1])   # колонка x = столбец 1 записи
+        np.testing.assert_allclose(d["parts"][0]["Z"], glo[0][:, 2])   # глоб. Z сохранён
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")

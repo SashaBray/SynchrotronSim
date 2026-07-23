@@ -25,7 +25,10 @@ def _g(m, s_long, x, y):
 
 
 def body_global(m, st):
-    """Тело магнита: (st_после, [глоб. точки вдоль тела]). Может бросить ParticleLost."""
+    """Тело магнита: (st_после, [глоб. точки вдоль тела]). Может бросить ParticleLost.
+    БОКСОВАЯ модель (прямая ось + изгиб как кик) — для ГЛОБАЛЬНОГО пути .bin. Локальные координаты из неё
+    НЕ берём: у диполей её x = отклонение от прямой оси (растёт с изгибом), а не бетатрон от опорной орбиты —
+    для локальных используется секторная m.body() (см. local_trajectories)."""
     x, px, y, py, t, d = st
     if not m.nonzero:
         pts = [_g(m, 0.0, x, y)]
@@ -91,22 +94,35 @@ def _perp_dist(p, a, b):
 class Thinner:
     """Потоковое прореживание полилинии по кривизне (Reumann–Witkam): точка сохраняется, только если
     её удаление сдвинуло бы линию > eps. Прямые участки (дрейфы) → 2 точки; изгибы/бетатрон — сохранены.
-    eps в метрах; eps<=0 ⇒ прореживания нет (все точки). Держит в памяти только сохранённые точки."""
+    eps в метрах; eps<=0 ⇒ прореживания нет (все точки). Держит в памяти только сохранённые точки.
+
+    add(p, pay) — необязательный payload на точку (напр. локальная запись); result_local() вернёт payload'ы
+    ВЫРОВНЕННО с result() (те же сохранённые точки). Решение о прореживании — по ГЛОБ. геометрии p."""
     def __init__(self, eps):
-        self.eps = eps; self.out = []; self.anchor = None; self.prev = None
-    def add(self, p):
+        self.eps = eps; self.out = []; self.pay = []; self.anchor = None; self.prev = None
+        self.prev_pay = None; self._fin = False
+    def add(self, p, pay=None):
         p = (float(p[0]), float(p[1]), float(p[2]))
         if self.eps <= 0:
-            self.out.append(p); return
+            self.out.append(p); self.pay.append(pay); return
         if self.anchor is None:
-            self.out.append(p); self.anchor = p; self.prev = p; return
+            self.out.append(p); self.pay.append(pay); self.anchor = p; self.prev = p; self.prev_pay = pay; return
         if _perp_dist(self.prev, self.anchor, p) > self.eps:
-            self.out.append(self.prev); self.anchor = self.prev
-        self.prev = p
-    def result(self):
+            self.out.append(self.prev); self.pay.append(self.prev_pay); self.anchor = self.prev
+        self.prev = p; self.prev_pay = pay
+    def _finalize(self):
+        if self._fin:
+            return
+        self._fin = True
         if self.eps > 0 and self.prev is not None and (not self.out or self.out[-1] != self.prev):
-            self.out.append(self.prev)
+            self.out.append(self.prev); self.pay.append(self.prev_pay)
+    def result(self):
+        self._finalize()
         return np.asarray(self.out, dtype=np.float64)
+    def result_local(self):
+        """Payload'ы сохранённых точек (M, K) — или None, если payload не передавали."""
+        self._finalize()
+        return np.asarray(self.pay, dtype=np.float64) if (self.pay and self.pay[0] is not None) else None
 
 
 def deviation_paths(lattice, group, radius=1e-3, source="physical", settings=None):
@@ -206,11 +222,103 @@ def experiment_closure(lattice, group, source="physical", settings=None):
                 residual_mm=(max(res) * 1e3 if res else None))
 
 
+def local_trajectories(lattice, group, source="physical", thin_eps=0.0, settings=None):
+    """ЛОКАЛЬНЫЕ координаты СЕКТОРНОЙ модели (m.body при SS_SECTOR=1; x = отклонение от ОПОРНОЙ ОРБИТЫ,
+    бит-в-бит elegant) вдоль трека инжектированного пучка плоскость→кольцо→финиш. На точку (границы
+    элементов, вход/выход): S (опорная арк-длина, м), x, x'≡px, y, y'≡py, ct, δ + индекс элемента; плюс
+    глоб. XYZ (сверка/3D). Прореживание по кривизне (thin_eps, м). Возврат dict для write_local_npz.
+
+    NB: боксовый body_global тут НЕ годится — у диполей его x = отклонение от ПРЯМОЙ оси (растёт с изгибом,
+    ~сотни мм), а не бетатрон от опорной орбиты. Поэтому трекаем через m.body()+modified_drift (сектор).
+    Требует SS_SECTOR=1 (иначе m.body() = боксовая модель — предупреждение в вызывающем коде)."""
+    import beam_injection as bi
+    plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings)
+    finish = info.get("finish", plane); closed = bool(info.get("closed", True))
+    gap_in = float((ordered[0].fr_in[0] - plane.fr_out[0]) @ plane.fr_out[1])
+    ord_gaps = [float((ordered[j].fr_in[0] - ordered[j - 1].fr_out[0]) @ ordered[j - 1].fr_out[1])
+                for j in range(1, len(ordered))]
+    gap_out = float((finish.fr_in[0] - ordered[-1].fr_out[0]) @ ordered[-1].fr_out[1]) if closed else 0.0
+    entry_arc = [gap_in]                                          # опорная арк-длина входа каждого элемента
+    for j in range(1, len(ordered)):
+        entry_arc.append(entry_arc[-1] + ordered[j - 1].L + ord_gaps[j - 1])
+    ring_len = entry_arc[-1] + ordered[-1].L + gap_out
+
+    def gp(fr, x, y):                                            # локальные (x,y) в рамке fr → глоб. XYZ
+        p = fr[0] + x * fr[2] + y * fr[3]
+        return float(p[0]), float(p[1]), float(p[2])
+
+    def rec(S, st, elem):                                        # локальная запись точки (payload для Thinner)
+        return (S, st[0], st[1], st[2], st[3], st[4], st[5], elem)
+
+    elem_names = ["плоскость инжекции"] + [m.dev for m in ordered]
+    locals_all = []; globals_all = []; survived = []
+    for st0 in states:
+        st = tuple(map(float, st0)); th = Thinner(thin_eps); ok = True
+        th.add(gp(plane.fr_out, st[0], st[2]), rec(0.0, st, 0))
+        try:
+            st = mt.modified_drift(st, plane, ordered[0])
+            th.add(gp(ordered[0].fr_in, st[0], st[2]), rec(entry_arc[0], st, 1))
+            st = ordered[0].body(st)
+            th.add(gp(ordered[0].fr_out, st[0], st[2]), rec(entry_arc[0] + ordered[0].L, st, 1))
+            for j in range(1, len(ordered)):
+                st = mt.modified_drift(st, ordered[j - 1], ordered[j])
+                th.add(gp(ordered[j].fr_in, st[0], st[2]), rec(entry_arc[j], st, j + 1))
+                st = ordered[j].body(st)
+                th.add(gp(ordered[j].fr_out, st[0], st[2]), rec(entry_arc[j] + ordered[j].L, st, j + 1))
+            if closed:
+                st = mt.modified_drift(st, ordered[-1], finish)
+                th.add(gp(finish.fr_in, st[0], st[2]), rec(ring_len, st, 0))
+        except mt.ParticleLost:
+            ok = False
+        locals_all.append(th.result_local()); globals_all.append(th.result()); survived.append(ok)
+    return dict(locals=locals_all, globals=globals_all, survived=survived, elem_names=elem_names,
+                closed=closed, thin_eps=thin_eps, ring_len=ring_len, lattice=lattice, group=group)
+
+
 def write_bin(particles_pts, path):
     with open(path, "wb") as f:
         for pts in particles_pts:
             f.write(struct.pack("I", len(pts)))
             np.asarray(pts, np.float64).tofile(f)
+
+
+# --- ЛОКАЛЬНЫЕ координаты матричного ядра (.npz) — для анализатора траекторий ---------------------
+# На точку: S (опорная арк-длина, м) · x · x'≡px · y · y'≡py · ct · δ · elem (индекс элемента).
+# x',y' — КАНОНИЧЕСКИЕ импульсы матмодели (≈ угол наклона; отличие ~x'^3/2). elem: 0=плоскость инжекции,
+# j+1=ordered[j]. Хранится concat по частицам + counts (длины) ⇒ без ragged-массивов и без pickle.
+LOCAL_COLS = ("S", "x", "xp", "y", "yp", "ct", "delta", "elem")
+
+
+def write_local_npz(path, particles_local, particles_global, elem_names, closed, thin_eps,
+                    lattice, group, survived, ring_len):
+    """particles_local[i] — (M_i, 8) локальные записи; particles_global[i] — (M_i, 3) глоб. XYZ (для сверки/3D).
+    elem_names — имена по индексу элемента; survived[i] — дошла ли частица до конца; ring_len — полный оборот, м.
+    Сохраняет concat-колонки + counts + метаданные (без ragged-массивов и без pickle)."""
+    counts = np.array([len(a) for a in particles_local], np.int64)
+    L = np.concatenate(particles_local, axis=0) if len(particles_local) else np.zeros((0, 8))
+    G = np.concatenate(particles_global, axis=0) if len(particles_global) else np.zeros((0, 3))
+    np.savez(path, counts=counts,
+             S=L[:, 0], x=L[:, 1], xp=L[:, 2], y=L[:, 3], yp=L[:, 4], ct=L[:, 5], delta=L[:, 6],
+             elem=L[:, 7].astype(np.int64), X=G[:, 0], Y=G[:, 1], Z=G[:, 2],
+             elem_names=np.asarray(elem_names), survived=np.asarray(survived, bool),
+             closed=bool(closed), thin_eps=float(thin_eps), ring_len=float(ring_len),
+             lattice=int(lattice), group=int(group))
+
+
+def read_local_npz(path):
+    """Загрузка .npz → dict(parts=[{S,x,xp,y,yp,ct,delta,elem,X,Y,Z, survived} на частицу], elem_names, ...)."""
+    d = np.load(path, allow_pickle=False)
+    counts = d["counts"]; off = np.concatenate([[0], np.cumsum(counts)]).astype(int)
+    cols = ("S", "x", "xp", "y", "yp", "ct", "delta", "elem", "X", "Y", "Z")
+    surv = d["survived"]
+    parts = []
+    for i in range(len(counts)):
+        a, b = off[i], off[i + 1]
+        p = {c: d[c][a:b] for c in cols}; p["survived"] = bool(surv[i])
+        parts.append(p)
+    return dict(parts=parts, elem_names=[str(s) for s in d["elem_names"]], closed=bool(d["closed"]),
+                thin_eps=float(d["thin_eps"]), ring_len=float(d["ring_len"]),
+                lattice=int(d["lattice"]), group=int(d["group"]))
 
 
 def ensure_experiment(exp_id, lattice):
