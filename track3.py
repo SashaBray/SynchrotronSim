@@ -71,6 +71,20 @@ def run_kick(lattice, group, source, exp_id=None, n_turns=1, thin_eps=0.0, setti
                 after=info["after_elem"], before=info["before_elem"])
 
 
+def run_long(lattice, group, exp_id, n_turns, rf=None, x0=0.0, y0=0.0, settings=None):
+    """ДЛИННЫЙ турн-by-turn трек СЕКТОРНОЙ моделью (m.body) для анализа затухания/огибающей — минуя боксовый
+    глобальный путь run_kick (диполи в нём раздуваются, а с SR тем более бессмысленны). Пишет
+    trajectories_local_exp{id}.npz (mode='long') для traj_analyzer.py. Радиация — env SS_SR/SS_ISR (ставит main);
+    rf='ideal' — компенсация потерь. x0/y0 (м) ⇒ ОДНА частица со смещением (сканы апертуры) вместо пучка группы."""
+    states_override = [(x0, 0.0, y0, 0.0, 0.0, 0.0)] if (x0 or y0) else None
+    r = mte.long_trajectories(lattice, group, source="physical", settings=settings,
+                              n_turns=n_turns, states_override=states_override, rf=rf)
+    os.makedirs(RESULTS, exist_ok=True)
+    mte.write_local_npz(os.path.join(RESULTS, f"trajectories_local_exp{exp_id}.npz"), r)
+    mte.ensure_experiment(exp_id, lattice)
+    return r
+
+
 def author_experiment(lattice, group, exp_id, dt=1e-11, skip_steps=300000, loss_mm=12.0):
     """АВТОРИНГ конфига эксперимента в experiments.csv (установка+пучок+финиш-плоскость) — ЕДИНЫЙ
     источник, который читают ОБА ядра. Финиш-плоскость = плоскость инжекции пучка (полный оборот).
@@ -154,6 +168,14 @@ def main():
     ap.add_argument("--turns", type=int, default=1, help="число оборотов (kick-phys, только замкнутый; >1 ⇒ авто-прореживание)")
     ap.add_argument("--thin", type=float, default=0.0, help="прореживание траектории по кривизне, ε в мм (0=авто: выкл для 1 об., 0.5мм для многих)")
     ap.add_argument("--local", action="store_true", help="доп. писать локальные координаты матядра (S,x,x',y,y',ct,δ) в trajectories_local_exp{id}.npz — для traj_analyzer.py")
+    # ДЛИННЫЙ турн-by-turn режим + РАДИАЦИЯ (синхротронное излучение и затухание)
+    ap.add_argument("--long", action="store_true", help="длинный турн-by-turn трек (сектор m.body, много оборотов) → trajectories_local_exp{id}.npz (mode=long) для traj_analyzer; минует боксовый глоб. путь")
+    ap.add_argument("--sr", action="store_true", help="распределённое синхротронное излучение (потери энергии в изгибах, ∝γ⁴ по ПРОЕКТНОЙ энергии --design-mev)")
+    ap.add_argument("--isr", action="store_true", help="+ квантовое возбуждение ISR (гауссов шум фотонов; равновесный эмиттанс/энергоразброс). Требует --sr")
+    ap.add_argument("--rf", choices=["none", "ideal"], default="none", help="ВЧ-резонатор (компенсация потерь SR): ideal — восстановление δ за оборот ⇒ поперечное затухание. Требует --long")
+    ap.add_argument("--design-mev", type=float, default=None, help="ПРОЕКТНАЯ энергия пучка для SR, МэВ (СИЛА 6000; трекер гоняет сурогатный γ≈7, а SR ∝ γ⁴ берётся по проектной)")
+    ap.add_argument("--x0-mm", type=float, default=0.0, help="(--long) ОДНА частица со смещением по x, мм (скан апертуры/затухания) вместо пучка группы")
+    ap.add_argument("--y0-mm", type=float, default=0.0, help="(--long) смещение одной частицы по y, мм")
     # ПАРАМЕТРЫ ЯДРА: дефолт ← experiments.csv[exp] ← этот аргумент (приоритет справа налево)
     ap.add_argument("--loss-mm", type=float, default=None,
                     help="порог потери пучка, мм (иначе experiments.csv[loss_radius_mm], иначе дефолт ядра)")
@@ -164,6 +186,18 @@ def main():
     ap.add_argument("--n-slices", type=int, default=None,
                     help="срезов тела, ФОЛБЭК (приоритет у lattice_configs[n_slices]; иначе experiments.csv[n_slices])")
     a = ap.parse_args()
+
+    # РАДИАЦИЯ: флаги → env (ядро читает SS_SR/SS_ISR/SS_DESIGN_MEV при сборке магнитов). Ставить ДО трекинга.
+    if a.sr:
+        os.environ["SS_SR"] = "1"
+    if a.isr:
+        os.environ["SS_ISR"] = "1"
+    if a.design_mev is not None:
+        os.environ["SS_DESIGN_MEV"] = str(a.design_mev)
+    if a.isr and not a.sr:
+        ap.error("--isr (квантовое возбуждение) требует --sr")
+    if a.rf != "none" and not a.long:
+        ap.error("--rf требует --long (ВЧ применяется в турн-by-turn цикле)")
 
     # ЕДИНЫЙ ИСТОЧНИК: установка+пучок берутся из experiments.csv[exp]; --lattice/--group переопределяют
     # (и создают новую строку, если эксперимента ещё нет). Оба ядра стартуют из ОДНОГО конфига.
@@ -184,6 +218,23 @@ def main():
         s = res["survived"]
         print(f"\nРежим 1 (диффур): выжило {s if s is not None else '?'} частиц "
               f"(плоскость '{res['info']['after_elem']}'→'{res['info']['before_elem']}').")
+    elif a.long:                                           # ДЛИННЫЙ турн-by-turn (сектор m.body) + радиация/ВЧ
+        turns = max(1, a.turns)
+        author_experiment(lattice, group, a.exp, loss_mm=settings.loss_radius_m * 1e3)
+        print(f"  параметры ядра: {settings}")
+        rf = None if a.rf == "none" else a.rf
+        sr_txt = ("SR " + ("+ISR " if a.isr else "") + f"[проект {os.environ.get('SS_DESIGN_MEV', '6000')} МэВ] " if a.sr else "")
+        who = f"1 частица x0={a.x0_mm}мм y0={a.y0_mm}мм" if (a.x0_mm or a.y0_mm) else "пучок группы"
+        print(f"  ДЛИННЫЙ режим: {turns} об., {sr_txt}ВЧ={a.rf}, {who}")
+        r = run_long(lattice, group, a.exp, turns, rf=rf, x0=a.x0_mm / 1e3, y0=a.y0_mm / 1e3, settings=settings)
+        for i, (tt, sv) in enumerate(zip(r["turnbyturn"], r["surv_turns"])):
+            if len(tt) < 4:
+                print(f"  частица {i}: погибла на об.{sv}"); continue
+            w = min(len(tt), 80)                           # оконная амплитуда √2·σ на старте и в конце
+            ax0 = np.sqrt(2) * np.std(tt[:w, 0]); ax1 = np.sqrt(2) * np.std(tt[-w:, 0])
+            ay0 = np.sqrt(2) * np.std(tt[:w, 2]); ay1 = np.sqrt(2) * np.std(tt[-w:, 2])
+            print(f"  частица {i}: дошла {sv}/{turns} об.; ампл x {ax0*1e3:.3f}→{ax1*1e3:.3f} мм,  y {ay0*1e3:.3f}→{ay1*1e3:.3f} мм")
+        print(f"  → results/trajectories_local_exp{a.exp}.npz  (traj_analyzer.py {a.exp} — огибающая/фазовый портрет)")
     else:
         turns = max(1, a.turns)
         thin_eps = (a.thin * 1e-3) if a.thin > 0 else (5e-4 if turns > 1 else 0.0)   # мм→м; авто 0.5мм для многооборота

@@ -289,10 +289,15 @@ def local_trajectories(lattice, group, source="physical", settings=None, n_turns
                 elem_names=elem_names, closed=closed, ring_len=ring_len, lattice=lattice, group=group)
 
 
-def long_trajectories(lattice, group, source="physical", settings=None, n_turns=1000, states_override=None):
+def long_trajectories(lattice, group, source="physical", settings=None, n_turns=1000, states_override=None, rf=None):
     """ДЛИННЫЙ трек (много оборотов, 10к+): вместо полной траектории пишет состояние (x,x',y,y') у ПЛОСКОСТИ
     ИНЖЕКЦИИ РАЗ ЗА ОБОРОТ (turn-by-turn, ≤n_turns+1 точек/частицу) — для анализа огибающей/фазового портрета/
-    затухания. surv_turns — сколько оборотов частица прошла (=n_turns у выжившей). Сектор m.body (SS_SECTOR=1)."""
+    затухания. surv_turns — сколько оборотов частица прошла (=n_turns у выжившей). Сектор m.body (SS_SECTOR=1).
+
+    rf: ВЧ-резонатор (компенсация потерь SS_SR). None — выключен (δ дрейфует вниз от излучения). 'ideal' —
+    ИДЕАЛЬНЫЙ ВЧ: восстанавливает δ до значения в начале оборота (точная компенсация потери каждой частицы,
+    без синхротронных колебаний/энергоразброса). Именно ВЧ переводит падение канонического импульса в диполях
+    (радиация) в затухание поперечного УГЛА — см. matrix_tracker._body_sector_symplectic."""
     import beam_injection as bi
     plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings)
     if states_override is not None:
@@ -312,10 +317,13 @@ def long_trajectories(lattice, group, source="physical", settings=None, n_turns=
         tt = [(st[0], st[1], st[2], st[3])]                     # состояние у плоскости на старте
         try:
             for _turn in range(n_turns):                       # оборот: плоскость→кольцо→финиш(=плоскость)
+                d0 = st[5]                                      # δ в начале оборота (для идеального ВЧ)
                 st = mt.modified_drift(st, plane, ordered[0]); st = ordered[0].body(st)
                 for j in range(1, len(ordered)):
                     st = mt.modified_drift(st, ordered[j - 1], ordered[j]); st = ordered[j].body(st)
                 st = mt.modified_drift(st, ordered[-1], finish)
+                if rf == "ideal":                              # ВЧ: вернуть энергию, потерянную за оборот на SR
+                    st = (st[0], st[1], st[2], st[3], st[4], d0)
                 tt.append((st[0], st[1], st[2], st[3])); done += 1
         except mt.ParticleLost:
             pass

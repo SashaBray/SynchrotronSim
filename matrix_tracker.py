@@ -19,6 +19,24 @@ import bip_matrix as bm
 TB = os.path.join("workspace", "tables")
 QP = bm.QP                                   # q/p₀ (опорная жёсткость)
 
+# ---- РАСПРЕДЕЛЁННОЕ СИНХРОТРОННОЕ ИЗЛУЧЕНИЕ (порт elegant integrate_csbend_ordn) -----------------
+# Трекер гоняет СУРОГАТНЫЙ низкоэнергичный пучок (γ≈7, particle_groups.csv), но SR ∝ γ⁴ определяется
+# ПРОЕКТНОЙ энергией. Геометрия (углы, поле F, ds) от энергии не зависит, а в SR-формуле всё ДРОБНОЕ
+# (δ, нормир. F, сохранение угла QX/(1+δ)), поэтому проектную γ подставляем прямо в rad_coef —
+# фракционные изменения δ/QX одинаковы для сурогатного и проектного пучка. Единицы СИ, δ безразмерно.
+_MC2_MEV = 0.51099895069                     # энергия покоя электрона, МэВ
+_R_E = 2.8179403262e-15                      # классический радиус электрона, м
+_RAD_K = 2.0 / 3.0 * _R_E                     # классич.: rad_coef = (2/3)·r_e·γ³/ρ²  [1/м]  (U₀=E·∮rad_coef·ds)
+_ISR_K = _R_E * math.sqrt(55.0 / (24.0 * math.sqrt(3.0)) * 137.0359895)  # квант.: isr ∝ γ^2.5/|ρ|^1.5
+
+
+def _design_gamma():
+    """Приведённая энергия ПРОЕКТНОГО пучка (для SR). СИЛА: 6 ГэВ ⇒ γ≈11742. Env SS_DESIGN_MEV перекрывает."""
+    return float(os.environ.get("SS_DESIGN_MEV", "") or 6000.0) / _MC2_MEV
+
+
+_ISR_RNG = np.random.default_rng(int(os.environ.get("SS_ISR_SEED", "") or 12345))  # ГСЧ квантового возбуждения
+
 
 def _read(name):
     return list(csv.DictReader(open(os.path.join(TB, name), encoding="utf-8"), delimiter=";"))
@@ -227,12 +245,21 @@ class Magnet:
         # (box-модель = order 2, N=40 давала ~0.13мкм/шт). Рамки — обычные ⊥оси (прямой элемент, ветка else).
         self.kick_sector = (SECTOR and not self.sector and self.nonzero
                             and self.kind in ("quad", "sext", "oct"))
+        # РАДИАЦИОННЫЕ КОЭФ. (распределённая SR): по умолчанию 0 (излучение выключено/не изгиб).
+        # Считаются по ПРОЕКТНОЙ γ на изгибающих секторных элементах при SS_SR=1 (см. _body_sector_symplectic).
+        self.rad_coef = 0.0                                    # классич. потеря энергии ∝ γ³/ρ²
+        self.isr_coef = 0.0                                    # квантовое возбуждение ∝ γ^2.5/|ρ|^1.5
         if self.sector or self.kick_sector:
             # N срезов и порядок Йошиды = как elegant (N_SLICES=5, INTEGRATION_ORDER=4); env перекрывает.
             self._nsl_sector = int(os.environ.get("SS_SECTOR_NSL", "") or _SECTOR_NSLICES)
             self._yoshida_dk = _yoshida(int(os.environ.get("SS_SECTOR_ORDER", "") or 4))
         if self.sector:
             rho = self.Leff / self.theta0
+            if os.environ.get("SS_SR", "") == "1":             # распределённое SR включено
+                gam = _design_gamma(); rho0 = -self.Leff / self.theta0   # ρ0>0 (конвенция elegant)
+                self.rad_coef = _RAD_K * gam ** 3 / rho0 ** 2
+                if os.environ.get("SS_ISR", "") == "1":        # + квантовое возбуждение
+                    self.isr_coef = _ISR_K * gam ** 2.5 / abs(rho0) ** 1.5
             O = self.center + rho * self.uhat                  # центр кривизны дуги
             # изгиб идёт вокруг ЛОКАЛЬНОЙ вертикали vhat (при pitch/roll плоскость изгиба наклонена/повёрнута);
             # для yaw-only vhat=[0,0,1] ⇒ _rot(·,vhat,·) ≡ прежний _rotz, поведение бит-в-бит сохраняется.
@@ -343,6 +370,26 @@ class Magnet:
                 Fx, Fy = _csbend_fields(X, Y, b1, b2, b3, b4, h)
                 QX += -ds * (1.0 + X / rho0) * Fy / rho0
                 QY += ds * (1.0 + X / rho0) * Fx / rho0
+                if self.rad_coef or self.isr_coef:            # -- РАДИАЦИЯ (SR): порт elegant integrate_csbend_ordn --
+                    # Классич. потеря энергии ∝ F²·ds (затухание) + квантовое возбуждение ISR (гауссов шум).
+                    # УГОЛ QX/(1+δ) СОХРАНЯЕТСЯ (QX/=1+δ … QX*=1+δ_new): радиация уносит импульс вдоль скорости,
+                    # не меняя направления. Канонический QX падает вместе с δ ⇒ поперечное затухание даёт ВЧ.
+                    denom = (1.0 + DP) ** 2 - QX * QX - QY * QY
+                    if denom <= 0.0:
+                        raise ParticleLost("сектор: p⊥>p (радиация)")
+                    ff = (1.0 + X / rho0) / math.sqrt(denom)
+                    xp = QX * ff; yp = QY * ff                 # физ. углы (наклоны траектории)
+                    ds_factor = math.sqrt((1.0 + X / rho0) ** 2 + xp * xp + yp * yp)   # удлинение пути
+                    F2 = Fx * Fx + Fy * Fy
+                    delta_factor = (1.0 + DP) ** 2
+                    QX /= (1.0 + DP); QY /= (1.0 + DP)         # канонич. → наклон (радиация действует на энергию)
+                    if self.rad_coef:
+                        DP -= self.rad_coef * delta_factor * F2 * ds * ds_factor
+                    if self.isr_coef:
+                        ds_isr = self.Leff / (N * max(1, len(dfrac) - 1))   # длина под-шага (nSubsteps−1, как elegant)
+                        DP -= (self.isr_coef * delta_factor * F2 ** 0.75
+                               * math.sqrt(ds_isr * ds_factor) * float(_ISR_RNG.standard_normal()))
+                    QX *= (1.0 + DP); QY *= (1.0 + DP)         # наклон → канонич. при НОВОЙ энергии (импульс упал)
         x, px, y, py, d = X, QX, Y, QY, DP
         px += self.kEdge2 * x; py -= self.kEdge2 * y           # выход: краевой фокус E2
         return (x, px, y, py, t + dist, d)

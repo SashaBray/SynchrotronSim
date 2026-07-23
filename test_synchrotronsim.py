@@ -176,6 +176,42 @@ class TestConventions(unittest.TestCase):
 
 
 # ================================================================== 6. поле / Йошида
+class TestRadiation(unittest.TestCase):
+    """Распределённое синхротронное излучение (SS_SR): секторный диполь теряет энергию (δ↓);
+    выключено (дефолт) — rad_coef=0, тело бит-в-бит без излучения (симплектика сохраняется)."""
+
+    def _dipole(self, sr):
+        old = os.environ.get("SS_SR")                       # SR читается в __init__ по env — строим при нужном флаге
+        os.environ.setdefault("SS_DESIGN_MEV", "6000")      # проектная энергия СИЛА
+        if sr:
+            os.environ["SS_SR"] = "1"
+        else:
+            os.environ.pop("SS_SR", None)
+        try:
+            return make_magnet("dipole", 0.4178302891796566, angle=0.0094691022946895)
+        finally:
+            os.environ.pop("SS_SR", None) if old is None else os.environ.__setitem__("SS_SR", old)
+
+    def test_sr_off_by_default(self):
+        self.assertEqual(self._dipole(False).rad_coef, 0.0)   # без SS_SR радиации нет
+
+    def test_sr_loses_energy(self):
+        st = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)                 # осевая (проектная) частица
+        d_off = self._dipole(False).body(st)[5]
+        d_on = self._dipole(True).body(st)[5]
+        self.assertEqual(d_off, 0.0)                        # без излучения энергия сохраняется
+        self.assertLess(d_on, 0.0)                          # с излучением δ падает (потеря энергии)
+        self.assertTrue(1e-9 < -d_on < 1e-5)                # порядок (2/3)r_e·γ³/ρ²·L ≈ 6.5e-7 на этот диполь
+
+    def test_sr_preserves_angle(self):
+        # радиация уносит импульс вдоль скорости: физ. угол QX/(1+δ) почти неизменен (энергия падает)
+        st = (1e-3, 2e-4, 0.0, 0.0, 0.0, 0.0)
+        so = self._dipole(False).body(st); sr = self._dipole(True).body(st)
+        ang_off = so[1] / (1 + so[5]); ang_on = sr[1] / (1 + sr[5])
+        self.assertAlmostEqual(ang_off, ang_on, delta=1e-8)   # угол сохранён с точностью до высших порядков
+        self.assertLess(sr[5], 0.0)                            # энергия потеряна на излучение
+
+
 class TestFieldYoshida(unittest.TestCase):
     """Строительные блоки симплектического интегратора."""
 
