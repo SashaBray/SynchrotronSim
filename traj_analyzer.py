@@ -19,7 +19,6 @@ import argparse
 import webbrowser
 import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import matrix_traj_export as mte
 
 RESULTS = os.path.join("workspace", "results")
@@ -59,63 +58,145 @@ def metrics(p, closed):
                 dqx=dqx, dqy=dqy, clo=clo, kx=kx, ax=ax * 1e3, ky=ky, ay=ay * 1e3)   # амплитуды в мм
 
 
-def build_figure(d, res):
-    """3-панельная интерактивная фигура: таблица общей информации / координаты x(S),y(S) / спектр Фурье."""
-    parts, closed, ring = d["parts"], d["closed"], d["ring_len"]
-    P = len(parts)
-    fig = make_subplots(
-        rows=3, cols=1, row_heights=[0.20, 0.42, 0.38], vertical_spacing=0.135,
-        specs=[[{"type": "table"}], [{"type": "xy"}], [{"type": "xy"}]],
-        subplot_titles=("", "Координаты: отклонение от опорной орбиты  x(S), y(S)",
-                        "Спектр колебаний (Фурье): амплитуда по числу колебаний за оборот"))
-
-    # --- панель 1: таблица общей информации по частицам ---
+def _fig_info(res):
+    """Панель 1: таблица общей информации по частицам (fill'ит свой контейнер)."""
+    P = len(res)
     hdr = ["№", "дошла", "ср.|откл|, мм", "макс, мм", "мин, мм", "дом. Qx", "дом. Qy", "замык. |Δ|, мм"]
     col = [[str(i) for i in range(P)],
            ["да" if r["survived"] else "НЕТ" for r in res],
            [f"{r['mean_mm']:.3f}" for r in res], [f"{r['max_mm']:.3f}" for r in res],
            [f"{r['min_mm']:.3f}" for r in res], [str(r["dqx"]) for r in res], [str(r["dqy"]) for r in res],
            [("—" if r["clo"] is None else f"{r['clo']:.3f}") for r in res]]
-    fig.add_trace(go.Table(
+    fig = go.Figure(go.Table(
         columnwidth=[26, 40, 70, 55, 55, 50, 50, 75],
-        header=dict(values=hdr, fill_color="#4e79a7", font=dict(color="white", size=12), align="center"),
+        header=dict(values=hdr, fill_color="#4e79a7", font=dict(color="white", size=12), align="center", height=26),
         cells=dict(values=col, align="center", height=22,
-                   fill_color=[["#f4f6f8" if i % 2 else "white" for i in range(P)]])), row=1, col=1)
+                   fill_color=[["#f4f6f8" if i % 2 else "white" for i in range(P)]])))
+    fig.update_layout(margin=dict(l=6, r=6, t=6, b=6))
+    return fig
 
-    # --- панель 2: координаты x(S) (сплошная), y(S) (пунктир) по частицам ---
+
+def _fig_coords(parts):
+    """Панель 2: координаты x(S) (сплошная) / y(S) (пунктир) по частицам."""
+    fig = go.Figure()
     for i, p in enumerate(parts):
         c = COLORS[i % len(COLORS)]
         fig.add_trace(go.Scattergl(x=p["S"], y=p["x"] * 1e3, mode="lines", legendgroup=f"ч{i}",
-                                   name=f"ч{i} · x", line=dict(color=c, width=1.6)), row=2, col=1)
+                                   name=f"ч{i} · x", line=dict(color=c, width=1.6)))
         fig.add_trace(go.Scattergl(x=p["S"], y=p["y"] * 1e3, mode="lines", legendgroup=f"ч{i}",
-                                   name=f"ч{i} · y", line=dict(color=c, width=1.2, dash="dot"),
-                                   showlegend=False), row=2, col=1)
-    # --- панель 3: спектр Фурье x (сплошная), y (пунктир) ---
-    qmax = 0
+                                   name=f"ч{i} · y", line=dict(color=c, width=1.2, dash="dot"), showlegend=False))
+    fig.update_layout(title=dict(text="Координаты: отклонение от опорной орбиты  x(S), y(S)",
+                                 x=0.5, xanchor="center", y=0.97, yanchor="top", font=dict(size=14)),
+                      margin=dict(l=62, r=18, t=34, b=42), plot_bgcolor="white", hovermode="closest",
+                      legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
+    fig.update_xaxes(title_text="S, м")
+    fig.update_yaxes(title_text="отклонение, мм", zeroline=True, zerolinecolor="#bbb")
+    return fig
+
+
+def _fig_spectrum(res):
+    """Панель 3: спектр Фурье x (сплошная) / y (пунктир) по частицам."""
+    fig = go.Figure(); qmax = 0
     for i, r in enumerate(res):
         c = COLORS[i % len(COLORS)]
-        fig.add_trace(go.Scattergl(x=r["kx"], y=r["ax"], mode="lines", legendgroup=f"ч{i}",
-                                   name=f"ч{i} · x", line=dict(color=c, width=1.4), showlegend=False), row=3, col=1)
-        fig.add_trace(go.Scattergl(x=r["ky"], y=r["ay"], mode="lines", legendgroup=f"ч{i}",
-                                   name=f"ч{i} · y", line=dict(color=c, width=1.1, dash="dot"), showlegend=False), row=3, col=1)
+        fig.add_trace(go.Scattergl(x=r["kx"], y=r["ax"], mode="lines", name=f"ч{i} · x",
+                                   line=dict(color=c, width=1.4), showlegend=False))
+        fig.add_trace(go.Scattergl(x=r["ky"], y=r["ay"], mode="lines", name=f"ч{i} · y",
+                                   line=dict(color=c, width=1.1, dash="dot"), showlegend=False))
         qmax = max(qmax, r["dqx"], r["dqy"])
-    fig.update_xaxes(title_text="S, м", row=2, col=1)
-    fig.update_yaxes(title_text="отклонение, мм", row=2, col=1, zeroline=True, zerolinecolor="#bbb")
-    fig.update_xaxes(title_text="Q — число колебаний за оборот", row=3, col=1, title_standoff=8,
-                     range=[0, max(40, qmax * 3)])            # видимая зона у пиков; интерактивно зумится дальше
-    fig.update_yaxes(title_text="амплитуда, мм", row=3, col=1)
-
-    surv = sum(r["survived"] for r in res)
-    mean_all = np.mean([r["mean_mm"] for r in res]); max_all = max(r["max_mm"] for r in res)
-    kind = "замкнутое кольцо" if closed else "открытый сегмент"
-    fig.update_layout(
-        title=dict(text=f"SynchrotronSim — анализ траектории, эксперимент {d['lattice']}·{d['group']} "
-                        f"({kind})<br><sub>оборот {ring:.1f} м · элементов {len(d['elem_names'])-1} · частиц {P} · "
-                        f"выжило {surv}/{P} · ср.откл. {mean_all:.3f} мм · макс {max_all:.3f} мм · "
-                        f"локальные координаты (отклонение от опорной орбиты)</sub>", x=0.5, xanchor="center"),
-        margin=dict(l=70, r=30, t=95, b=110), plot_bgcolor="white", hovermode="closest",
-        legend=dict(orientation="h", y=-0.16, x=0.5, xanchor="center", yanchor="top"))
+    fig.update_layout(title=dict(text="Спектр колебаний (Фурье): амплитуда по числу колебаний за оборот",
+                                 x=0.5, xanchor="center", y=0.97, yanchor="top", font=dict(size=14)),
+                      margin=dict(l=62, r=18, t=34, b=44), plot_bgcolor="white", showlegend=False)
+    fig.update_xaxes(title_text="Q — число колебаний за оборот", range=[0, max(40, qmax * 3)])
+    fig.update_yaxes(title_text="амплитуда, мм")
     return fig
+
+
+# JS: перетаскиваемые разделители между панелями (row-resize) + reflow графиков (Plotly.Plots.resize).
+_RESIZE_JS = r"""
+(function(){
+ var SP=10, PROP=[0.20,0.44,0.36], IDS=['p0','p1','p2'];
+ function pdiv(id){return document.querySelector('#'+id+' .plotly-graph-div');}
+ function rs(id){var d=pdiv(id); if(d&&window.Plotly){try{Plotly.Plots.resize(d);}catch(e){}}}
+ function rsAll(){IDS.forEach(rs);}
+ function init(){
+  var w=document.getElementById('wrap'); if(!w||!w.clientHeight){setTimeout(init,60);return;}
+  var H=w.clientHeight-2*SP;
+  IDS.forEach(function(id,i){document.getElementById(id).style.height=Math.max(60,H*PROP[i])+'px';});
+  rsAll(); setTimeout(rsAll,250); setTimeout(rsAll,700);        // добить, если plotly ещё грузился
+ }
+ var sps=document.querySelectorAll('.splitter');
+ for(var k=0;k<sps.length;k++){(function(s){
+  s.addEventListener('mousedown',function(e){
+   e.preventDefault();
+   var a=document.getElementById(s.getAttribute('data-a')), b=document.getElementById(s.getAttribute('data-b'));
+   var y0=e.clientY, ha=a.getBoundingClientRect().height, hb=b.getBoundingClientRect().height;
+   function mv(ev){var dy=ev.clientY-y0, na=ha+dy, nb=hb-dy; if(na<60||nb<60)return;
+    a.style.height=na+'px'; b.style.height=nb+'px'; rs(a.id); rs(b.id);}
+   function up(){document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);rsAll();}
+   document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);
+  });
+ })(sps[k]);}
+ var rt=null;
+ window.addEventListener('resize',function(){                   // окно меняется → масштабируем панели пропорционально
+  clearTimeout(rt); rt=setTimeout(function(){
+   var w=document.getElementById('wrap'); if(!w)return;
+   var cur=IDS.map(function(id){return document.getElementById(id).getBoundingClientRect().height;});
+   var sum=cur.reduce(function(x,y){return x+y;},0); if(sum<=0){init();return;}
+   var H=w.clientHeight-2*SP;
+   IDS.forEach(function(id,i){document.getElementById(id).style.height=Math.max(60,H*cur[i]/sum)+'px';});
+   rsAll();
+  },120);
+ });
+ if(document.readyState!=='loading')init(); else document.addEventListener('DOMContentLoaded',init);
+})();
+"""
+
+_PAGE = r"""<!doctype html><html><head><meta charset="utf-8"><title>__TITLE_ATTR__</title>
+<style>
+html,body{margin:0;height:100%;}
+body{display:flex;flex-direction:column;font-family:sans-serif;}
+#hdr{padding:6px 16px 5px;text-align:center;border-bottom:1px solid #eee;flex:0 0 auto;}
+#hdr .t{font-size:18px;color:#2a3f5f;font-weight:600;}
+#hdr .s{font-size:12px;color:#666;margin-top:2px;}
+#wrap{flex:1 1 auto;display:flex;flex-direction:column;min-height:0;}
+.panel{overflow:hidden;position:relative;}
+.panel>.plotly-graph-div{width:100%;height:100%;}
+.splitter{height:10px;background:#eef0f2;border-top:1px solid #dce0e5;border-bottom:1px solid #dce0e5;
+ cursor:row-resize;flex:0 0 auto;}
+.splitter:hover{background:#ccd3da;}
+.splitter::after{content:"\2261";display:block;text-align:center;color:#8a96a3;font-size:11px;line-height:9px;}
+</style></head><body>
+<div id="hdr"><div class="t">__TITLE__</div><div class="s">__SUBTITLE__</div></div>
+<div id="wrap">
+<div class="panel" id="p0">__INFO__</div>
+<div class="splitter" data-a="p0" data-b="p1" title="потяните, чтобы изменить высоту"></div>
+<div class="panel" id="p1">__COORDS__</div>
+<div class="splitter" data-a="p1" data-b="p2" title="потяните, чтобы изменить высоту"></div>
+<div class="panel" id="p2">__SPEC__</div>
+</div>
+<script>__JS__</script>
+</body></html>"""
+
+
+def build_html(d, res):
+    """Самодостаточный HTML: заголовок + 3 панели (таблица/координаты/спектр) с перетаскиваемыми
+    разделителями высоты. Каждая панель — отдельный plotly-график, растягивается под свой контейнер."""
+    parts, closed, ring = d["parts"], d["closed"], d["ring_len"]
+    P = len(res); surv = sum(r["survived"] for r in res)
+    mean_all = float(np.mean([r["mean_mm"] for r in res])); max_all = max(r["max_mm"] for r in res)
+    kind = "замкнутое кольцо" if closed else "открытый сегмент"
+    title = f"SynchrotronSim — анализ траектории, эксперимент {d['lattice']}·{d['group']} ({kind})"
+    subtitle = (f"оборот {ring:.1f} м · элементов {len(d['elem_names'])-1} · частиц {P} · выжило {surv}/{P} · "
+                f"ср.откл. {mean_all:.3f} мм · макс {max_all:.3f} мм · локальные координаты (отклонение от опорной орбиты)")
+    to = dict(full_html=False, default_width="100%", default_height="100%", config={"responsive": True})
+    info = _fig_info(res).to_html(include_plotlyjs="inline", **to)      # plotly.js встроен ОДИН раз (первая панель)
+    coords = _fig_coords(parts).to_html(include_plotlyjs=False, **to)
+    spec = _fig_spectrum(res).to_html(include_plotlyjs=False, **to)
+    return (_PAGE.replace("__JS__", _RESIZE_JS)
+            .replace("__TITLE_ATTR__", f"Анализ траектории {d['lattice']}·{d['group']}")
+            .replace("__TITLE__", title).replace("__SUBTITLE__", subtitle)
+            .replace("__INFO__", info).replace("__COORDS__", coords).replace("__SPEC__", spec))
 
 
 def main():
@@ -146,9 +227,9 @@ def main():
     # --- интерактивное окно (HTML) ---
     out = a.out or os.path.join(RESULTS, f"traj_analysis_exp{a.exp}.html")
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
-    fig = build_figure(d, res)
-    fig.write_html(out, include_plotlyjs="inline", full_html=True, config={"responsive": True})
-    print(f"\n[окно] {out}")
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(build_html(d, res))
+    print(f"\n[окно] {out}  (панели тянутся мышкой за разделители)")
     if not a.no_open:
         webbrowser.open("file:///" + os.path.abspath(out).replace(os.sep, "/"))
 
