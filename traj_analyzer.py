@@ -76,37 +76,36 @@ def _fig_info(res):
     return fig
 
 
-def _fig_coords(parts):
-    """Панель 2: координаты x(S) (сплошная) / y(S) (пунктир) по частицам."""
+def _fig_dev(parts, comp, title):
+    """График отклонения от опорной орбиты по одной компоненте (comp='x' или 'y'): кривая на частицу."""
     fig = go.Figure()
     for i, p in enumerate(parts):
         c = COLORS[i % len(COLORS)]
-        fig.add_trace(go.Scattergl(x=p["S"], y=p["x"] * 1e3, mode="lines", legendgroup=f"ч{i}",
-                                   name=f"ч{i} · x", line=dict(color=c, width=1.6)))
-        fig.add_trace(go.Scattergl(x=p["S"], y=p["y"] * 1e3, mode="lines", legendgroup=f"ч{i}",
-                                   name=f"ч{i} · y", line=dict(color=c, width=1.2, dash="dot"), showlegend=False))
-    fig.update_layout(title=dict(text="Координаты: отклонение от опорной орбиты  x(S), y(S)",
-                                 x=0.5, xanchor="center", y=0.97, yanchor="top", font=dict(size=14)),
+        fig.add_trace(go.Scattergl(x=p["S"], y=p[comp] * 1e3, mode="lines", name=f"ч{i}",
+                                   line=dict(color=c, width=1.5),
+                                   hovertemplate="S=%{x:.1f} м<br>" + comp + "=%{y:.3f} мм<extra>ч" + str(i) + "</extra>"))
+    fig.update_layout(title=dict(text=title, x=0.5, xanchor="center", y=0.97, yanchor="top", font=dict(size=14)),
                       margin=dict(l=62, r=18, t=34, b=42), plot_bgcolor="white", hovermode="closest",
                       legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
     fig.update_xaxes(title_text="S, м")
-    fig.update_yaxes(title_text="отклонение, мм", zeroline=True, zerolinecolor="#bbb")
+    fig.update_yaxes(title_text=f"отклонение {comp}, мм", zeroline=True, zerolinecolor="#bbb")
     return fig
 
 
 def _fig_spectrum(res):
-    """Панель 3: спектр Фурье x (сплошная) / y (пунктир) по частицам."""
+    """Спектр Фурье: амплитуда по частоте (число колебаний за оборот), x — сплошная, y — пунктир; легенда по частицам."""
     fig = go.Figure(); qmax = 0
     for i, r in enumerate(res):
         c = COLORS[i % len(COLORS)]
-        fig.add_trace(go.Scattergl(x=r["kx"], y=r["ax"], mode="lines", name=f"ч{i} · x",
-                                   line=dict(color=c, width=1.4), showlegend=False))
-        fig.add_trace(go.Scattergl(x=r["ky"], y=r["ay"], mode="lines", name=f"ч{i} · y",
-                                   line=dict(color=c, width=1.1, dash="dot"), showlegend=False))
+        fig.add_trace(go.Scattergl(x=r["kx"], y=r["ax"], mode="lines", name=f"ч{i}", legendgroup=f"ч{i}",
+                                   line=dict(color=c, width=1.4)))                        # сплошная = x (в легенде)
+        fig.add_trace(go.Scattergl(x=r["ky"], y=r["ay"], mode="lines", name=f"ч{i} · y", legendgroup=f"ч{i}",
+                                   line=dict(color=c, width=1.1, dash="dot"), showlegend=False))   # пунктир = y
         qmax = max(qmax, r["dqx"], r["dqy"])
-    fig.update_layout(title=dict(text="Спектр колебаний (Фурье): амплитуда по числу колебаний за оборот",
+    fig.update_layout(title=dict(text="Спектр колебаний (Фурье): амплитуда по Q  (сплошная — x, пунктир — y)",
                                  x=0.5, xanchor="center", y=0.97, yanchor="top", font=dict(size=14)),
-                      margin=dict(l=62, r=18, t=34, b=44), plot_bgcolor="white", showlegend=False)
+                      margin=dict(l=62, r=18, t=34, b=44), plot_bgcolor="white",
+                      legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
     fig.update_xaxes(title_text="Q — число колебаний за оборот", range=[0, max(40, qmax * 3)])
     fig.update_yaxes(title_text="амплитуда, мм")
     return fig
@@ -115,13 +114,14 @@ def _fig_spectrum(res):
 # JS: перетаскиваемые разделители между панелями (row-resize) + reflow графиков (Plotly.Plots.resize).
 _RESIZE_JS = r"""
 (function(){
- var SP=10, PROP=[0.20,0.44,0.36], IDS=['p0','p1','p2'];
+ var SP=10, PROP=[0.15,0.26,0.26,0.33], IDS=['p0','p1','p2','p3'];
  function pdiv(id){return document.querySelector('#'+id+' .plotly-graph-div');}
  function rs(id){var d=pdiv(id); if(d&&window.Plotly){try{Plotly.Plots.resize(d);}catch(e){}}}
  function rsAll(){IDS.forEach(rs);}
+ function avail(){var w=document.getElementById('wrap'); return w?w.clientHeight-(IDS.length-1)*SP:0;}
  function init(){
   var w=document.getElementById('wrap'); if(!w||!w.clientHeight){setTimeout(init,60);return;}
-  var H=w.clientHeight-2*SP;
+  var H=avail();
   IDS.forEach(function(id,i){document.getElementById(id).style.height=Math.max(60,H*PROP[i])+'px';});
   rsAll(); setTimeout(rsAll,250); setTimeout(rsAll,700);        // добить, если plotly ещё грузился
  }
@@ -143,7 +143,7 @@ _RESIZE_JS = r"""
    var w=document.getElementById('wrap'); if(!w)return;
    var cur=IDS.map(function(id){return document.getElementById(id).getBoundingClientRect().height;});
    var sum=cur.reduce(function(x,y){return x+y;},0); if(sum<=0){init();return;}
-   var H=w.clientHeight-2*SP;
+   var H=avail();
    IDS.forEach(function(id,i){document.getElementById(id).style.height=Math.max(60,H*cur[i]/sum)+'px';});
    rsAll();
   },120);
@@ -171,9 +171,11 @@ body{display:flex;flex-direction:column;font-family:sans-serif;}
 <div id="wrap">
 <div class="panel" id="p0">__INFO__</div>
 <div class="splitter" data-a="p0" data-b="p1" title="потяните, чтобы изменить высоту"></div>
-<div class="panel" id="p1">__COORDS__</div>
+<div class="panel" id="p1">__DEVX__</div>
 <div class="splitter" data-a="p1" data-b="p2" title="потяните, чтобы изменить высоту"></div>
-<div class="panel" id="p2">__SPEC__</div>
+<div class="panel" id="p2">__DEVY__</div>
+<div class="splitter" data-a="p2" data-b="p3" title="потяните, чтобы изменить высоту"></div>
+<div class="panel" id="p3">__SPEC__</div>
 </div>
 <script>__JS__</script>
 </body></html>"""
@@ -191,12 +193,13 @@ def build_html(d, res):
                 f"ср.откл. {mean_all:.3f} мм · макс {max_all:.3f} мм · локальные координаты (отклонение от опорной орбиты)")
     to = dict(full_html=False, default_width="100%", default_height="100%", config={"responsive": True})
     info = _fig_info(res).to_html(include_plotlyjs="inline", **to)      # plotly.js встроен ОДИН раз (первая панель)
-    coords = _fig_coords(parts).to_html(include_plotlyjs=False, **to)
+    devx = _fig_dev(parts, "x", "Отклонение по X от опорной орбиты: x(S) по частицам").to_html(include_plotlyjs=False, **to)
+    devy = _fig_dev(parts, "y", "Отклонение по Y от опорной орбиты: y(S) по частицам").to_html(include_plotlyjs=False, **to)
     spec = _fig_spectrum(res).to_html(include_plotlyjs=False, **to)
     return (_PAGE.replace("__JS__", _RESIZE_JS)
             .replace("__TITLE_ATTR__", f"Анализ траектории {d['lattice']}·{d['group']}")
             .replace("__TITLE__", title).replace("__SUBTITLE__", subtitle)
-            .replace("__INFO__", info).replace("__COORDS__", coords).replace("__SPEC__", spec))
+            .replace("__INFO__", info).replace("__DEVX__", devx).replace("__DEVY__", devy).replace("__SPEC__", spec))
 
 
 def main():
