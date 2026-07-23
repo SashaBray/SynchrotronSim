@@ -146,9 +146,10 @@ def _fig_spectrum(res, ring_len):
         qmax = max(qmax, r["dqx"], r["dqy"])
     peaks = _spectrum_peaks(res)                                 # разметка самых явных частот
     lab = sorted([(q, a, comp, rk) for rk, (q, a, comp) in enumerate(peaks, 1)], key=lambda t: t[0])
-    prev_q = -1e9; extra = 0                                     # близкие по Q подписи разносим по высоте
+    prev_q = -1e9; row = 0                                       # близкие по Q подписи разносим по высоте (цикл 0/28/56)
     for q, a, comp, rk in lab:
-        extra = extra + 30 if (q - prev_q) < 2.0 else 0
+        row = (row + 1) if (q - prev_q) < 2.0 else 0
+        extra = (row % 3) * 28
         fig.add_vline(x=q, line=dict(color="#6b6b6b", width=1, dash="dash"))
         hz = _hz(q * LIGHT_C / ring_len) if ring_len > 0 else "—"
         fig.add_annotation(x=q, y=a, yanchor="bottom", yshift=6 + extra, showarrow=False, align="center",
@@ -161,7 +162,7 @@ def _fig_spectrum(res, ring_len):
                       margin=dict(l=62, r=18, t=48, b=44), plot_bgcolor="white",
                       legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
     fig.update_xaxes(title_text="Q — число колебаний за оборот", range=[0, max(40, qmax * 1.5)])
-    ytop = peaks[0][1] * 1.42 if peaks else None                 # запас сверху под подписи (в т.ч. разнесённые)
+    ytop = peaks[0][1] * 1.6 if peaks else None                  # запас сверху под подписи (в т.ч. разнесённые)
     fig.update_yaxes(title_text="амплитуда, мм", range=([0, ytop] if ytop else None))
     return fig
 
