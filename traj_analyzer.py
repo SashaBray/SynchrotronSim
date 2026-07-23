@@ -1,147 +1,166 @@
 # -*- coding: utf-8 -*-
-"""АНАЛИЗАТОР ТРАЕКТОРИЙ SynchrotronSim в ЛОКАЛЬНЫХ координатах матричного ядра.
+"""АНАЛИЗАТОР ТРАЕКТОРИЙ SynchrotronSim в ОТНОСИТЕЛЬНЫХ (локальных) координатах матричного ядра.
 
 Читает results/trajectories_local_exp{N}.npz (пишется `track3.py --mode kick-phys --exp N --local`):
-на точку — S (опорная арк-длина, м), x, x'≡px, y, y'≡py, ct, δ и индекс элемента. Работает В ЛОКАЛЬНЫХ
-координатах (отклонение от опорной орбиты + канонические углы), а НЕ в глобальных XYZ.
+на точку — S (опорная арк-длина, м), x, x'≡px, y, y'≡py, ct, δ, индекс элемента. Работает В ЛОКАЛЬНЫХ
+координатах: x,y = отклонение от ОПОРНОЙ ОРБИТЫ (секторная модель m.body, бит-в-бит elegant).
 
-По каждой частице: дошла/потеряна (и где), огибающая (max|x|,max|y| и в каком элементе), СКО, макс.
-углы, невязка замыкания (для замкнутого кольца), грубая оценка числа бетатронных колебаний. Плюс
-сводка «горячих» элементов (где поперечное отклонение максимально по всем частицам).
+Считает по каждой частице СРЕДНЕЕ/МАКС/МИН отклонение от опорной орбиты и делает ЧИСЛЕННОЕ ПРЕОБРАЗОВАНИЕ
+ФУРЬЕ x(S), y(S) — доминирующие частоты колебаний (число колебаний за оборот ≈ бетатронный тюн).
+Результат — ИНТЕРАКТИВНОЕ ОКНО (самодостаточный HTML, авто-открытие в браузере): сверху поле с общей
+информацией, ниже визуализация координат x(S)/y(S), ниже спектр колебаний (Фурье).
 
-Запуск:  py -3.14 traj_analyzer.py <exp_id> [--csv] [--elem-top N] [--part K]
+Запуск:  py -3.14 traj_analyzer.py <exp_id> [--no-open] [--out файл.html] [--csv]
 Сначала выгрузить локальные координаты:  py -3.14 track3.py --mode kick-phys --exp <N> --local
 """
 import os
 import sys
 import argparse
+import webbrowser
 import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import matrix_traj_export as mte
 
 RESULTS = os.path.join("workspace", "results")
+COLORS = ["#555555", "#e15759", "#f28e2b", "#4e79a7", "#59a14f", "#b07aa1", "#9c755f", "#edc948"]
 
 
-def _rms(a):
-    return float(np.sqrt(np.mean(a * a))) if len(a) else 0.0
-
-
-def _osc_count(a):
-    """Грубое число полупериодов колебаний: смены знака относительно среднего (для оценки бетатрона)."""
-    if len(a) < 3:
-        return 0
-    c = a - np.mean(a)
-    s = np.sign(c); s = s[s != 0]
-    return int(np.sum(s[1:] != s[:-1])) if len(s) > 1 else 0
-
-
-def analyze_particle(p, elem_names, closed, ring_len):
-    """Метрики одной частицы в локальных координатах. Возвращает dict (величины в мм / мрад / м)."""
-    S, x, xp, y, yp, elem = p["S"], p["x"], p["xp"], p["y"], p["yp"], p["elem"]
+def fft_spectrum(S, v):
+    """Амплитудный спектр v(S): ресемплинг на равномерную сетку, вычет среднего, |rFFT|·2/N.
+    Возврат (Q, amp): Q — число колебаний на пройденном пути (гармоника ≈ тюн за оборот), amp — амплитуда (те же ед., что v)."""
     n = len(S)
-    ix, iy = int(np.argmax(np.abs(x))), int(np.argmax(np.abs(y)))
-    r = dict(
-        n=n, survived=p["survived"], S_end=float(S[-1]) if n else 0.0,
-        max_x_mm=float(x[ix] * 1e3), max_x_S=float(S[ix]), max_x_elem=elem_names[int(elem[ix])],
-        max_y_mm=float(y[iy] * 1e3), max_y_S=float(S[iy]), max_y_elem=elem_names[int(elem[iy])],
-        rms_x_mm=_rms(x) * 1e3, rms_y_mm=_rms(y) * 1e3,
-        max_xp_mrad=float(np.max(np.abs(xp)) * 1e3) if n else 0.0,
-        max_yp_mrad=float(np.max(np.abs(yp)) * 1e3) if n else 0.0,
-        osc_x=_osc_count(x), osc_y=_osc_count(y),
-        end_elem=elem_names[int(elem[-1])] if n else "-",
-    )
-    # невязка замыкания (только для замкнутого кольца и выжившей частицы): старт vs финиш в локальных коорд.
-    if closed and p["survived"] and n >= 2:
-        r["clo_x_mm"] = float((x[-1] - x[0]) * 1e3); r["clo_xp_mrad"] = float((xp[-1] - xp[0]) * 1e3)
-        r["clo_y_mm"] = float((y[-1] - y[0]) * 1e3); r["clo_yp_mrad"] = float((yp[-1] - yp[0]) * 1e3)
-    else:
-        r["clo_x_mm"] = r["clo_xp_mrad"] = r["clo_y_mm"] = r["clo_yp_mrad"] = None
-    return r
+    if n < 8 or S[-1] <= S[0]:
+        return np.array([0.0]), np.array([0.0])
+    Su = np.linspace(float(S[0]), float(S[-1]), n)
+    vu = np.interp(Su, S, v)
+    vu = vu - np.mean(vu)
+    amp = np.abs(np.fft.rfft(vu)) * 2.0 / n
+    return np.arange(len(amp), dtype=float), amp        # k = число полных колебаний за пройденный путь
 
 
-def hot_elements(parts, elem_names, top):
-    """По каждому элементу — макс |x| (мм) по всем частицам; вернуть top «горячих»."""
-    peak = {}
-    for p in parts:
-        x, elem = np.abs(p["x"]), p["elem"]
-        for e in np.unique(elem):
-            m = float(np.max(x[elem == e]) * 1e3)
-            if m > peak.get(int(e), -1):
-                peak[int(e)] = m
-    rows = sorted(peak.items(), key=lambda kv: -kv[1])[:top]
-    return [(elem_names[e], v) for e, v in rows]
+def _dominant(k, amp):
+    """Доминирующая частота (гармоника с макс. амплитудой, кроме DC=0)."""
+    if len(amp) < 2:
+        return 0, 0.0
+    j = int(np.argmax(amp[1:])) + 1
+    return int(k[j]), float(amp[j])
 
 
-def _fmt(v, prec=3):
-    return "-" if v is None else f"{v:.{prec}f}"
+def metrics(p, closed):
+    """Метрики частицы: отклонение от опорной орбиты r=√(x²+y²), спектры x/y, доминирующие частоты."""
+    x, y, S = p["x"], p["y"], p["S"]
+    r_mm = np.hypot(x, y) * 1e3
+    kx, ax = fft_spectrum(S, x); ky, ay = fft_spectrum(S, y)
+    dqx, dax = _dominant(kx, ax); dqy, day = _dominant(ky, ay)
+    clo = float(np.hypot(x[-1] - x[0], y[-1] - y[0]) * 1e3) if (closed and p["survived"] and len(x) >= 2) else None
+    return dict(survived=p["survived"], n=len(S), S_end=float(S[-1]) if len(S) else 0.0,
+                mean_mm=float(np.mean(r_mm)), max_mm=float(np.max(r_mm)), min_mm=float(np.min(r_mm)),
+                dqx=dqx, dqy=dqy, clo=clo, kx=kx, ax=ax * 1e3, ky=ky, ay=ay * 1e3)   # амплитуды в мм
+
+
+def build_figure(d, res):
+    """3-панельная интерактивная фигура: таблица общей информации / координаты x(S),y(S) / спектр Фурье."""
+    parts, closed, ring = d["parts"], d["closed"], d["ring_len"]
+    P = len(parts)
+    fig = make_subplots(
+        rows=3, cols=1, row_heights=[0.22, 0.40, 0.38], vertical_spacing=0.09,
+        specs=[[{"type": "table"}], [{"type": "xy"}], [{"type": "xy"}]],
+        subplot_titles=("", "Координаты: отклонение от опорной орбиты  x(S), y(S)",
+                        "Спектр колебаний (Фурье): амплитуда по числу колебаний за оборот"))
+
+    # --- панель 1: таблица общей информации по частицам ---
+    hdr = ["№", "дошла", "ср.|откл|, мм", "макс, мм", "мин, мм", "дом. Qx", "дом. Qy", "замык. |Δ|, мм"]
+    col = [[str(i) for i in range(P)],
+           ["да" if r["survived"] else "НЕТ" for r in res],
+           [f"{r['mean_mm']:.3f}" for r in res], [f"{r['max_mm']:.3f}" for r in res],
+           [f"{r['min_mm']:.3f}" for r in res], [str(r["dqx"]) for r in res], [str(r["dqy"]) for r in res],
+           [("—" if r["clo"] is None else f"{r['clo']:.3f}") for r in res]]
+    fig.add_trace(go.Table(
+        columnwidth=[26, 40, 70, 55, 55, 50, 50, 75],
+        header=dict(values=hdr, fill_color="#4e79a7", font=dict(color="white", size=12), align="center"),
+        cells=dict(values=col, align="center", height=22,
+                   fill_color=[["#f4f6f8" if i % 2 else "white" for i in range(P)]])), row=1, col=1)
+
+    # --- панель 2: координаты x(S) (сплошная), y(S) (пунктир) по частицам ---
+    for i, p in enumerate(parts):
+        c = COLORS[i % len(COLORS)]
+        fig.add_trace(go.Scattergl(x=p["S"], y=p["x"] * 1e3, mode="lines", legendgroup=f"ч{i}",
+                                   name=f"ч{i} · x", line=dict(color=c, width=1.6)), row=2, col=1)
+        fig.add_trace(go.Scattergl(x=p["S"], y=p["y"] * 1e3, mode="lines", legendgroup=f"ч{i}",
+                                   name=f"ч{i} · y", line=dict(color=c, width=1.2, dash="dot"),
+                                   showlegend=False), row=2, col=1)
+    # --- панель 3: спектр Фурье x (сплошная), y (пунктир) ---
+    qmax = 0
+    for i, r in enumerate(res):
+        c = COLORS[i % len(COLORS)]
+        fig.add_trace(go.Scattergl(x=r["kx"], y=r["ax"], mode="lines", legendgroup=f"ч{i}",
+                                   name=f"ч{i} · x", line=dict(color=c, width=1.4), showlegend=False), row=3, col=1)
+        fig.add_trace(go.Scattergl(x=r["ky"], y=r["ay"], mode="lines", legendgroup=f"ч{i}",
+                                   name=f"ч{i} · y", line=dict(color=c, width=1.1, dash="dot"), showlegend=False), row=3, col=1)
+        qmax = max(qmax, r["dqx"], r["dqy"])
+    fig.update_xaxes(title_text="S, м", row=2, col=1)
+    fig.update_yaxes(title_text="отклонение, мм", row=2, col=1, zeroline=True, zerolinecolor="#bbb")
+    fig.update_xaxes(title_text="число колебаний за оборот (Q)", row=3, col=1,
+                     range=[0, max(40, qmax * 3)])            # видимая зона у пиков; интерактивно зумится дальше
+    fig.update_yaxes(title_text="амплитуда, мм", row=3, col=1)
+
+    surv = sum(r["survived"] for r in res)
+    mean_all = np.mean([r["mean_mm"] for r in res]); max_all = max(r["max_mm"] for r in res)
+    kind = "замкнутое кольцо" if closed else "открытый сегмент"
+    fig.update_layout(
+        title=dict(text=f"SynchrotronSim — анализ траектории, эксперимент {d['lattice']}·{d['group']} "
+                        f"({kind})<br><sub>оборот {ring:.1f} м · элементов {len(d['elem_names'])-1} · частиц {P} · "
+                        f"выжило {surv}/{P} · ср.откл. {mean_all:.3f} мм · макс {max_all:.3f} мм · "
+                        f"локальные координаты (отклонение от опорной орбиты)</sub>", x=0.5, xanchor="center"),
+        margin=dict(l=70, r=30, t=90, b=50), plot_bgcolor="white", hovermode="closest",
+        legend=dict(orientation="h", y=-0.04, x=0.5, xanchor="center"))
+    return fig
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("exp", type=int, help="id эксперимента (читает results/trajectories_local_exp{N}.npz)")
-    ap.add_argument("--elem-top", type=int, default=8, help="сколько «горячих» элементов показать")
-    ap.add_argument("--part", type=int, default=None, help="детальный дамп одной частицы (индекс)")
-    ap.add_argument("--csv", action="store_true", help="сохранить сводку в results/traj_analysis_exp{N}.csv")
+    ap.add_argument("--out", default=None, help="путь HTML (по умолч. results/traj_analysis_exp{N}.html)")
+    ap.add_argument("--no-open", action="store_true", help="не открывать окно в браузере автоматически")
+    ap.add_argument("--csv", action="store_true", help="доп. сохранить сводку в results/traj_analysis_exp{N}.csv")
     a = ap.parse_args()
 
     path = os.path.join(RESULTS, f"trajectories_local_exp{a.exp}.npz")
     if not os.path.exists(path):
         sys.exit(f"[!] нет {path} — сначала: py -3.14 track3.py --mode kick-phys --exp {a.exp} --local")
     d = mte.read_local_npz(path)
-    parts, names, closed, ring = d["parts"], d["elem_names"], d["closed"], d["ring_len"]
-    kind = "замкнутое кольцо" if closed else "открытый сегмент"
-    print(f"=== Анализ траекторий (локальные координаты матядра) — эксперимент {a.exp} ===")
-    print(f"установка {d['lattice']}, пучок {d['group']}, {kind}, элементов {len(names)-1}, "
-          f"оборот {ring:.2f}м, частиц {len(parts)}, прореживание ε={d['thin_eps']*1e3:.2f}мм")
+    res = [metrics(p, d["closed"]) for p in d["parts"]]
 
-    res = [analyze_particle(p, names, closed, ring) for p in parts]
+    # --- краткая сводка в консоль ---
     surv = sum(r["survived"] for r in res)
-    print(f"\nВыжило {surv}/{len(res)} (дошли до конца пути).")
-
-    # таблица по частицам
-    print("\n№  дошла  точек  S_кон,м   max|x|,мм (элемент)            СКОx  max|y|,мм            СКОy  max x',мрад  ~колеб")
+    print(f"=== Анализ траектории — эксперимент {a.exp} (решётка {d['lattice']}, пучок {d['group']}, "
+          f"{'замкнуто' if d['closed'] else 'открыто'}) ===")
+    print(f"оборот {d['ring_len']:.2f}м, элементов {len(d['elem_names'])-1}, частиц {len(res)}, выжило {surv}")
+    print("\n№  дошла  ср.|откл|,мм  макс,мм  мин,мм   дом.Qx  дом.Qy  замык.,мм")
     for i, r in enumerate(res):
-        flag = "да " if r["survived"] else "НЕТ"
-        loss = "" if r["survived"] else f"  ⟂потеря @ {r['end_elem']} (S={r['S_end']:.2f}м)"
-        print(f"{i:<2} {flag}   {r['n']:>5}  {r['S_end']:>7.2f}  {r['max_x_mm']:>9.3f} "
-              f"({r['max_x_elem'][:22]:<22}) {r['rms_x_mm']:>5.2f}  {r['max_y_mm']:>8.3f}  "
-              f"{r['rms_y_mm']:>5.2f}  {r['max_xp_mrad']:>9.3f}  {r['osc_x']//2:>4}{loss}")
+        clo = "—" if r["clo"] is None else f"{r['clo']:.3f}"
+        print(f"{i:<2} {'да ' if r['survived'] else 'НЕТ'}   {r['mean_mm']:>9.3f}  {r['max_mm']:>7.3f}  "
+              f"{r['min_mm']:>6.3f}   {r['dqx']:>5}  {r['dqy']:>6}   {clo:>8}")
 
-    # невязка замыкания
-    clo = [r for r in res if r["clo_x_mm"] is not None]
-    if clo:
-        print("\nНевязка замыкания за оборот (старт vs финиш, локальные координаты):")
-        for i, r in enumerate(res):
-            if r["clo_x_mm"] is not None:
-                print(f"  ч{i}: Δx={_fmt(r['clo_x_mm'])}мм Δx'={_fmt(r['clo_xp_mrad'])}мрад "
-                      f"Δy={_fmt(r['clo_y_mm'])}мм Δy'={_fmt(r['clo_yp_mrad'])}мрад")
+    # --- интерактивное окно (HTML) ---
+    out = a.out or os.path.join(RESULTS, f"traj_analysis_exp{a.exp}.html")
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    fig = build_figure(d, res)
+    fig.write_html(out, include_plotlyjs="inline", full_html=True, config={"responsive": True})
+    print(f"\n[окно] {out}")
+    if not a.no_open:
+        webbrowser.open("file:///" + os.path.abspath(out).replace(os.sep, "/"))
 
-    # «горячие» элементы
-    print(f"\n«Горячие» элементы (макс |x| по всем частицам), топ-{a.elem_top}:")
-    for nm, v in hot_elements(parts, names, a.elem_top):
-        print(f"  {v:>9.3f} мм  {nm}")
-
-    # детальный дамп одной частицы
-    if a.part is not None and 0 <= a.part < len(parts):
-        p = parts[a.part]
-        print(f"\nЧастица {a.part}: первые/последние 3 точки (S,м | x,мм | x',мрад | y,мм | y',мрад | элемент):")
-        for k in list(range(min(3, len(p["S"])))) + list(range(max(0, len(p["S"]) - 3), len(p["S"]))):
-            print(f"  S={p['S'][k]:8.3f}  x={p['x'][k]*1e3:9.3f}  x'={p['xp'][k]*1e3:8.3f}  "
-                  f"y={p['y'][k]*1e3:9.3f}  y'={p['yp'][k]*1e3:8.3f}  {names[int(p['elem'][k])]}")
-
-    # CSV-сводка (человеко-читаемая: ЗАПЯТАЯ-десятичная, ; разделитель — русский Excel)
-    if a.csv:
+    if a.csv:                                                # человеко-читаемая сводка (запятая-десятичная, ; — рус. Excel)
         cpath = os.path.join(RESULTS, f"traj_analysis_exp{a.exp}.csv")
         with open(cpath, "w", encoding="utf-8") as f:
-            f.write("частица;дошла;точек;S_конца_м;max_x_мм;элемент_max_x;СКО_x_мм;max_y_мм;СКО_y_мм;"
-                    "max_xprime_мрад;max_yprime_мрад;колебаний_x;невязка_x_мм;невязка_y_мм\n")
+            f.write("частица;дошла;ср_откл_мм;макс_мм;мин_мм;дом_Qx;дом_Qy;замыкание_мм\n")
             for i, r in enumerate(res):
-                row = [i, "да" if r["survived"] else "нет", r["n"], r["S_end"], r["max_x_mm"],
-                       r["max_x_elem"], r["rms_x_mm"], r["max_y_mm"], r["rms_y_mm"], r["max_xp_mrad"],
-                       r["max_yp_mrad"], r["osc_x"] // 2,
-                       r["clo_x_mm"] if r["clo_x_mm"] is not None else "",
-                       r["clo_y_mm"] if r["clo_y_mm"] is not None else ""]
+                row = [i, "да" if r["survived"] else "нет", r["mean_mm"], r["max_mm"], r["min_mm"],
+                       r["dqx"], r["dqy"], "" if r["clo"] is None else r["clo"]]
                 f.write(";".join(str(c).replace(".", ",") if isinstance(c, float) else str(c) for c in row) + "\n")
-        print(f"\n[CSV] {cpath}")
+        print(f"[CSV] {cpath}")
 
 
 if __name__ == "__main__":
