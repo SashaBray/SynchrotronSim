@@ -192,7 +192,27 @@ CLI-флаги ниже **перекрывают** таблицу (приори�
 `SS_SR`/`SS_ISR`/`SS_DESIGN_MEV`). Диффурное ядро (`--mode diff`) радиацию не моделирует — правило только
 для матричного. См. `matrix_tracker._body_sector_symplectic` и `load_radiation`.
 
-**Режимы:** `diff` — диффурное ядро (Boris по картам поля, эталон); `kick-phys` — матричное ядро на
+### Автономное матричное ядро на C++ (MatrixTracker)
+
+```powershell
+cmake --build build --target MatrixTracker           # собрать (MinGW g++ / MSVC через CMake)
+./build/MatrixTracker.exe --track 1 10000 5 0        # СИЛА, 10к об., 1 частица x0=5мм → .npz
+py -3.14 traj_analyzer.py 1                           # Python ТОЛЬКО рисует
+```
+
+C++ ядро (`src/matrix_core.h` физдвижок + `src/matrix_ring.h` кольцо) считает **автономно**: читает БД
+(`experiments`/`lattice_configs`/`element_connectivity`/`particle_groups`/`radiation_params`), строит кольцо
+с полной геометрией (`frame`/`_rot`, секторные дуги, `modified_drift`), инжектирует пучок, трекает N оборотов
+с СИ+ВЧ (правило `radiation_params.csv`) и пишет `results/trajectories_local_exp<exp>.npz` (mode=long) для
+`traj_analyzer`. Python больше **не считает** — только БД/анализ/визуализация. Режимы: `--track <exp> <turns>
+[x0_mm y0_mm]` (кольцо, x0/y0 ⇒ одна частица); `--element …` (тело одного элемента, для валидации).
+
+Python-ядро `matrix_tracker.py` — **эталон** для разработки/опытов: новое явление сначала в Python, потом порт
+в C++; регрессия `test_matrix_core_cpp.py` (элемент, бит-в-бит) и `test_matrix_core_ring.py` (кольцо+npz,
+end-to-end ~1e-11) ловит расхождение до бита. Не портировано: ISR (стохастика), box-тело (тюнингованные
+не-sector/kick элементы — у exp1 корректоры mat_*=0, дрейф точен).
+
+**Режимы:** `diff` — диффурное ядро (Boris по картам поля, эталон); `kick-phys` — матричное ядро (Python) на
 физкоэф. `mat_*` из `.lte`. Токовый режим (`kick-current`) **архивирован**: связь ток↔физкоэф. не была
 доверенной, ядро читает только `mat_*`.
 

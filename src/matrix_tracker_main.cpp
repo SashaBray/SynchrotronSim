@@ -17,6 +17,7 @@
 #include <system_error>
 #include "matrix_core.h"
 #include "matrix_ring.h"
+#include "matrix_npz.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -74,9 +75,10 @@ static int runElement(int argc, char* argv[]) {
     return 0;
 }
 
-// --track <exp_id> <turns> — АВТОНОМНЫЙ трек кольца из БД: инжекция + N оборотов + ВЧ.
-// Печатает финальные состояния (для регрессии против Python): "<idx> x px y py t delta surv" или "<idx> LOST surv".
-static int runTrack(const std::string& ws, int exp, int turns) {
+// --track <exp_id> <turns> [x0_mm y0_mm] — АВТОНОМНЫЙ трек кольца из БД: инжекция + N оборотов + ВЧ.
+// Пишет results/trajectories_local_exp<exp>.npz (mode=long) для traj_analyzer + печатает финальные состояния
+// (для регрессии): "<idx> x px y py t delta surv" или "<idx> LOST surv". x0/y0 (мм) ⇒ ОДНА частица (скан).
+static int runTrack(const std::string& ws, int exp, int turns, double x0_mm, double y0_mm) {
     mc::Table ex = mc::readTable(ws + "tables/experiments.csv");
     int ce = ex.col("exp_id"), cl = ex.col("lattice_id"), cg = ex.col("group_id");
     int clr = ex.col("loss_radius_mm"), cps = ex.col("plane_same_tol_mm"),
@@ -102,19 +104,43 @@ static int runTrack(const std::string& ws, int exp, int turns) {
         break;
     }
     mc::Injection inj = mc::inject(ws, lattice, group, design, sr, stg);
+    if (x0_mm != 0.0 || y0_mm != 0.0) {                        // ОДНА частица со смещением (скан апертуры/затухания)
+        inj.states.clear();
+        inj.states.push_back({ x0_mm * 1e-3, 0.0, y0_mm * 1e-3, 0.0, 0.0, 0.0 });
+    }
     std::printf("# exp %d lattice %d group %d: %zu particles, %s, %zu elements, sr=%d rf=%s design=%.0f turns=%d\n",
                 exp, lattice, group, inj.states.size(), inj.closed ? "closed" : "open",
                 inj.ordered.size(), (int)sr, rf_ideal ? "ideal" : "none", design, turns);
+    // трек + сбор turn-by-turn для .npz (mode=long)
+    std::vector<double> tx, txp, ty, typ;
+    std::vector<int64_t> tt_counts, surv;
     for (size_t i = 0; i < inj.states.size(); ++i) {
-        mc::TrackResult tr = mc::trackParticle(inj, inj.states[i], turns, rf_ideal);
-        if (tr.lost)
-            std::printf("%zu LOST %d\n", i, tr.surv_turns);
-        else {
-            const mc::State& s = tr.final_state;
-            std::printf("%zu %.17g %.17g %.17g %.17g %.17g %.17g %d\n",
-                        i, s.x, s.px, s.y, s.py, s.t, s.delta, tr.surv_turns);
-        }
+        mc::LongResult lr = mc::trackLong(inj, inj.states[i], turns, rf_ideal);
+        tt_counts.push_back((int64_t)lr.tt.size());
+        surv.push_back(lr.surv_turns);
+        for (auto& a : lr.tt) { tx.push_back(a[0]); txp.push_back(a[1]); ty.push_back(a[2]); typ.push_back(a[3]); }
+        const mc::State& s = lr.final_state;
+        if (lr.lost) std::printf("%zu LOST %d\n", i, lr.surv_turns);
+        else std::printf("%zu %.17g %.17g %.17g %.17g %.17g %.17g %d\n",
+                         i, s.x, s.px, s.y, s.py, s.t, s.delta, lr.surv_turns);
     }
+    // .npz для traj_analyzer (mode=long: turn-by-turn у плоскости старта)
+    mc::NpzWriter npz;
+    npz.addVecI8("tt_counts", tt_counts);
+    npz.addVecF8("tt_x", tx); npz.addVecF8("tt_xp", txp); npz.addVecF8("tt_y", ty); npz.addVecF8("tt_yp", typ);
+    npz.addVecI8("surv_turns", surv);
+    npz.addScalarStr("mode", "long");
+    npz.addScalarI8("n_turns", turns);
+    npz.addScalarBool("closed", inj.closed);
+    npz.addScalarF8("ring_len", inj.ring_len);
+    npz.addScalarI8("lattice", lattice); npz.addScalarI8("group", group);
+    npz.addScalarI8("sr", sr ? 1 : 0); npz.addScalarI8("isr", 0);
+    npz.addScalarStr("rf", rf_ideal ? "ideal" : "none");
+    npz.addScalarF8("design_mev", design);
+    std::error_code ec; std::filesystem::create_directories(ws + "results", ec);
+    std::string npzPath = ws + "results/trajectories_local_exp" + std::to_string(exp) + ".npz";
+    if (npz.write(npzPath)) std::printf("# npz: %s\n", npzPath.c_str());
+    else std::fprintf(stderr, "npz write failed: %s\n", npzPath.c_str());
     return 0;
 }
 
@@ -127,12 +153,15 @@ int main(int argc, char* argv[]) {
     }
     if (argc >= 4 && std::string(argv[1]) == "--track") {
         std::string ws = findWorkspace(argv[0]);
-        return runTrack(ws, std::stoi(argv[2]), std::stoi(argv[3]));
+        double x0 = (argc >= 5) ? std::stod(argv[4]) : 0.0;
+        double y0 = (argc >= 6) ? std::stod(argv[5]) : 0.0;
+        return runTrack(ws, std::stoi(argv[2]), std::stoi(argv[3]), x0, y0);
     }
     std::cout << "MatrixTracker (SynchrotronSim matrix core, C++)\n"
                  "  --element <kind Leff B G Gv S O edge1 edge2 nsl design_mev sr> <x px y py t delta>\n"
                  "      прогнать тело одного элемента (валидация против Python-эталона)\n"
-                 "  --track <exp_id> <turns>\n"
-                 "      автономный трек кольца из БД (инжекция + N оборотов + ВЧ по radiation_params.csv)\n";
+                 "  --track <exp_id> <turns> [x0_mm y0_mm]\n"
+                 "      автономный трек кольца из БД (инжекция + N об. + ВЧ по radiation_params.csv) →\n"
+                 "      results/trajectories_local_exp<exp>.npz для traj_analyzer; x0/y0 ⇒ одна частица (скан)\n";
     return (argc < 2) ? 1 : 0;
 }

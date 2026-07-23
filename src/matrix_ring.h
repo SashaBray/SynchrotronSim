@@ -9,6 +9,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <array>
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -242,8 +243,9 @@ inline State toCanonical(const Particle& p, const Node& plane) {
     return { x, px, y, py, 0.0, delta };
 }
 
-// Результат инжекции: плоскость-старт, упорядоченное кольцо, финиш, канон. состояния, замкнутость.
-struct Injection { Node plane; std::vector<Node> ordered; Node finish; std::vector<State> states; bool closed; };
+// Результат инжекции: плоскость-старт, упорядоченное кольцо, финиш, канон. состояния, замкнутость, периметр.
+struct Injection { Node plane; std::vector<Node> ordered; Node finish; std::vector<State> states;
+                   bool closed; double ring_len = 0.0; };
 
 inline Injection inject(const std::string& ws, int lattice, int group, double design_mev, bool sr,
                         const Settings& stg) {
@@ -286,6 +288,14 @@ inline Injection inject(const std::string& ws, int lattice, int group, double de
         inj.closed = false;
     }
     for (auto& p : parts) inj.states.push_back(toCanonical(p, inj.plane));
+    // периметр (ring_len) = зазоры (проекция на ось рамки) + длины элементов — как long_trajectories.
+    const auto& O = inj.ordered;
+    double rl = dot(O[0].fr_in.p - inj.plane.fr_out.p, inj.plane.fr_out.axis);          // gap_in
+    for (size_t j = 1; j < O.size(); ++j)
+        rl += dot(O[j].fr_in.p - O[j - 1].fr_out.p, O[j - 1].fr_out.axis);              // ord_gaps
+    if (inj.closed) rl += dot(inj.finish.fr_in.p - O.back().fr_out.p, O.back().fr_out.axis);  // gap_out
+    for (const auto& nd : O) rl += nd.phys.Leff;
+    inj.ring_len = rl;
     return inj;
 }
 
@@ -312,6 +322,33 @@ inline TrackResult trackParticle(const Injection& inj, const State& st0, int n_t
         return { s, done, true };
     }
     return { s, done, false };
+}
+
+// ДЛИННЫЙ трек: состояние (x,px,y,py) у плоскости старта РАЗ ЗА ОБОРОТ (как long_trajectories: tt[0]=старт,
+// tt[k]=после k-го оборота, ≤n_turns+1 точек). Для вывода в .npz анализатору.
+struct LongResult { std::vector<std::array<double, 4>> tt; int surv_turns = 0; State final_state; bool lost = false; };
+
+inline LongResult trackLong(const Injection& inj, const State& st0, int n_turns, bool rf_ideal) {
+    LongResult r; State s = st0;
+    r.tt.push_back({ s.x, s.px, s.y, s.py });
+    const auto& O = inj.ordered;
+    try {
+        for (int turn = 0; turn < n_turns; ++turn) {
+            double d0 = s.delta;
+            s = modified_drift(s, inj.plane.fr_out, O[0].fr_in, O[0].same_plane_as_prev);
+            s = O[0].body(s);
+            for (size_t j = 1; j < O.size(); ++j) {
+                s = modified_drift(s, O[j - 1].fr_out, O[j].fr_in, O[j].same_plane_as_prev);
+                s = O[j].body(s);
+            }
+            s = modified_drift(s, O.back().fr_out, inj.finish.fr_in, inj.finish.same_plane_as_prev);
+            if (rf_ideal) s.delta = d0;
+            r.tt.push_back({ s.x, s.px, s.y, s.py });
+            r.surv_turns = turn + 1;
+        }
+    } catch (const ParticleLost&) { r.lost = true; }
+    r.final_state = s;
+    return r;
 }
 
 } // namespace mc

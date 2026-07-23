@@ -387,7 +387,8 @@ def read_local_npz(path):
     d = np.load(path, allow_pickle=False)
     mode = str(d["mode"]) if "mode" in d else "full"
     n_turns = int(d["n_turns"]); surv = d["surv_turns"]
-    out = dict(mode=mode, elem_names=[str(s) for s in d["elem_names"]], closed=bool(d["closed"]),
+    elem_names = [str(s) for s in d["elem_names"]] if "elem_names" in d else []   # C++ npz его не пишет (long не юзает)
+    out = dict(mode=mode, elem_names=elem_names, closed=bool(d["closed"]),
                ring_len=float(d["ring_len"]), n_turns=n_turns, lattice=int(d["lattice"]), group=int(d["group"]),
                sr=int(d["sr"]) if "sr" in d else 0, isr=int(d["isr"]) if "isr" in d else 0,
                rf=str(d["rf"]) if "rf" in d else "none",
