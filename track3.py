@@ -187,15 +187,24 @@ def main():
                     help="срезов тела, ФОЛБЭК (приоритет у lattice_configs[n_slices]; иначе experiments.csv[n_slices])")
     a = ap.parse_args()
 
-    # РАДИАЦИЯ: флаги → env (ядро читает SS_SR/SS_ISR/SS_DESIGN_MEV при сборке магнитов). Ставить ДО трекинга.
-    if a.sr:
+    # РАДИАЦИЯ (только матричное ядро): ПРАВИЛО — трекер читает radiation_params.csv по exp_id ПЕРЕД запуском.
+    # Строка есть → синхротронное излучение учитывается (энергия/ВЧ оттуда); НЕТ строки → СИ ВЫКЛ (дефолт).
+    # CLI-флаги перекрывают таблицу (--sr/--isr/--design-mev/--rf; приоритет аргумент > БД > дефолт).
+    rad = mt.load_radiation(a.exp)
+    sr_on = a.sr or (rad is not None)
+    isr_on = a.isr or bool(rad and rad["isr"])
+    design_mev = a.design_mev if a.design_mev is not None else (rad["design_mev"] if rad else None)
+    rf_mode = a.rf if a.rf != "none" else (rad["rf"] if rad else "none")
+    rad_src = ("CLI-флаги" if (a.sr or a.isr or a.design_mev is not None or a.rf != "none")
+               else ("radiation_params.csv" if rad else "нет строки опыта → выкл"))
+    if sr_on:                                              # env читает ядро при сборке магнитов — ставить ДО трекинга
         os.environ["SS_SR"] = "1"
-    if a.isr:
+    if isr_on:
         os.environ["SS_ISR"] = "1"
-    if a.design_mev is not None:
-        os.environ["SS_DESIGN_MEV"] = str(a.design_mev)
-    if a.isr and not a.sr:
-        ap.error("--isr (квантовое возбуждение) требует --sr")
+    if design_mev is not None:
+        os.environ["SS_DESIGN_MEV"] = str(design_mev)
+    if isr_on and not sr_on:
+        ap.error("ISR (квантовое возбуждение) требует включённого СИ (--sr или строки в radiation_params.csv)")
     if a.rf != "none" and not a.long:
         ap.error("--rf требует --long (ВЧ применяется в турн-by-turn цикле)")
 
@@ -222,10 +231,10 @@ def main():
         turns = max(1, a.turns)
         author_experiment(lattice, group, a.exp, loss_mm=settings.loss_radius_m * 1e3)
         print(f"  параметры ядра: {settings}")
-        rf = None if a.rf == "none" else a.rf
-        sr_txt = ("SR " + ("+ISR " if a.isr else "") + f"[проект {os.environ.get('SS_DESIGN_MEV', '6000')} МэВ] " if a.sr else "")
+        rf = None if rf_mode == "none" else rf_mode
+        sr_txt = (f"СИ{' +ISR' if isr_on else ''} [проект {design_mev or 6000:.0f} МэВ], " if sr_on else "СИ выкл, ")
         who = f"1 частица x0={a.x0_mm}мм y0={a.y0_mm}мм" if (a.x0_mm or a.y0_mm) else "пучок группы"
-        print(f"  ДЛИННЫЙ режим: {turns} об., {sr_txt}ВЧ={a.rf}, {who}")
+        print(f"  радиация: источник {rad_src}; ДЛИННЫЙ режим {turns} об., {sr_txt}ВЧ={rf_mode}, {who}")
         r = run_long(lattice, group, a.exp, turns, rf=rf, x0=a.x0_mm / 1e3, y0=a.y0_mm / 1e3, settings=settings)
         for i, (tt, sv) in enumerate(zip(r["turnbyturn"], r["surv_turns"])):
             if len(tt) < 4:
@@ -241,6 +250,8 @@ def main():
         # записать/обновить конфиг (старт+финиш-плоскость+порог потери) — чтобы оба ядра читали одно
         author_experiment(lattice, group, a.exp, loss_mm=settings.loss_radius_m * 1e3)
         print(f"  параметры ядра: {settings}")
+        print(f"  радиация: источник {rad_src}" + (f" → СИ вкл, {design_mev or 6000:.0f} МэВ (ВЧ в полном режиме не применяется)"
+                                                    if sr_on else " → синхротронное излучение не учитывается"))
         res = run_kick(lattice, group, "physical", exp_id=a.exp, n_turns=turns, thin_eps=thin_eps,
                        settings=settings, save_local=a.local)
         kind = "замкнут" if res["closed"] else "ОТКРЫТ (старт→финиш сегмента)"

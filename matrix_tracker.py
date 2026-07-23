@@ -38,6 +38,29 @@ def _design_gamma():
 _ISR_RNG = np.random.default_rng(int(os.environ.get("SS_ISR_SEED", "") or 12345))  # ГСЧ квантового возбуждения
 
 
+def load_radiation(exp_id):
+    """Радиационный конфиг ОПЫТА из radiation_params.csv по exp_id (энергия СИ + ВЧ).
+
+    ПРАВИЛО (трекер проверяет ПЕРЕД запуском): нет строки для опыта → возврат None = синхротронное
+    излучение НЕ учитывается. Строка есть → dict(design_mev, isr, rf, rf_voltage_mv, rf_harmonic);
+    пустые ячейки → дефолты/None. Столбцы: exp_id; design_energy_mev; isr(0/1); rf(none/ideal);
+    rf_voltage_mv; rf_harmonic (два последних — задел под синусоидальный ВЧ)."""
+    if exp_id is None:
+        return None
+    p = os.path.join(TB, "radiation_params.csv")
+    if not os.path.exists(p):
+        return None
+    for r in csv.DictReader(open(p, encoding="utf-8"), delimiter=";"):
+        if r.get("exp_id") == str(exp_id):
+            g = lambda k: (r.get(k) or "").strip()
+            return dict(design_mev=float(g("design_energy_mev")) if g("design_energy_mev") else 6000.0,
+                        isr=g("isr") in ("1", "true", "yes"),
+                        rf=g("rf") or "none",
+                        rf_voltage_mv=float(g("rf_voltage_mv")) if g("rf_voltage_mv") else None,
+                        rf_harmonic=int(g("rf_harmonic")) if g("rf_harmonic") else None)
+    return None
+
+
 def _read(name):
     return list(csv.DictReader(open(os.path.join(TB, name), encoding="utf-8"), delimiter=";"))
 

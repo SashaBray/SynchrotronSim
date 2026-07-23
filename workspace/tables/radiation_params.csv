@@ -1,0 +1,3 @@
+exp_id;design_energy_mev;isr;rf;rf_voltage_mv;rf_harmonic
+1;6000;0;ideal;;
+2;3000;0;ideal;;

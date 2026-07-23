@@ -211,6 +211,14 @@ class TestRadiation(unittest.TestCase):
         self.assertAlmostEqual(ang_off, ang_on, delta=1e-8)   # угол сохранён с точностью до высших порядков
         self.assertLess(sr[5], 0.0)                            # энергия потеряна на излучение
 
+    def test_radiation_table_rule(self):
+        # ПРАВИЛО: строка опыта в radiation_params.csv → dict(энергия/ВЧ); нет строки → None (СИ выкл)
+        r = mt.load_radiation(1)                               # реш.1 (СИЛА) — строка есть
+        self.assertIsNotNone(r)
+        self.assertIn("design_mev", r); self.assertGreater(r["design_mev"], 0)
+        self.assertIsNone(mt.load_radiation(99999))           # несуществующий опыт → None
+        self.assertIsNone(mt.load_radiation(None))            # без opt_id → None
+
 
 class TestFieldYoshida(unittest.TestCase):
     """Строительные блоки симплектического интегратора."""
