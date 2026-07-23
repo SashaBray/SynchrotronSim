@@ -149,35 +149,40 @@ def _spectrum_peaks(res, n=6, rel=0.10, sep=2):
 
 
 def _fig_spectrum(res, ring_len):
-    """Спектр Фурье: амплитуда по частоте (число колебаний за оборот), x — сплошная, y — пунктир; легенда по
-    частицам. У самых явных пиков — вертикальный пунктир, ранг (#1..) и частота в Гц (Q·c/длина кольца)."""
+    """Спектр Фурье: амплитуда по ЧАСТОТЕ (МГц), x — сплошная, y — пунктир; легенда по частицам. Частота =
+    Q·f_оборота, f_оборота=c/кольцо (пучок v≈c). У явных пиков — вертикальный пунктир, ранг, тюн Q и частота."""
+    frev = LIGHT_C / ring_len if ring_len > 0 else 0.0           # частота оборота, Гц
+
+    def fMHz(q):                                                 # Q (колебаний за оборот) → частота, МГц
+        return q * frev / 1e6
+
     fig = go.Figure()
     for i, r in enumerate(res):
         c = COLORS[i % len(COLORS)]
-        fig.add_trace(go.Scattergl(x=r["kx"].astype(np.float32), y=r["ax"].astype(np.float32), mode="lines",
-                                   name=f"ч{i}", legendgroup=f"ч{i}", line=dict(color=c, width=2.6)))   # толще — узкие пики видны
-        fig.add_trace(go.Scattergl(x=r["ky"].astype(np.float32), y=r["ay"].astype(np.float32), mode="lines",
-                                   name=f"ч{i} · y", legendgroup=f"ч{i}", line=dict(color=c, width=2.0, dash="dot"), showlegend=False))
+        fig.add_trace(go.Scattergl(x=(np.asarray(r["kx"]) * frev / 1e6).astype(np.float32), y=r["ax"].astype(np.float32),
+                                   mode="lines", name=f"ч{i}", legendgroup=f"ч{i}", line=dict(color=c, width=2.6)))
+        fig.add_trace(go.Scattergl(x=(np.asarray(r["ky"]) * frev / 1e6).astype(np.float32), y=r["ay"].astype(np.float32),
+                                   mode="lines", name=f"ч{i} · y", legendgroup=f"ч{i}",
+                                   line=dict(color=c, width=2.0, dash="dot"), showlegend=False))
     tunemax = max((max(r["dqx"], r["dqy"]) for r in res), default=40.0)   # видимая зона — по ТЮНАМ, не по гармоникам
-    xmax = max(40.0, tunemax * 1.6)
-    peaks = [p for p in _spectrum_peaks(res) if p[0] <= xmax]    # подписываем только пики В видимой зоне
-    lab = sorted([(q, a, comp, rk) for rk, (q, a, comp) in enumerate(peaks, 1)], key=lambda t: t[0])
-    prev_q = -1e9; row = 0                                       # близкие по Q подписи разносим по высоте (цикл 0/28/56)
-    for q, a, comp, rk in lab:
-        row = (row + 1) if (q - prev_q) < 2.0 else 0
+    xmax = fMHz(max(40.0, tunemax * 1.6))                        # верхняя граница по частоте, МГц
+    peaks = [p for p in _spectrum_peaks(res) if fMHz(p[0]) <= xmax]      # подписываем только пики в видимой зоне
+    lab = sorted([(fMHz(q), a, comp, q, rk) for rk, (q, a, comp) in enumerate(peaks, 1)], key=lambda t: t[0])
+    prev_f = -1e9; row = 0                                       # близкие по частоте подписи разносим по высоте
+    for f, a, comp, q, rk in lab:
+        row = (row + 1) if (f - prev_f) < 0.05 * xmax else 0
         extra = (row % 3) * 28
-        fig.add_vline(x=q, line=dict(color="#6b6b6b", width=1, dash="dash"))
-        hz = _hz(q * LIGHT_C / ring_len) if ring_len > 0 else "—"
-        fig.add_annotation(x=q, y=a, yanchor="bottom", yshift=6 + extra, showarrow=False, align="center",
-                           text=f"<b>#{rk}</b> · Q{comp}={round(q, 2):g}<br>{hz}",
+        fig.add_vline(x=f, line=dict(color="#6b6b6b", width=1, dash="dash"))
+        fig.add_annotation(x=f, y=a, yanchor="bottom", yshift=6 + extra, showarrow=False, align="center",
+                           text=f"<b>#{rk}</b> · Q{comp}={round(q, 2):g}<br>{_hz(q * frev)}",
                            font=dict(size=10, color="#333"), bgcolor="rgba(255,255,255,0.8)",
                            bordercolor="#ccc", borderwidth=1, borderpad=1)
-        prev_q = q
-    fig.update_layout(title=dict(text="Спектр колебаний (Фурье): амплитуда по Q  (сплошная — x, пунктир — y)",
+        prev_f = f
+    fig.update_layout(title=dict(text="Спектр колебаний (Фурье): амплитуда по ЧАСТОТЕ  (сплошная — x, пунктир — y)",
                                  x=0.5, xanchor="center", y=0.97, yanchor="top", font=dict(size=14)),
                       margin=dict(l=62, r=18, t=48, b=44), plot_bgcolor="white",
                       legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
-    fig.update_xaxes(title_text="Q — число колебаний за оборот", range=[0, xmax])
+    fig.update_xaxes(title_text="частота, МГц", range=[0, xmax])
     ytop = peaks[0][1] * 1.3 if peaks else None                  # запас сверху под подписи (пики заполняют панель полнее)
     fig.update_yaxes(title_text="амплитуда, мм", range=([0, ytop] if ytop else None))
     return fig
