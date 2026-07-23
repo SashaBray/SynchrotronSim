@@ -103,24 +103,31 @@ def _hz(f):
     return f"{f:.0f} Гц"
 
 
-def _spectrum_peaks(res, n=5, rel=0.10, sep=3):
-    """Самые явные пики ОГИБАЮЩЕЙ спектра (max по частицам и по x/y на каждой гармонике).
-    Возврат [(Q, amp)] по убыванию амплитуды, с мин. раздвижкой sep и порогом rel·max."""
-    lens = [len(r["ax"]) for r in res] + [len(r["ay"]) for r in res]
-    L = min(lens) if lens else 0
-    if L < 3:
+def _spectrum_peaks(res, n=6, rel=0.10, sep=2):
+    """Самые явные пики спектра — ОТДЕЛЬНО по x и по y (огибающая max по частицам на каждой гармонике).
+    x и y ищутся независимо: близкие Qx и Qy (напр. 8 и 7) — РАЗНЫЕ тюны, оба помечаются. Раздвижка sep
+    убирает соседние бины одного пика ВНУТРИ компоненты. Возврат [(Q, amp, comp)] по убыванию амплитуды."""
+    if not res or min(len(r["ax"]) for r in res) < 3:
         return []
-    env = np.zeros(L)
-    for r in res:
-        env = np.maximum(env, np.asarray(r["ax"])[:L]); env = np.maximum(env, np.asarray(r["ay"])[:L])
-    mx = float(env.max())
-    cand = [(j, float(env[j])) for j in range(1, L - 1)
-            if env[j] > env[j - 1] and env[j] >= env[j + 1] and env[j] >= rel * mx]
-    cand.sort(key=lambda t: -t[1])
+
+    def env(key):
+        L = min(len(r[key]) for r in res); e = np.zeros(L)
+        for r in res:
+            e = np.maximum(e, np.asarray(r[key])[:L])
+        return e
+
+    ex, ey = env("ax"), env("ay")
+    gmax = max(float(ex.max()), float(ey.max()), 1e-30)
+
+    def local(e, comp):
+        return [(j, float(e[j]), comp) for j in range(1, len(e) - 1)
+                if e[j] > e[j - 1] and e[j] >= e[j + 1] and e[j] >= rel * gmax]
+
+    cand = sorted(local(ex, "x") + local(ey, "y"), key=lambda t: -t[1])
     sel = []
-    for q, a in cand:
-        if all(abs(q - s[0]) >= sep for s in sel):
-            sel.append((q, a))
+    for q, a, comp in cand:
+        if all(not (comp == s[2] and abs(q - s[0]) < sep) for s in sel):   # раздвижка только внутри x или y
+            sel.append((q, a, comp))
         if len(sel) >= n:
             break
     return sel
@@ -138,20 +145,23 @@ def _fig_spectrum(res, ring_len):
                                    line=dict(color=c, width=1.1, dash="dot"), showlegend=False))   # пунктир = y
         qmax = max(qmax, r["dqx"], r["dqy"])
     peaks = _spectrum_peaks(res)                                 # разметка самых явных частот
-    for rank, (q, a) in enumerate(peaks, 1):
+    lab = sorted([(q, a, comp, rk) for rk, (q, a, comp) in enumerate(peaks, 1)], key=lambda t: t[0])
+    prev_q = -1e9; extra = 0                                     # близкие по Q подписи разносим по высоте
+    for q, a, comp, rk in lab:
+        extra = extra + 30 if (q - prev_q) < 2.0 else 0
         fig.add_vline(x=q, line=dict(color="#6b6b6b", width=1, dash="dash"))
         hz = _hz(q * LIGHT_C / ring_len) if ring_len > 0 else "—"
-        fig.add_annotation(x=q, y=a, yanchor="bottom", yshift=4, showarrow=False, align="center",
-                           text=f"<b>#{rank}</b> · Q={q}<br>{hz}",
-                           font=dict(size=10, color="#333"), bgcolor="rgba(255,255,255,0.75)",
+        fig.add_annotation(x=q, y=a, yanchor="bottom", yshift=6 + extra, showarrow=False, align="center",
+                           text=f"<b>#{rk}</b> · Q{comp}={q}<br>{hz}",
+                           font=dict(size=10, color="#333"), bgcolor="rgba(255,255,255,0.8)",
                            bordercolor="#ccc", borderwidth=1, borderpad=1)
-        qmax = max(qmax, q)
+        prev_q = q; qmax = max(qmax, q)
     fig.update_layout(title=dict(text="Спектр колебаний (Фурье): амплитуда по Q  (сплошная — x, пунктир — y)",
                                  x=0.5, xanchor="center", y=0.97, yanchor="top", font=dict(size=14)),
                       margin=dict(l=62, r=18, t=48, b=44), plot_bgcolor="white",
                       legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
     fig.update_xaxes(title_text="Q — число колебаний за оборот", range=[0, max(40, qmax * 1.5)])
-    ytop = peaks[0][1] * 1.22 if peaks else None                 # запас сверху под подпись #1
+    ytop = peaks[0][1] * 1.42 if peaks else None                 # запас сверху под подписи (в т.ч. разнесённые)
     fig.update_yaxes(title_text="амплитуда, мм", range=([0, ytop] if ytop else None))
     return fig
 
