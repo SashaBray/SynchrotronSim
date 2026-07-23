@@ -222,10 +222,13 @@ def experiment_closure(lattice, group, source="physical", settings=None):
                 residual_mm=(max(res) * 1e3 if res else None))
 
 
-def local_trajectories(lattice, group, source="physical", settings=None, n_turns=1, target=30000):
+def local_trajectories(lattice, group, source="physical", settings=None, n_turns=1, target=30000,
+                       states_override=None):
     """ЛОКАЛЬНЫЕ координаты СЕКТОРНОЙ модели (m.body при SS_SECTOR=1; x = отклонение от ОПОРНОЙ ОРБИТЫ,
     бит-в-бит elegant) вдоль трека инжектированного пучка. На точку (границы элементов, вход/выход):
     S (опорная арк-длина, м), x, x'≡px, y, y'≡py, ct, δ + индекс элемента; плюс глоб. XYZ (сверка/3D).
+    states_override — если задан список 6-состояний (x,x',y,y',ct,δ) у плоскости инжекции, трекаются ОНИ
+    вместо пучка группы (для произвольной частицы / сканов апертуры).
 
     n_turns>1: ПОЛНАЯ траектория за все n_turns оборотов (S копится: оборот k на S=k·кольцо..(k+1)·кольцо);
     равномерное прореживание шагом до ≤target точек/частицу (сохраняет бетатрон и FFT, ограничивает вес).
@@ -236,6 +239,8 @@ def local_trajectories(lattice, group, source="physical", settings=None, n_turns
     Требует SS_SECTOR=1 (иначе m.body() = боксовая модель — предупреждение в вызывающем коде)."""
     import beam_injection as bi
     plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings)
+    if states_override is not None:
+        states = [tuple(map(float, s)) for s in states_override]   # произвольные частицы вместо пучка группы
     finish = info.get("finish", plane); closed = bool(info.get("closed", True))
     gap_in = float((ordered[0].fr_in[0] - plane.fr_out[0]) @ plane.fr_out[1])
     ord_gaps = [float((ordered[j].fr_in[0] - ordered[j - 1].fr_out[0]) @ ordered[j - 1].fr_out[1])
