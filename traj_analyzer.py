@@ -38,37 +38,65 @@ def fft_spectrum(S, v):
     return np.arange(len(amp), dtype=float), amp        # k = число полных колебаний за пройденный путь
 
 
+def tt_spectrum(v):
+    """Спектр ТУРН-BY-TURN (позиция раз за оборот): частота в долях оборота [0..0.5] = ДРОБНЫЙ тюн (folded).
+    Возврат (nu, amp): nu — дробная часть тюна, amp — амплитуда (те же ед., что v)."""
+    n = len(v)
+    if n < 8:
+        return np.array([0.0]), np.array([0.0])
+    vv = np.asarray(v, float) - np.mean(v)
+    amp = np.abs(np.fft.rfft(vv)) * 2.0 / n
+    return np.fft.rfftfreq(n, d=1.0), amp                # d=1 оборот ⇒ частота в колебаниях за оборот (0..0.5)
+
+
 def _dominant(k, amp):
     """Доминирующая частота (гармоника с макс. амплитудой, кроме DC=0)."""
     if len(amp) < 2:
-        return 0, 0.0
+        return 0.0, 0.0
     j = int(np.argmax(amp[1:])) + 1
-    return int(k[j]), float(amp[j])
+    return float(k[j]), float(amp[j])
 
 
-def metrics(p, closed):
-    """Метрики частицы: отклонение от опорной орбиты r=√(x²+y²), спектры x/y, доминирующие частоты."""
+def metrics(p, closed, n_turns=1):
+    """Метрики частицы: отклонение от опорной орбиты r=√(x²+y²), интра-оборотный спектр x/y (целый тюн) и —
+    при n_turns>1 — турн-by-turn спектр (дробный тюн) + число пройденных оборотов."""
     x, y, S = p["x"], p["y"], p["S"]
     r_mm = np.hypot(x, y) * 1e3
     kx, ax = fft_spectrum(S, x); ky, ay = fft_spectrum(S, y)
-    dqx, dax = _dominant(kx, ax); dqy, day = _dominant(ky, ay)
+    dqx, _ = _dominant(kx, ax); dqy, _ = _dominant(ky, ay)
     clo = float(np.hypot(x[-1] - x[0], y[-1] - y[0]) * 1e3) if (closed and p["survived"] and len(x) >= 2) else None
-    return dict(survived=p["survived"], n=len(S), S_end=float(S[-1]) if len(S) else 0.0,
-                mean_mm=float(np.mean(r_mm)), max_mm=float(np.max(r_mm)), min_mm=float(np.min(r_mm)),
-                dqx=dqx, dqy=dqy, clo=clo, kx=kx, ax=ax * 1e3, ky=ky, ay=ay * 1e3)   # амплитуды в мм
+    m = dict(survived=p["survived"], surv_turns=p.get("surv_turns", 1), n=len(S),
+             mean_mm=float(np.mean(r_mm)), max_mm=float(np.max(r_mm)), min_mm=float(np.min(r_mm)),
+             dqx=int(round(dqx)), dqy=int(round(dqy)), clo=clo, kx=kx, ax=ax * 1e3, ky=ky, ay=ay * 1e3)
+    if n_turns > 1:                                      # турн-by-turn: положение у плоскости по оборотам + дробный тюн
+        m["tt_x"] = p["tt_x"] * 1e3; m["tt_y"] = p["tt_y"] * 1e3
+        m["tt_fx"], m["tt_ax"] = tt_spectrum(p["tt_x"]); m["tt_ax"] = m["tt_ax"] * 1e3
+        m["tt_fy"], m["tt_ay"] = tt_spectrum(p["tt_y"]); m["tt_ay"] = m["tt_ay"] * 1e3
+        m["nux"], _ = _dominant(m["tt_fx"], m["tt_ax"]); m["nuy"], _ = _dominant(m["tt_fy"], m["tt_ay"])
+    return m
 
 
-def _fig_info(res):
-    """Панель 1: таблица общей информации по частицам (fill'ит свой контейнер)."""
+def _fig_info(res, n_turns=1):
+    """Панель 1: таблица общей информации по частицам. При n_turns>1 — выживание за N оборотов + дробный тюн."""
     P = len(res)
-    hdr = ["№", "дошла", "ср.|откл|, мм", "макс, мм", "мин, мм", "дом. Qx", "дом. Qy", "замык. |Δ|, мм"]
-    col = [[str(i) for i in range(P)],
-           ["да" if r["survived"] else "НЕТ" for r in res],
-           [f"{r['mean_mm']:.3f}" for r in res], [f"{r['max_mm']:.3f}" for r in res],
-           [f"{r['min_mm']:.3f}" for r in res], [str(r["dqx"]) for r in res], [str(r["dqy"]) for r in res],
-           [("—" if r["clo"] is None else f"{r['clo']:.3f}") for r in res]]
+    if n_turns > 1:
+        hdr = ["№", "оборотов", "ср.|откл|, мм", "макс, мм", "Qx (цел·дробн)", "Qy (цел·дробн)"]
+        col = [[str(i) for i in range(P)],
+               [f"{r['surv_turns']}/{n_turns}" for r in res],
+               [f"{r['mean_mm']:.3f}" for r in res], [f"{r['max_mm']:.3f}" for r in res],
+               [f"{r['dqx']} · {r.get('nux', 0):.3f}" for r in res],
+               [f"{r['dqy']} · {r.get('nuy', 0):.3f}" for r in res]]
+        cw = [26, 60, 70, 55, 95, 95]
+    else:
+        hdr = ["№", "дошла", "ср.|откл|, мм", "макс, мм", "мин, мм", "дом. Qx", "дом. Qy", "замык. |Δ|, мм"]
+        col = [[str(i) for i in range(P)],
+               ["да" if r["survived"] else "НЕТ" for r in res],
+               [f"{r['mean_mm']:.3f}" for r in res], [f"{r['max_mm']:.3f}" for r in res],
+               [f"{r['min_mm']:.3f}" for r in res], [str(r["dqx"]) for r in res], [str(r["dqy"]) for r in res],
+               [("—" if r["clo"] is None else f"{r['clo']:.3f}") for r in res]]
+        cw = [26, 40, 70, 55, 55, 50, 50, 75]
     fig = go.Figure(go.Table(
-        columnwidth=[26, 40, 70, 55, 55, 50, 50, 75],
+        columnwidth=cw,
         header=dict(values=hdr, fill_color="#4e79a7", font=dict(color="white", size=12), align="center", height=26),
         cells=dict(values=col, align="center", height=22,
                    fill_color=[["#f4f6f8" if i % 2 else "white" for i in range(P)]])))
@@ -167,10 +195,65 @@ def _fig_spectrum(res, ring_len):
     return fig
 
 
+def _fig_tt(res):
+    """ТУРН-BY-TURN: положение частицы у плоскости инжекции по номеру оборота (x сплошная / y пунктир)."""
+    fig = go.Figure()
+    for i, r in enumerate(res):
+        c = COLORS[i % len(COLORS)]
+        tx = np.arange(len(r.get("tt_x", []))); ty = np.arange(len(r.get("tt_y", [])))
+        fig.add_trace(go.Scattergl(x=tx, y=r.get("tt_x", []), mode="lines", name=f"ч{i}", legendgroup=f"ч{i}",
+                                   line=dict(color=c, width=1.3)))
+        fig.add_trace(go.Scattergl(x=ty, y=r.get("tt_y", []), mode="lines", name=f"ч{i} · y", legendgroup=f"ч{i}",
+                                   line=dict(color=c, width=1.0, dash="dot"), showlegend=False))
+    fig.update_layout(title=dict(text="Турн-by-turn: положение у плоскости инжекции по оборотам  (x — сплошная, y — пунктир)",
+                                 x=0.5, xanchor="center", y=0.97, yanchor="top", font=dict(size=14)),
+                      margin=dict(l=62, r=18, t=34, b=42), plot_bgcolor="white", hovermode="closest",
+                      legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
+    fig.update_xaxes(title_text="номер оборота")
+    fig.update_yaxes(title_text="положение, мм", zeroline=True, zerolinecolor="#bbb")
+    return fig
+
+
+def _fig_tt_spectrum(res):
+    """Спектр ТУРН-BY-TURN: амплитуда по ДРОБНОЙ части тюна (0..0.5); подписи доминирующих Qx/Qy-дробн."""
+    fig = go.Figure()
+    peaks = []                                                   # (nu, amp, comp)
+    for i, r in enumerate(res):
+        c = COLORS[i % len(COLORS)]
+        fig.add_trace(go.Scattergl(x=r.get("tt_fx", [0]), y=r.get("tt_ax", [0]), mode="lines", name=f"ч{i}",
+                                   legendgroup=f"ч{i}", line=dict(color=c, width=1.4)))
+        fig.add_trace(go.Scattergl(x=r.get("tt_fy", [0]), y=r.get("tt_ay", [0]), mode="lines", name=f"ч{i} · y",
+                                   legendgroup=f"ч{i}", line=dict(color=c, width=1.1, dash="dot"), showlegend=False))
+        if r.get("nux", 0) > 1e-6:
+            peaks.append((r["nux"], float(np.max(r["tt_ax"])), "x"))
+        if r.get("nuy", 0) > 1e-6:
+            peaks.append((r["nuy"], float(np.max(r["tt_ay"])), "y"))
+    # уникальные доминирующие дробные тюны (объединяем близкие), топ по амплитуде
+    peaks.sort(key=lambda t: -t[1]); uniq = []
+    for nu, a, comp in peaks:
+        if all(not (comp == u[2] and abs(nu - u[0]) < 0.01) for u in uniq):
+            uniq.append((nu, a, comp))
+        if len(uniq) >= 4:
+            break
+    amax = max((a for _, a, _ in uniq), default=0.0)
+    for rk, (nu, a, comp) in enumerate(sorted(uniq, key=lambda t: t[0]), 1):
+        fig.add_vline(x=nu, line=dict(color="#6b6b6b", width=1, dash="dash"))
+        fig.add_annotation(x=nu, y=a, yanchor="bottom", yshift=6, showarrow=False, align="center",
+                           text=f"<b>Q{comp} дробн.</b><br>{nu:.3f}", font=dict(size=10, color="#333"),
+                           bgcolor="rgba(255,255,255,0.8)", bordercolor="#ccc", borderwidth=1, borderpad=1)
+    fig.update_layout(title=dict(text="Спектр турн-by-turn: ДРОБНАЯ часть тюна  (x — сплошная, y — пунктир)",
+                                 x=0.5, xanchor="center", y=0.97, yanchor="top", font=dict(size=14)),
+                      margin=dict(l=62, r=18, t=44, b=44), plot_bgcolor="white",
+                      legend=dict(orientation="h", y=1.0, x=1.0, xanchor="right", yanchor="bottom"))
+    fig.update_xaxes(title_text="дробная часть тюна (колебаний за оборот, 0..0.5)", range=[0, 0.5])
+    fig.update_yaxes(title_text="амплитуда, мм", range=([0, amax * 1.35] if amax > 0 else None))
+    return fig
+
+
 # JS: перетаскиваемые разделители между панелями (row-resize) + reflow графиков (Plotly.Plots.resize).
 _RESIZE_JS = r"""
 (function(){
- var SP=10, PROP=[0.15,0.26,0.26,0.33], IDS=['p0','p1','p2','p3'];
+ var SP=10, PROP=__PROP__, IDS=__IDS__;
  function pdiv(id){return document.querySelector('#'+id+' .plotly-graph-div');}
  function rs(id){var d=pdiv(id); if(d&&window.Plotly){try{Plotly.Plots.resize(d);}catch(e){}}}
  function rsAll(){IDS.forEach(rs);}
@@ -225,37 +308,49 @@ body{display:flex;flex-direction:column;font-family:sans-serif;}
 </style></head><body>
 <div id="hdr"><div class="t">__TITLE__</div><div class="s">__SUBTITLE__</div></div>
 <div id="wrap">
-<div class="panel" id="p0">__INFO__</div>
-<div class="splitter" data-a="p0" data-b="p1" title="потяните, чтобы изменить высоту"></div>
-<div class="panel" id="p1">__DEVX__</div>
-<div class="splitter" data-a="p1" data-b="p2" title="потяните, чтобы изменить высоту"></div>
-<div class="panel" id="p2">__DEVY__</div>
-<div class="splitter" data-a="p2" data-b="p3" title="потяните, чтобы изменить высоту"></div>
-<div class="panel" id="p3">__SPEC__</div>
+__WRAP__
 </div>
 <script>__JS__</script>
 </body></html>"""
 
 
 def build_html(d, res):
-    """Самодостаточный HTML: заголовок + 3 панели (таблица/координаты/спектр) с перетаскиваемыми
-    разделителями высоты. Каждая панель — отдельный plotly-график, растягивается под свой контейнер."""
-    parts, closed, ring = d["parts"], d["closed"], d["ring_len"]
+    """Самодостаточный HTML: заголовок + панели с перетаскиваемыми разделителями высоты. Каждая панель —
+    отдельный plotly-график, растягивается под контейнер. Число/состав панелей зависит от n_turns:
+    1 оборот → таблица/x(S)/y(S)/спектр; >1 оборота → +турн-by-turn и спектр дробного тюна."""
+    import json
+    parts, closed, ring, nt = d["parts"], d["closed"], d["ring_len"], d["n_turns"]
     P = len(res); surv = sum(r["survived"] for r in res)
     mean_all = float(np.mean([r["mean_mm"] for r in res])); max_all = max(r["max_mm"] for r in res)
     kind = "замкнутое кольцо" if closed else "открытый сегмент"
     title = f"SynchrotronSim — анализ траектории, эксперимент {d['lattice']}·{d['group']} ({kind})"
-    subtitle = (f"оборот {ring:.1f} м · элементов {len(d['elem_names'])-1} · частиц {P} · выжило {surv}/{P} · "
-                f"ср.откл. {mean_all:.3f} мм · макс {max_all:.3f} мм · локальные координаты (отклонение от опорной орбиты)")
+    if nt > 1:
+        subtitle = (f"{nt} оборотов · выжило {surv}/{P} за все {nt} об · кольцо {ring:.1f} м · частиц {P} · "
+                    f"ср.откл. {mean_all:.3f} мм (оборот 0) · турн-by-turn (дробный тюн) + форма x(S) за 1 оборот")
+    else:
+        subtitle = (f"оборот {ring:.1f} м · элементов {len(d['elem_names'])-1} · частиц {P} · выжило {surv}/{P} · "
+                    f"ср.откл. {mean_all:.3f} мм · макс {max_all:.3f} мм · локальные координаты (отклонение от опорной орбиты)")
+    xt = " (за 1 оборот)" if nt > 1 else ""
+    figs = [(_fig_info(res, nt), 0.16),
+            (_fig_dev(parts, "x", f"Отклонение по X от опорной орбиты: x(S) по частицам{xt}"), 0.24),
+            (_fig_dev(parts, "y", f"Отклонение по Y от опорной орбиты: y(S) по частицам{xt}"), 0.24)]
+    if nt > 1:
+        figs += [(_fig_tt(res), 0.20), (_fig_tt_spectrum(res), 0.16)]
+    else:
+        figs.append((_fig_spectrum(res, ring), 0.36))
+    sw = sum(w for _, w in figs); props = [round(w / sw, 4) for _, w in figs]
     to = dict(full_html=False, default_width="100%", default_height="100%", config={"responsive": True})
-    info = _fig_info(res).to_html(include_plotlyjs="inline", **to)      # plotly.js встроен ОДИН раз (первая панель)
-    devx = _fig_dev(parts, "x", "Отклонение по X от опорной орбиты: x(S) по частицам").to_html(include_plotlyjs=False, **to)
-    devy = _fig_dev(parts, "y", "Отклонение по Y от опорной орбиты: y(S) по частицам").to_html(include_plotlyjs=False, **to)
-    spec = _fig_spectrum(res, ring).to_html(include_plotlyjs=False, **to)
-    return (_PAGE.replace("__JS__", _RESIZE_JS)
+    panels = [fig.to_html(include_plotlyjs=("inline" if i == 0 else False), **to) for i, (fig, _) in enumerate(figs)]
+    wrap = []
+    for i, ph in enumerate(panels):                              # panel + splitter между соседними
+        wrap.append(f'<div class="panel" id="p{i}">{ph}</div>')
+        if i < len(panels) - 1:
+            wrap.append(f'<div class="splitter" data-a="p{i}" data-b="p{i+1}" title="потяните, чтобы изменить высоту"></div>')
+    js = _RESIZE_JS.replace("__IDS__", json.dumps([f"p{i}" for i in range(len(panels))])).replace("__PROP__", json.dumps(props))
+    return (_PAGE.replace("__JS__", js)
             .replace("__TITLE_ATTR__", f"Анализ траектории {d['lattice']}·{d['group']}")
             .replace("__TITLE__", title).replace("__SUBTITLE__", subtitle)
-            .replace("__INFO__", info).replace("__DEVX__", devx).replace("__DEVY__", devy).replace("__SPEC__", spec))
+            .replace("__WRAP__", "\n".join(wrap)))
 
 
 def main():
@@ -270,18 +365,25 @@ def main():
     if not os.path.exists(path):
         sys.exit(f"[!] нет {path} — сначала: py -3.14 track3.py --mode kick-phys --exp {a.exp} --local")
     d = mte.read_local_npz(path)
-    res = [metrics(p, d["closed"]) for p in d["parts"]]
+    nt = d["n_turns"]
+    res = [metrics(p, d["closed"], nt) for p in d["parts"]]
 
     # --- краткая сводка в консоль ---
     surv = sum(r["survived"] for r in res)
     print(f"=== Анализ траектории — эксперимент {a.exp} (решётка {d['lattice']}, пучок {d['group']}, "
-          f"{'замкнуто' if d['closed'] else 'открыто'}) ===")
-    print(f"оборот {d['ring_len']:.2f}м, элементов {len(d['elem_names'])-1}, частиц {len(res)}, выжило {surv}")
-    print("\n№  дошла  ср.|откл|,мм  макс,мм  мин,мм   дом.Qx  дом.Qy  замык.,мм")
-    for i, r in enumerate(res):
-        clo = "—" if r["clo"] is None else f"{r['clo']:.3f}"
-        print(f"{i:<2} {'да ' if r['survived'] else 'НЕТ'}   {r['mean_mm']:>9.3f}  {r['max_mm']:>7.3f}  "
-              f"{r['min_mm']:>6.3f}   {r['dqx']:>5}  {r['dqy']:>6}   {clo:>8}")
+          f"{'замкнуто' if d['closed'] else 'открыто'}, оборотов {nt}) ===")
+    print(f"кольцо {d['ring_len']:.2f}м, элементов {len(d['elem_names'])-1}, частиц {len(res)}, выжило {surv}/{len(res)}")
+    if nt > 1:
+        print("\n№  оборотов  ср.|откл|,мм  макс,мм   Qx(цел·дробн)   Qy(цел·дробн)")
+        for i, r in enumerate(res):
+            print(f"{i:<2} {r['surv_turns']:>4}/{nt:<4} {r['mean_mm']:>9.3f}  {r['max_mm']:>7.3f}   "
+                  f"{r['dqx']:>3} · {r.get('nux',0):.3f}     {r['dqy']:>3} · {r.get('nuy',0):.3f}")
+    else:
+        print("\n№  дошла  ср.|откл|,мм  макс,мм  мин,мм   дом.Qx  дом.Qy  замык.,мм")
+        for i, r in enumerate(res):
+            clo = "—" if r["clo"] is None else f"{r['clo']:.3f}"
+            print(f"{i:<2} {'да ' if r['survived'] else 'НЕТ'}   {r['mean_mm']:>9.3f}  {r['max_mm']:>7.3f}  "
+                  f"{r['min_mm']:>6.3f}   {r['dqx']:>5}  {r['dqy']:>6}   {clo:>8}")
 
     # --- интерактивное окно (HTML) ---
     out = a.out or os.path.join(RESULTS, f"traj_analysis_exp{a.exp}.html")

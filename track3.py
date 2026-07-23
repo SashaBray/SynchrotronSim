@@ -63,10 +63,9 @@ def run_kick(lattice, group, source, exp_id=None, n_turns=1, thin_eps=0.0, setti
         os.makedirs(RESULTS, exist_ok=True)
         mte.write_bin(trajs, os.path.join(RESULTS, f"trajectories_exp{exp_id}.bin"))
         if save_local:                                     # ЛОКАЛЬНЫЕ координаты — отдельным секторным треком (см. mte)
-            r = mte.local_trajectories(lattice, group, source=source, thin_eps=thin_eps, settings=settings)
-            mte.write_local_npz(os.path.join(RESULTS, f"trajectories_local_exp{exp_id}.npz"),
-                                r["locals"], r["globals"], r["elem_names"], r["closed"], r["thin_eps"],
-                                lattice, group, r["survived"], r["ring_len"])
+            r = mte.local_trajectories(lattice, group, source=source, thin_eps=thin_eps,
+                                       settings=settings, n_turns=n_turns)
+            mte.write_local_npz(os.path.join(RESULTS, f"trajectories_local_exp{exp_id}.npz"), r)
         mte.ensure_experiment(exp_id, lattice)
     return dict(n=len(states), survived=survived, residuals=residuals, info=info, closed=closed,
                 turns=n_turns, lost_turns=lost_turns,
