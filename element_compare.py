@@ -11,7 +11,7 @@ import os, csv, math, struct, subprocess, shutil, sys
 import numpy as np
 import matrix_tracker as mt
 import bip_matrix as bm
-from scipy.optimize import minimize
+from scipy.optimize import minimize, minimize_scalar
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 TB = os.path.join(ROOT, "workspace", "tables")
@@ -274,6 +274,47 @@ def fit_element(dev, cur, diff_su, geom, kind, probes, theta0=0.0):
     return coeffs, Leff, full_mse
 
 
+def _coeff_at_L(dev, kind, geom, probes, diff_su, L, theta0=0.0):
+    """1D-фит ДОМИНАНТНОГО физкоэф при ФИКСИРОВАННОМ L_eff (коарс-скан 41 точка + brent-refine). B изгиба —
+    из угла (theta0), не фитится. Возврат (coeffs, mse). Ядро общего-L_eff фита: L задаётся снаружи."""
+    base = {"B": theta0 / (mt.QP * L)} if (kind in ("dipole", "dq") and mt.QP) else {}
+    key, span = SCAN_RANGE[kind]
+
+    def m(val):
+        cf = dict(base); cf[key] = float(val)
+        try:
+            return traj_mse(diff_su, [track_matrix(dev, cf, L, kind, geom, p) for p in probes])
+        except mt.ParticleLost:
+            return 1e3
+
+    grid = np.linspace(-span, span, 41)
+    ev = [m(v) for v in grid]
+    v0 = float(grid[int(np.argmin(ev))]); e0 = min(ev)
+    step = span / 20.0                                  # локальный refine вокруг лучшего узла скана
+    res = minimize_scalar(m, bounds=(v0 - step, v0 + step), method="bounded", options=dict(xatol=step * 1e-4))
+    val, err = (float(res.x), float(res.fun)) if res.fun < e0 else (v0, e0)
+    coeffs = dict(base); coeffs[key] = val
+    return coeffs, err
+
+
+def fit_shared(dev, kind, probes, runs):
+    """ОДИН общий L_eff (геом. константа элемента, НЕ зависит от тока) + физкоэф на КАЖДЫЙ ток. Внешняя
+    1D-оптимизация L_eff по СУММАРНОЙ невязке всех токов; внутри — доминантный коэф. при фикс. L_eff. runs —
+    список dict(cur, diff_su, geom, theta0). Заполняет r['coeffs','Leff','rms_mm']; возврат Lshared."""
+    L0 = float(HW[dev].get("eff_length") or 0.3)
+    strong = [r for r in runs if abs(r["cur"]) >= 30] or runs   # сильные токи констрейнят L_eff надёжнее
+
+    def total(L):                                       # суммарная невязка по сильным токам при общем L_eff
+        return sum(_coeff_at_L(dev, kind, r["geom"], probes, r["diff_su"], L, r["theta0"])[1] for r in strong)
+
+    res = minimize_scalar(total, bounds=(0.6 * L0, 1.4 * L0), method="bounded", options=dict(xatol=L0 * 1e-4))
+    Lshared = float(res.x)
+    for r in runs:                                      # физкоэф каждого тока при ОБЩЕМ L_eff
+        coeffs, mse = _coeff_at_L(dev, kind, r["geom"], probes, r["diff_su"], Lshared, r["theta0"])
+        r["coeffs"] = coeffs; r["Leff"] = Lshared; r["rms_mm"] = math.sqrt(mse) * 1e3
+    return Lshared
+
+
 # ============================ ИЗГИБАЮЩИЕ: ПОДБОР ПОВОРОТА ===================================
 def tune_bend_yaw(dev, cur, iters=6, tol=1e-6):
     """Итеративно подобрать yaw элемента, чтобы ОПОРНАЯ орбита (ч0, на оси) входила и выходила под
@@ -299,10 +340,11 @@ CUR_RANGE = list(range(-50, 51, 10))                   # −50..+50 шаг 10 (1
 
 
 def sweep_currents(dev, kind, probes):
-    """Свип токов: для каждого тока прогнать диффур + зафитить матрицу. Изгибающие — с подбором yaw
-    (симметрия) и сравнением по ОТКЛОНЕНИЮ от опорной. Возврат записей; L_eff общий (медиана)."""
+    """Свип токов: диффур на каждый ток (сбор датасета), затем ОДИН общий L_eff + физкоэф на каждый ток
+    (fit_shared — L_eff геом.константа, одна на все токи). Изгибающие — с подбором yaw (симметрия) и
+    сравнением по ОТКЛОНЕНИЮ от опорной. Возврат записей (Leff у всех = общий)."""
     bending = kind in ("dipole", "dq")
-    recs = []
+    runs = []
     for cur in CUR_RANGE:
         yaw = tune_bend_yaw(dev, cur) if bending else 0.0     # изгиб: симметричный поворот
         try:
@@ -310,31 +352,30 @@ def sweep_currents(dev, kind, probes):
         except Exception as e:
             print(f"  ток {cur:+d}: диффур упал ({e})"); cleanup(); continue
         diff_su = diff_local(trajs, geom["xstart"], bending)
-        theta0 = 2.0 * yaw                                    # полный изгиб опорной (для начального B)
-        coeffs, Leff, mse = fit_element(dev, cur, diff_su, geom, kind, probes, theta0)
-        recs.append(dict(cur=cur, coeffs=coeffs, Leff=Leff, rms_mm=math.sqrt(mse) * 1e3,
-                         diff_su=diff_su, geom=geom, yaw=yaw))
-        cs = " ".join(f"{k}={v:+.3e}" for k, v in coeffs.items())
-        print(f"  ток {cur:+3d}А: {cs}  L_eff={Leff:.4f}  RMS={math.sqrt(mse)*1e3:.4f}мм")
+        runs.append(dict(cur=cur, diff_su=diff_su, geom=geom, yaw=yaw, theta0=2.0 * yaw))
         cleanup()
-    # ОБЩИЙ L_eff (геометрия одна на элемент) = медиана; перефит физкоэф при фиксированном L_eff
-    if recs:
-        Lcommon = float(np.median([r["Leff"] for r in recs]))
-        for r in recs:
-            r["Leff_common"] = Lcommon
-    return recs
+    if not runs:
+        return []
+    Lshared = fit_shared(dev, kind, probes, runs)             # ОДИН L_eff на элемент (общий для всех токов)
+    for r in runs:
+        r["Leff_common"] = Lshared
+        cs = " ".join(f"{k}={v:+.3e}" for k, v in r["coeffs"].items())
+        print(f"  ток {r['cur']:+3d}А: {cs}  L_eff(общий)={Lshared:.4f}  RMS={r['rms_mm']:.4f}мм")
+    return runs
 
 
 def save_dataset(dev, kind, recs, outdir):
     """Датасет current↔физкоэф+MSE в CSV (запятая-десятичная для Excel, ; поле)."""
     keys = KIND_COEFF[kind]
+    Lc = recs[0].get("Leff_common", recs[0]["Leff"])
     path = os.path.join(outdir, f"dataset_{dev}.csv")
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";")
-        w.writerow(["ток_А"] + [f"{k}" for k in keys] + ["L_eff_м", "L_eff_общий_м", "RMS_мм"])
+        w.writerow(["ток_А"] + [f"{k}" for k in keys] + ["RMS_мм"])   # физкоэф на ток; L_eff — общий (ниже)
         for r in recs:
-            row = [r["cur"]] + [r["coeffs"][k] for k in keys] + [r["Leff"], r.get("Leff_common", r["Leff"]), r["rms_mm"]]
+            row = [r["cur"]] + [r["coeffs"][k] for k in keys] + [r["rms_mm"]]
             w.writerow([str(x).replace(".", ",") for x in row])
+        w.writerow([]); w.writerow(["L_eff_общий_м", str(Lc).replace(".", ",")])
     return path
 
 
@@ -429,16 +470,17 @@ def build_report(elements, path):
         if el is None: continue
         keys = KIND_COEFF[el["kind"]]
         doc.add_heading(f"{el['dev']}  ({el['kind']})", level=1)
-        doc.add_paragraph(f"Общий L_eff (медиана по токам) = {el['Leff_common']:.4f} м. "
+        doc.add_paragraph(f"Общий L_eff = {el['Leff_common']:.4f} м (одна геом. константа на все токи; "
+                          f"подобрана по суммарной невязке всех токов). Физкоэф — на каждый ток. "
                           f"Макс. невязка RMS по токам = {max(r['rms_mm'] for r in el['recs']):.4f} мм.")
-        t = doc.add_table(rows=1, cols=len(keys) + 3); t.style = "Light Grid Accent 1"
+        t = doc.add_table(rows=1, cols=len(keys) + 2); t.style = "Light Grid Accent 1"
         hdr = t.rows[0].cells; hdr[0].text = "ток, А"
         for j, k in enumerate(keys): hdr[j + 1].text = k
-        hdr[len(keys) + 1].text = "L_eff, м"; hdr[len(keys) + 2].text = "RMS, мм"
+        hdr[len(keys) + 1].text = "RMS, мм"
         for r in el["recs"]:
             c = t.add_row().cells; c[0].text = f"{r['cur']:+d}"
             for j, k in enumerate(keys): c[j + 1].text = f"{r['coeffs'][k]:+.4e}"
-            c[len(keys) + 1].text = f"{r['Leff']:.4f}"; c[len(keys) + 2].text = f"{r['rms_mm']:.4f}"
+            c[len(keys) + 1].text = f"{r['rms_mm']:.4f}"
         if el.get("xy"):
             doc.add_paragraph("Сечение пучка в плоскости xy (до / за элементом):").runs[0].font.size = Pt(10)
             doc.add_picture(el["xy"], width=Inches(5.6))
