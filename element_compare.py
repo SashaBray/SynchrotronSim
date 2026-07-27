@@ -134,7 +134,7 @@ os.environ.setdefault("SS_SECTOR", "1")                # секторный/ки
 EFF, PHYS, COUP, TRANS = mt.load_db()
 HW = {r["device_type_id"]: r for r in mt._read("hardware_library.csv")}
 DELTA = (bm.GAMMA * 9.109e-31 * V_BEAM - bm.P_MOM) / bm.P_MOM   # δ пучка (усечённая масса, как диффур)
-KIND_COEFF = {"quad": ["G"], "sext": ["S"], "oct": ["O"], "dipole": ["B"], "dq": ["B", "G"]}
+KIND_COEFF = {"quad": ["G"], "sext": ["S"], "oct": ["O"], "dipole": ["B", "G"], "dq": ["B", "G"]}
 SGRID = np.linspace(0.0, ENTRY + EXIT, 240)            # общая сетка пути s для сравнения
 
 
@@ -173,18 +173,43 @@ def _resample(traj):
     return np.interp(SGRID, traj[:, 0], traj[:, 1]), np.interp(SGRID, traj[:, 0], traj[:, 2])
 
 
+def track_set(dev, coeffs, L, kind, geom, probes):
+    """Матрица для ВСЕХ проб (K,3)=(s,u,v). Для ИЗГИБА возвращает отклонение от МАТРИЧНОЙ опорной (probe 0)
+    на сетке SGRID — тот же смысл, что Френе-проекция диффура от ч0. Иначе опорная уходит от прямой оси на
+    θ·L_дрейф (~8.7мм у DP_L), т.к. track_matrix меряет x от прямой оси, а не от изогнутой дуги. Для прямых
+    (опорная ≡ 0) — как есть."""
+    mats = [track_matrix(dev, coeffs, L, kind, geom, p) for p in probes]
+    if kind not in ("dipole", "dq"):
+        return mats
+    ur, vr = _resample(mats[0])                            # матричная опорная (ч0) на SGRID
+    out = []
+    for m in mats:
+        um, vm = _resample(m)
+        out.append(np.column_stack([SGRID, um - ur, vm - vr]))
+    return out
+
+
 def diff_local(trajs, xstart, bending=False):
     """Диффур .bin (X,Y,Z глоб.) → на частицу (s, u, v). ПРЯМОЙ: u=Y, v=Z, s=X−xstart (опорная на оси).
-    ИЗГИБ: отклонение от опорной орбиты ч0 — u=Y−Y_ч0(X), v=Z−Z_ч0(X) (ч0 = дуга; малый изгиб ⇒ проекция
-    на поперечную рамку ≈ вычет по X). Так сравнимо с матричным сектором (тот тоже даёт отклонение от дуги)."""
+    ИЗГИБ: проекция ФРЕНЕ на опорную дугу ч0 — s=ДЛИНА ДУГИ вдоль ч0, u=⊥смещение В ПЛОСКОСТИ ИЗГИБА
+    (кольцо X-Y), v=вертикаль (Z−Z_ч0). Именно так работает матричный сектор (отклонение от изогнутой
+    опорной по длине дуги). Прежний вычет «при том же X» для изогнутой орбиты давал спурьёзный член
+    (две параллельные дуги одного радиуса при проекции на X расходятся) — артефакт ~мм на чистом изгибе."""
     if not bending:
         return [np.column_stack([a[:, 0] - xstart, a[:, 1], a[:, 2]]) for a in trajs]
     ref = trajs[0]; Xr, Yr, Zr = ref[:, 0], ref[:, 1], ref[:, 2]
+    Sref = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(Xr), np.diff(Yr)))])   # длина дуги ч0 (изгиб в X-Y)
+    # единичная касательная ч0 в каждой вершине (центр.разность) и ⊥нормаль в плоскости X-Y
+    tx = np.gradient(Xr); ty = np.gradient(Yr); tn = np.hypot(tx, ty); tn[tn == 0] = 1.0
+    tx /= tn; ty /= tn; nx, ny = -ty, tx
     out = []
     for a in trajs:
         X, Y, Z = a[:, 0], a[:, 1], a[:, 2]
-        u = Y - np.interp(X, Xr, Yr); v = Z - np.interp(X, Xr, Zr)   # отклонение от ч0 на тех же X
-        out.append(np.column_stack([X - xstart, u, v]))
+        # ближайшая вершина ч0 к каждой точке частицы (в плоскости X-Y)
+        i = np.argmin((Xr[None, :] - X[:, None]) ** 2 + (Yr[None, :] - Y[:, None]) ** 2, axis=1)
+        u = (X - Xr[i]) * nx[i] + (Y - Yr[i]) * ny[i]     # ⊥смещение в плоскости изгиба
+        v = Z - Zr[i]                                      # вертикаль
+        out.append(np.column_stack([Sref[i], u, v]))
     return out
 
 
@@ -226,7 +251,7 @@ def _estimate_init(dev, diff_su, kind, geom, probes, L0, theta0=0.0):
 
 # физический диапазон КОАРС-СКАНА доминантного коэф. по типу (робастный старт вместо аналит. оценки)
 SCAN_RANGE = {"quad": ("G", 3.0), "sext": ("S", 400.0), "oct": ("O", 2e4),
-              "dipole": ("B", 5e-3), "dq": ("G", 5.0)}
+              "dipole": ("G", 2.0), "dq": ("G", 5.0)}   # изгибающие: B из угла, скан по G (градиент)
 
 
 def fit_element(dev, cur, diff_su, geom, kind, probes, theta0=0.0):
@@ -242,7 +267,7 @@ def fit_element(dev, cur, diff_su, geom, kind, probes, theta0=0.0):
     for val in np.linspace(-span, span, 61):
         cf = dict(base); cf[key] = float(val)
         try:
-            mat = [track_matrix(dev, cf, L0, kind, geom, p) for p in probes]; e = traj_mse(diff_su, mat)
+            mat = track_set(dev, cf, L0, kind, geom, probes); e = traj_mse(diff_su, mat)
         except mt.ParticleLost:
             continue
         if e < best_e:
@@ -258,7 +283,7 @@ def fit_element(dev, cur, diff_su, geom, kind, probes, theta0=0.0):
         if not (0.6 * L0 <= Leff <= 1.4 * L0):          # L_eff в узких границах вокруг .lte (не схлопывать/раздувать)
             return 1e3
         try:
-            mat = [track_matrix(dev, coeffs, Leff, kind, geom, p) for p in probes]
+            mat = track_set(dev, coeffs, Leff, kind, geom, probes)
         except mt.ParticleLost:
             return 1e3
         return traj_mse(diff_su, mat)                   # полный путь: дальний дрейф констрейнит выходной угол
@@ -267,7 +292,7 @@ def fit_element(dev, cur, diff_su, geom, kind, probes, theta0=0.0):
                    options=dict(xatol=1e-8, fatol=1e-20, maxiter=12000, maxfev=12000))
     coeffs, Leff = unpack(res.x)
     try:                                                # ПОЛНАЯ невязка (весь путь) с фитированными коэф. — для отчёта
-        mat = [track_matrix(dev, coeffs, Leff, kind, geom, p) for p in probes]
+        mat = track_set(dev, coeffs, Leff, kind, geom, probes)
         full_mse = traj_mse(diff_su, mat)
     except mt.ParticleLost:
         full_mse = res.fun
@@ -283,7 +308,7 @@ def _coeff_at_L(dev, kind, geom, probes, diff_su, L, theta0=0.0):
     def m(val):
         cf = dict(base); cf[key] = float(val)
         try:
-            return traj_mse(diff_su, [track_matrix(dev, cf, L, kind, geom, p) for p in probes])
+            return traj_mse(diff_su, track_set(dev, cf, L, kind, geom, probes))
         except mt.ParticleLost:
             return 1e3
 
@@ -558,7 +583,7 @@ if __name__ == "__main__":
         print(f"ФИТ матрицы: {cs}  L_eff={Leff:.4f}м  (старт .lte {HW[dev].get('eff_length')}м)")
         print(f"невязка траекторий: RMS={math.sqrt(mse)*1e3:.4f} мм  (MSE={mse:.3e} м²)")
         # финальные позиции: диффур vs матрица (проверка)
-        mat = [track_matrix(dev, coeffs, Leff, kind, geom, p) for p in probes]
+        mat = track_set(dev, coeffs, Leff, kind, geom, probes)
         dfin = np.array([_resample(d) for d in diff_su])[:, :, -1]   # (u,v) на финише
         mfin = np.array([_resample(m) for m in mat])[:, :, -1]
         worst = np.max(np.abs(dfin - mfin)) * 1e3
