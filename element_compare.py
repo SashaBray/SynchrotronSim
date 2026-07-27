@@ -173,9 +173,22 @@ def _resample(traj):
     return np.interp(SGRID, traj[:, 0], traj[:, 1]), np.interp(SGRID, traj[:, 0], traj[:, 2])
 
 
-def diff_to_su(trajs, xstart):
-    """Диффур .bin (X,Y,Z глоб.) → на частицу (s=X−xstart, u=Y, v=Z)."""
-    return [np.column_stack([a[:, 0] - xstart, a[:, 1], a[:, 2]]) for a in trajs]
+def diff_local(trajs, xstart, bending=False):
+    """Диффур .bin (X,Y,Z глоб.) → на частицу (s, u, v). ПРЯМОЙ: u=Y, v=Z, s=X−xstart (опорная на оси).
+    ИЗГИБ: отклонение от опорной орбиты ч0 — u=Y−Y_ч0(X), v=Z−Z_ч0(X) (ч0 = дуга; малый изгиб ⇒ проекция
+    на поперечную рамку ≈ вычет по X). Так сравнимо с матричным сектором (тот тоже даёт отклонение от дуги)."""
+    if not bending:
+        return [np.column_stack([a[:, 0] - xstart, a[:, 1], a[:, 2]]) for a in trajs]
+    ref = trajs[0]; Xr, Yr, Zr = ref[:, 0], ref[:, 1], ref[:, 2]
+    out = []
+    for a in trajs:
+        X, Y, Z = a[:, 0], a[:, 1], a[:, 2]
+        u = Y - np.interp(X, Xr, Yr); v = Z - np.interp(X, Xr, Zr)   # отклонение от ч0 на тех же X
+        out.append(np.column_stack([X - xstart, u, v]))
+    return out
+
+
+diff_to_su = diff_local                                              # обратная совместимость (прямые элементы)
 
 
 def traj_mse(diff_su, mat_trajs, smax=None):
@@ -195,26 +208,29 @@ def _exit_slope(traj, comp):
     return np.polyfit(s[m], traj[m, comp], 1)[0] if m.sum() >= 2 else 0.0
 
 
-def _estimate_init(dev, diff_su, kind, geom, probes, L0):
-    """Физический начальный guess ДОМИНАНТНОГО коэф. из наклона диффурной траектории (кик на выходе).
-    Кик Δu' = −(kⁿ·L)·(мультипольный член) ⇒ обратно интегральную силу, потом коэф = kL/(QP·L0)."""
+def _estimate_init(dev, diff_su, kind, geom, probes, L0, theta0=0.0):
+    """Физический начальный guess из диффура. Прямой: доминантный коэф. из наклона отклонения частицы 1.
+    Изгиб: B из полного изгиба опорной (theta0=2·yaw; отклонение ч0 от себя ≈0, потому берём угол), у dq
+    + G из наклона отклонения частицы. Коэф = kL/(QP·L0)."""
     QP = mt.QP; u0 = probes[1][0]                       # частица 1 = (u=1мм, v=0)
+    if kind in ("dipole", "dq"):
+        est = {"B": theta0 / (QP * L0)} if QP else {}
+        if kind == "dq" and QP:                        # + градиент из наклона отклонения частицы
+            est["G"] = (-_exit_slope(diff_su[1], 1) / u0) / (QP * L0)
+        return est
     du = _exit_slope(diff_su[1], 1)
     kL = {"quad": -du / u0, "sext": -2 * du / u0 ** 2, "oct": -6 * du / u0 ** 3}.get(kind, 0.0)
     key = {"quad": "G", "sext": "S", "oct": "O"}.get(kind)
-    if key and QP:
-        return {key: kL / (QP * L0)}
-    if kind in ("dipole", "dq"):                        # изгиб: θ0 из полного увода опорной (ч0 на оси)
-        th = _exit_slope(diff_su[0], 1); return {"B": th / (QP * L0)}
-    return {}
+    return {key: kL / (QP * L0)} if (key and QP) else {}
 
 
-def fit_element(dev, cur, diff_su, geom, kind, probes):
+def fit_element(dev, cur, diff_su, geom, kind, probes, theta0=0.0):
     """Последовательное приближение: подобрать физкоэф (по kind) + L_eff, минимизируя MSE траекторий.
-    L_eff — ОДИН на элемент; физкоэф — на этот ток. Возврат (coeffs, Leff, mse)."""
+    L_eff — ОДИН на элемент; физкоэф — на этот ток. theta0 — изгиб опорной (для B у изгибающих). Возврат
+    (coeffs, Leff, mse)."""
     keys = KIND_COEFF[kind]
     L0 = float(HW[dev].get("eff_length") or 0.3)       # старт L_eff — .lte/матричная длина (НЕ диффурная)
-    est = _estimate_init(dev, diff_su, kind, geom, probes, L0)
+    est = _estimate_init(dev, diff_su, kind, geom, probes, L0, theta0)
     x0 = [est.get(k, 1e-3) for k in keys] + [L0]
 
     def unpack(x):
@@ -265,21 +281,22 @@ def tune_bend_yaw(dev, cur, iters=6, tol=1e-6):
 CUR_RANGE = list(range(-50, 51, 10))                   # −50..+50 шаг 10 (11 значений)
 
 
-def sweep_currents(dev, kind, probes, bend_yaw=0.0):
-    """Свип токов: для каждого тока прогнать диффур + зафитить матрицу. Возврат список записей
-    dict(cur, coeffs, Leff, rms_mm, diff_su, mat, geom). L_eff берётся общий (медиана по токам)."""
+def sweep_currents(dev, kind, probes):
+    """Свип токов: для каждого тока прогнать диффур + зафитить матрицу. Изгибающие — с подбором yaw
+    (симметрия) и сравнением по ОТКЛОНЕНИЮ от опорной. Возврат записей; L_eff общий (медиана)."""
+    bending = kind in ("dipole", "dq")
     recs = []
     for cur in CUR_RANGE:
+        yaw = tune_bend_yaw(dev, cur) if bending else 0.0     # изгиб: симметричный поворот
         try:
-            trajs, geom = run_diffur(dev, cur, bend_yaw)
+            trajs, geom = run_diffur(dev, cur, yaw)
         except Exception as e:
-            print(f"  ток {cur:+d}: диффур упал ({e})"); continue
-        finally:
-            pass
-        diff_su = diff_to_su(trajs, geom["xstart"])
-        coeffs, Leff, mse = fit_element(dev, cur, diff_su, geom, kind, probes)
+            print(f"  ток {cur:+d}: диффур упал ({e})"); cleanup(); continue
+        diff_su = diff_local(trajs, geom["xstart"], bending)
+        theta0 = 2.0 * yaw                                    # полный изгиб опорной (для начального B)
+        coeffs, Leff, mse = fit_element(dev, cur, diff_su, geom, kind, probes, theta0)
         recs.append(dict(cur=cur, coeffs=coeffs, Leff=Leff, rms_mm=math.sqrt(mse) * 1e3,
-                         diff_su=diff_su, geom=geom))
+                         diff_su=diff_su, geom=geom, yaw=yaw))
         cs = " ".join(f"{k}={v:+.3e}" for k, v in coeffs.items())
         print(f"  ток {cur:+3d}А: {cs}  L_eff={Leff:.4f}  RMS={math.sqrt(mse)*1e3:.4f}мм")
         cleanup()
@@ -325,7 +342,12 @@ def plot_element(dev, kind, recs, probes, outdir):
             try:
                 mat = track_matrix(dev, r["coeffs"], Lc, kind, r["geom"], p)   # общий L_eff может перефокус.
             except mt.ParticleLost:
-                mat = track_matrix(dev, r["coeffs"], r["Leff"], kind, r["geom"], p)   # fallback: свой L_eff тока
+                try:
+                    mat = track_matrix(dev, r["coeffs"], r["Leff"], kind, r["geom"], p)   # fallback: свой L_eff
+                except mt.ParticleLost:
+                    axx.plot(d[:, 0], d[:, 1] * 1e3, color="#2b7bba", lw=1.1)   # только диффур (матрица разошлась)
+                    axy.plot(d[:, 0], d[:, 2] * 1e3, color="#2b7bba", lw=1.1)
+                    continue
             axx.plot(d[:, 0], d[:, 1] * 1e3, color="#2b7bba", lw=1.1)
             axx.plot(mat[:, 0], mat[:, 1] * 1e3, color="#d1495b", lw=1.0, ls="--")
             axy.plot(d[:, 0], d[:, 2] * 1e3, color="#2b7bba", lw=1.1)
@@ -344,7 +366,7 @@ def plot_element(dev, kind, recs, probes, outdir):
 def process_element(dev, kind, probes, outdir, bend_yaw=0.0):
     """Полный опыт по одному элементу: свип+фит → датасет + графики. Возврат dict для отчёта."""
     print(f"\n=== элемент {dev} ({kind}) ===")
-    recs = sweep_currents(dev, kind, probes, bend_yaw)
+    recs = sweep_currents(dev, kind, probes)
     if not recs:
         return None
     ds = save_dataset(dev, kind, recs, outdir)
