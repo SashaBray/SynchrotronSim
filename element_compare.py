@@ -178,12 +178,14 @@ def diff_to_su(trajs, xstart):
     return [np.column_stack([a[:, 0] - xstart, a[:, 1], a[:, 2]]) for a in trajs]
 
 
-def traj_mse(diff_su, mat_trajs):
-    """MSE по всем частицам и точкам сетки: (u_d−u_m)²+(v_d−v_m)², м²."""
+def traj_mse(diff_su, mat_trajs, smax=None):
+    """MSE по частицам и точкам сетки: (u_d−u_m)²+(v_d−v_m)², м². smax — ограничить сравнение окном s≤smax
+    (для ФИТА: элемент + небольшой хвост, без дальнего дрейфа, где угл.ошибка сильно усиливается)."""
+    mask = (SGRID <= smax) if smax is not None else np.ones_like(SGRID, bool)
     tot = 0.0; n = 0
     for d, m in zip(diff_su, mat_trajs):
         ud, vd = _resample(d); um, vm = _resample(m)
-        tot += np.sum((ud - um) ** 2 + (vd - vm) ** 2); n += 2 * len(SGRID)
+        tot += np.sum((ud[mask] - um[mask]) ** 2 + (vd[mask] - vm[mask]) ** 2); n += 2 * int(mask.sum())
     return tot / n
 
 
@@ -220,18 +222,23 @@ def fit_element(dev, cur, diff_su, geom, kind, probes):
 
     def obj(x):
         coeffs, Leff = unpack(x)
-        if not (0.2 * L0 <= Leff <= min(5 * L0, 1.8 * min(geom["entry"], geom["exit"]))):
-            return 1e3                                  # L_eff в физичных границах (не схлопывать/раздувать)
+        if not (0.6 * L0 <= Leff <= 1.4 * L0):          # L_eff в узких границах вокруг .lte (не схлопывать/раздувать)
+            return 1e3
         try:
             mat = [track_matrix(dev, coeffs, Leff, kind, geom, p) for p in probes]
         except mt.ParticleLost:
             return 1e3
-        return traj_mse(diff_su, mat)
+        return traj_mse(diff_su, mat)                   # полный путь: дальний дрейф констрейнит выходной угол
 
     res = minimize(obj, x0, method="Nelder-Mead",
                    options=dict(xatol=1e-7, fatol=1e-18, maxiter=6000))
     coeffs, Leff = unpack(res.x)
-    return coeffs, Leff, res.fun
+    try:                                                # ПОЛНАЯ невязка (весь путь) с фитированными коэф. — для отчёта
+        mat = [track_matrix(dev, coeffs, Leff, kind, geom, p) for p in probes]
+        full_mse = traj_mse(diff_su, mat)
+    except mt.ParticleLost:
+        full_mse = res.fun
+    return coeffs, Leff, full_mse
 
 
 # ============================ ИЗГИБАЮЩИЕ: ПОДБОР ПОВОРОТА ===================================
