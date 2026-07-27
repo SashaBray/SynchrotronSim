@@ -7,7 +7,7 @@
 прогнать C++-диффур, прочитать траекторию, вычистить временные строки. Дальше — свип токов, фит матрицы,
 Word-отчёт. Диффур eff_length НЕ использует (трек по карте поля) ⇒ спека «без диффурных длин» соблюдена.
 """
-import os, csv, math, struct, subprocess, shutil, sys
+import os, csv, math, struct, subprocess, shutil, sys, itertools
 import numpy as np
 import matrix_tracker as mt
 import bip_matrix as bm
@@ -55,27 +55,35 @@ def make_beam(x0, radius=1e-3, n_circle=12):
 
 
 def build_config(dev, cur, yaw=0.0):
-    """Записать ВРЕМЕННЫЙ одно-элементный конфиг (dev при токе cur) в 4 CSV. Возврат dict с геометрией."""
+    """Одно-элементный конфиг (dev при токе cur). Обёртка над build_windings (одна обмотка)."""
+    return build_windings([(dev, cur)], yaw)
+
+
+def build_windings(windings, yaw=0.0):
+    """Записать ВРЕМЕННЫЙ конфиг из N СО-ЛОКОВАННЫХ обмоток (все в CENTER, ось +x, поворот yaw) в 4 CSV.
+    windings = [(dev, cur|'-'), …]. Диффур суперпозирует поля со-локованных элементов (getTotalFields).
+    Возврат dict с геометрией."""
     lat_h, lat_r = _rows("lattice_configs.csv")
     con_h, con_r = _rows("element_connectivity.csv")
     grp_h, grp_r = _rows("particle_groups.csv")
     exp_h, exp_r = _rows("experiments.csv")
     ci = {c: i for i, c in enumerate(lat_h)}
-    # строка элемента (позиция — центр CENTER по x, ось +x; поворот yaw для изгибов)
-    row = [""] * len(lat_h)
-    row[ci["lattice_id"]] = str(TMP_LAT); row[ci["instance_id"]] = "1"; row[ci["device_type_id"]] = dev
-    row[ci["x"]] = repr(CENTER); row[ci["y"]] = "0.0"; row[ci["z"]] = "0.0"
-    row[ci["yaw"]] = repr(yaw); row[ci["pitch"]] = "0.0"; row[ci["roll"]] = "0.0"
-    row[ci["arg_val"]] = repr(cur); row[ci["correct_coeff"]] = "1.0"
-    for c in ("mat_B", "mat_G", "mat_S", "mat_O"):
-        if c in ci: row[ci[c]] = "0"
-    lat_new = [r for r in lat_r if r[0] != str(TMP_LAT)] + [row]
-    # связность: один элемент
     coni = {c: i for i, c in enumerate(con_h)}
-    crow = [""] * len(con_h)
-    crow[coni["lattice_id"]] = str(TMP_LAT); crow[coni["instance_id"]] = "1"
-    crow[coni["device_type_id"]] = dev
-    con_new = [r for r in con_r if r[0] != str(TMP_LAT)] + [crow]
+    lat_rows, con_rows = [], []
+    for k, (dev, cur) in enumerate(windings, start=1):     # instance_id 1..N, все в одной точке CENTER
+        row = [""] * len(lat_h)
+        row[ci["lattice_id"]] = str(TMP_LAT); row[ci["instance_id"]] = str(k); row[ci["device_type_id"]] = dev
+        row[ci["x"]] = repr(CENTER); row[ci["y"]] = "0.0"; row[ci["z"]] = "0.0"
+        row[ci["yaw"]] = repr(yaw); row[ci["pitch"]] = "0.0"; row[ci["roll"]] = "0.0"
+        row[ci["arg_val"]] = cur if cur == "-" else repr(cur); row[ci["correct_coeff"]] = "1.0"
+        for c in ("mat_B", "mat_G", "mat_S", "mat_O"):
+            if c in ci: row[ci[c]] = "0"
+        lat_rows.append(row)
+        crow = [""] * len(con_h)
+        crow[coni["lattice_id"]] = str(TMP_LAT); crow[coni["instance_id"]] = str(k); crow[coni["device_type_id"]] = dev
+        con_rows.append(crow)
+    lat_new = [r for r in lat_r if r[0] != str(TMP_LAT)] + lat_rows
+    con_new = [r for r in con_r if r[0] != str(TMP_LAT)] + con_rows
     # пучок у стартовой плоскости
     grp_new = [r for r in grp_r if r[0] != str(TMP_GRP)] + make_beam(CENTER - ENTRY)
     # опыт: финиш-плоскость на x=CENTER+EXIT, нормаль +x (3 точки + направление)
@@ -444,9 +452,14 @@ OUTDIR = os.path.join(RESULTS, "element_compare")
 
 
 def _show_currents(recs):
-    """3 показательных тока: край−середина−край (для изгиба/PM токи не [−50,0,50])."""
+    """Показательные токи для графиков: 2 шт БЕЗ нулевого (ток 0 = чистый дрейф, неинформативен). Знаковый
+    свип (прямые) → ток ближайший к ±50% макс. Положительный свип (DQ) → 50% и 100% макс. PM/малый — как есть."""
     curs = sorted({r["cur"] for r in recs})
-    return curs if len(curs) <= 3 else [curs[0], curs[len(curs) // 2], curs[-1]]
+    if len(curs) <= 2:
+        return curs
+    amax = max(abs(c) for c in curs); half = 0.5 * amax
+    nearest = lambda t: min(curs, key=lambda c: (abs(c - t), -abs(c)))   # ближайший к t, тай → больший модуль
+    return [nearest(-half), nearest(half)] if any(c < 0 for c in curs) else [nearest(half), nearest(amax)]
 
 
 def _mat_for_plot(dev, coeffs, L, kind, geom, probes):
@@ -640,7 +653,111 @@ def run_all(kinds=("quad", "sext", "oct")):
     return elements
 
 
+# ============================ КОМБО-ДАТАСЕТ DQ (все комбинации токов обмоток) =================
+def run_diffur_windings(windings, yaw=0.0):
+    """Диффур для N со-локованных обмоток (суперпозиция полей). Возврат (trajs, geom). Чистит вызывающий."""
+    geom = build_windings(windings, yaw)
+    r = subprocess.run([EXE, str(TMP_EXP)], capture_output=True, text=True, cwd=ROOT)
+    if r.returncode != 0:
+        raise RuntimeError(f"диффур упал: {r.stderr[-400:]}")
+    return read_bin(TMP_EXP), geom
+
+
+def tune_bend_yaw_windings(windings, iters=6, tol=1e-6):
+    """yaw для симметричного изгиба ОПОРНОЙ (ч0) комбинированного поля обмоток (аналог tune_bend_yaw)."""
+    yaw = 0.0
+    for _ in range(iters):
+        trajs, _ = run_diffur_windings(windings, yaw)
+        ref = trajs[0]; s = ref[:, 0]; m = s > (s[-1] - 0.3)
+        phi = math.atan(np.polyfit(ref[m, 0], ref[m, 1], 1)[0]); cleanup()
+        new = phi / 2.0
+        if abs(new - yaw) < tol:
+            yaw = new; break
+        yaw = new
+    return yaw
+
+
+def _fit_gs_combo(main, geom, diff_su, L, theta0):
+    """Комбо-фит DQ при ФИКС. L: B из угла; (G,S) — старт G из 1D-скана (_coeff_at_L, S=0) → Nelder-Mead по
+    (G,S) с масштабным симплексом (шаг G~0.01, S~1). Секступоль S ловит feed-down комбинированной функции
+    (память dq-gk-diagnosis). Возврат (coeffs{B,G,S}, mse)."""
+    c0, _ = _coeff_at_L(main, "dq", geom, PROBES, diff_su, L, theta0)    # G0 при S=0
+    B = c0["B"]; x0 = np.array([c0["G"], 0.0])
+    simplex = np.array([x0, x0 + [0.01, 0.0], x0 + [0.0, 1.0]])          # масштабы G и S
+
+    def obj(x):
+        try:
+            return traj_mse(diff_su, track_set(main, {"B": B, "G": x[0], "S": x[1]}, L, "dq", geom, PROBES))
+        except mt.ParticleLost:
+            return 1e3
+
+    res = minimize(obj, x0, method="Nelder-Mead", initial_simplex=simplex,
+                   options=dict(xatol=1e-6, fatol=1e-16, maxiter=4000, maxfev=4000))
+    return {"B": B, "G": float(res.x[0]), "S": float(res.x[1])}, float(res.fun)
+
+
+def save_combo_dataset(base, Leff, recs, outdir):
+    """CSV комбо: I1;I2;I3;B;G;S;RMS (запятая-десятичная для Excel, ; поле). L_eff общий в шапке."""
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, f"combo_dataset_{base}.csv")
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f, delimiter=";")
+        w.writerow(["L_eff_общий_м", str(Leff).replace(".", ",")]); w.writerow([])
+        w.writerow(["I1_А", "I2_А", "I3_А", "B", "G", "S", "RMS_мм"])
+        for r in recs:
+            c = r["coeffs"]
+            row = [r["i1"], r["i2"], r["i3"], c["B"], c["G"], c.get("S", 0.0), r["rms_mm"]]
+            w.writerow([str(x).replace(".", ",") for x in row])
+    print(f"  датасет: {path} ({len(recs)} комбо)")
+    return path
+
+
+def run_dq_combo(base="L400", ngrid=4):
+    """Комбо-датасет DQ: перебор ВСЕХ комбинаций токов обмоток I1/I2/I3. Шаг подобран под лимит ≤120 примеров:
+    ngrid=4 ⇒ 4³=64 (5³=125 превысило бы). Диапазон [−Iмакс,+Iмакс] на обмотку, Iмакс = рабочий ток I1
+    (dq_operating_current). L_eff — общий (из свипа I1). На комбо: yaw(симметрия) → диффур(суперпозиция
+    полей обмоток) → фит B(из угла)+G+S при фикс. L_eff. Датасет (I1,I2,I3)→(B,G,S,RMS)."""
+    wdev = [f"DQ_I{k}_1A_{base}" for k in (1, 2, 3)]
+    main = wdev[0]; N3 = ngrid ** 3
+    Imax = dq_operating_current(main)
+    print(f"DQ {base}: рабочий ток I1≈{Imax:.2f}А; сетка ±{Imax:.2f}А × {ngrid}/обмотка ⇒ {N3} комбо (лимит ≤120)")
+    Leff = sweep_currents(main, "dq", PROBES)[0]["Leff_common"]   # общий L_eff из свипа главной обмотки
+    print(f"  общий L_eff (из свипа I1) = {Leff:.4f}м; перебор комбинаций…")
+    grid = np.linspace(-Imax, Imax, ngrid)
+    bak = os.path.join(TB, "_cmp_backup"); os.makedirs(bak, exist_ok=True)
+    for f in CSV4: shutil.copy2(os.path.join(TB, f), os.path.join(bak, f))
+    recs = []
+    try:
+        for n, (i1, i2, i3) in enumerate(itertools.product(grid, grid, grid), 1):
+            wnd = [(wdev[0], round(float(i1), 4)), (wdev[1], round(float(i2), 4)), (wdev[2], round(float(i3), 4))]
+            try:
+                yaw = tune_bend_yaw_windings(wnd)
+                trajs, geom = run_diffur_windings(wnd, yaw)
+                diff_su = diff_local(trajs, geom["xstart"], bending=True)
+                coeffs, mse = _fit_gs_combo(main, geom, diff_su, Leff, 2.0 * yaw)
+                recs.append(dict(i1=float(i1), i2=float(i2), i3=float(i3), coeffs=coeffs, rms_mm=math.sqrt(mse) * 1e3))
+            except Exception as e:
+                print(f"  [{n}/{N3}] I=({i1:.2f},{i2:.2f},{i3:.2f}): {type(e).__name__}: {e}")
+            cleanup()
+            if n % 8 == 0:
+                print(f"  {n}/{N3}  (посл. RMS={recs[-1]['rms_mm']:.4f}мм)" if recs else f"  {n}/{N3}")
+    finally:
+        cleanup()
+        for f in CSV4:
+            b = os.path.join(bak, f)
+            if os.path.exists(b) and os.path.getsize(os.path.join(TB, f)) == 0:
+                shutil.copy2(b, os.path.join(TB, f))
+    rmss = [r["rms_mm"] for r in recs]
+    print(f"\nГОТОВО комбо {base}: {len(recs)}/{N3}, RMS {min(rmss):.4f}..{max(rmss):.4f}мм")
+    save_combo_dataset(base, Leff, recs, OUTDIR)
+    return recs
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "combo":
+        base = sys.argv[2] if len(sys.argv) > 2 else "L400"
+        ng = int(sys.argv[3]) if len(sys.argv) > 3 else 4
+        run_dq_combo(base, ng); sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "all":
         kinds = tuple(sys.argv[2].split(",")) if len(sys.argv) > 2 else ("quad", "sext", "oct")
         run_all(kinds); sys.exit(0)
