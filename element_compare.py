@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Сравнение ДИФФУРНОЙ (C++ SynchrotronTracker, Boris по картам поля) и МАТРИЧНОЙ (Python matrix_tracker)
-моделей по одиночным элементам БД. Датасет траекторий при разных токах + подгонка матрицы (L_eff+физкоэф).
+"""Сравнение ДИФФУРНОЙ (C++ SynchrotronTracker, Boris по картам поля) и КИКОВОЙ (Python matrix_tracker в
+режиме SS_SECTOR — симплектический drift-kick-drift, НЕ передаточные матрицы) моделей по одиночным элементам
+БД. Датасет траекторий при разных токах + подгонка кика (L_eff+физкоэф).
 
 ФАЗА 1 (этот файл пока): фундамент — собрать ВРЕМЕННЫЙ одно-элементный конфиг в основной БД
 (пучок → элемент → финиш-плоскость; дрейфы = свободный пролёт, длины НАШИ, из диффура не берём),
-прогнать C++-диффур, прочитать траекторию, вычистить временные строки. Дальше — свип токов, фит матрицы,
+прогнать C++-диффур, прочитать траекторию, вычистить временные строки. Дальше — свип токов, фит кика,
 Word-отчёт. Диффур eff_length НЕ использует (трек по карте поля) ⇒ спека «без диффурных длин» соблюдена.
 """
 import os, csv, math, struct, subprocess, shutil, sys, itertools
@@ -138,7 +139,7 @@ def cleanup():
 
 
 # ============================ МАТРИЧНОЕ ЯДРО (Python) + ФИТ ==================================
-os.environ.setdefault("SS_SECTOR", "1")                # секторный/кик режим матрицы
+os.environ.setdefault("SS_SECTOR", "1")                # секторный/кик режим ядра (drift-kick-drift, НЕ матрицы)
 EFF, PHYS, COUP, TRANS = mt.load_db()
 HW = {r["device_type_id"]: r for r in mt._read("hardware_library.csv")}
 LCROW = {r["device_type_id"]: r for r in mt._read("lattice_configs.csv") if r.get("lattice_id") == "1"}
@@ -195,7 +196,7 @@ def track_set(dev, coeffs, L, kind, geom, probes):
     mats = [track_matrix(dev, coeffs, L, kind, geom, p) for p in probes]
     if kind not in ("dipole", "dq"):
         return mats
-    ur, vr = _resample(mats[0])                            # матричная опорная (ч0) на SGRID
+    ur, vr = _resample(mats[0])                            # киковая опорная (ч0) на SGRID
     out = []
     for m in mats:
         um, vm = _resample(m)
@@ -206,7 +207,7 @@ def track_set(dev, coeffs, L, kind, geom, probes):
 def diff_local(trajs, xstart, bending=False):
     """Диффур .bin (X,Y,Z глоб.) → на частицу (s, u, v). ПРЯМОЙ: u=Y, v=Z, s=X−xstart (опорная на оси).
     ИЗГИБ: проекция ФРЕНЕ на опорную дугу ч0 — s=ДЛИНА ДУГИ вдоль ч0, u=⊥смещение В ПЛОСКОСТИ ИЗГИБА
-    (кольцо X-Y), v=вертикаль (Z−Z_ч0). Именно так работает матричный сектор (отклонение от изогнутой
+    (кольцо X-Y), v=вертикаль (Z−Z_ч0). Именно так работает киковый сектор (отклонение от изогнутой
     опорной по длине дуги). Прежний вычет «при том же X» для изогнутой орбиты давал спурьёзный член
     (две параллельные дуги одного радиуса при проекции на X расходятся) — артефакт ~мм на чистом изгибе."""
     if not bending:
@@ -274,7 +275,7 @@ def fit_element(dev, cur, diff_su, geom, kind, probes, theta0=0.0):
     Старт доминантного коэф. — КОАРС-СКАН по физ.диапазону (робастно, симметрично; аналит.оценка из наклона
     ненадёжна). Возврат (coeffs, Leff, mse)."""
     keys = KIND_COEFF[kind]
-    L0 = float(HW[dev].get("eff_length") or 0.3)       # старт L_eff — .lte/матричная длина (НЕ диффурная)
+    L0 = float(HW[dev].get("eff_length") or 0.3)       # старт L_eff — .lte длина модели (НЕ диффурная)
     base = {"B": theta0 / (mt.QP * L0)} if (kind in ("dipole", "dq") and mt.QP) else {}   # B изгиба фиксирован из угла
     key, span = SCAN_RANGE[kind]
     best_v, best_e = 0.0, 1e18                          # коарс-скан доминантного коэф. (61 точка ±span)
@@ -486,8 +487,8 @@ def _mat_for_plot(dev, coeffs, L, kind, geom, probes):
 
 
 def plot_element(dev, kind, recs, probes, outdir):
-    """Графики траекторий x/y (диффур сплошная синяя vs матрица пунктир красная, 13 частиц) при показательных
-    токах. Матрица — с фитированными физкоэф и ОБЩИМ L_eff. Изгиб: отклонение от опорной. Возврат [(cur, png)]."""
+    """Графики траекторий x/y (диффур сплошная синяя vs кик пунктир красная, 13 частиц) при показательных
+    токах. Кик — с фитированными физкоэф и ОБЩИМ L_eff. Изгиб: отклонение от опорной. Возврат [(cur, png)]."""
     Lc = recs[0].get("Leff_common", recs[0]["Leff"]); figs = []
     for cur in _show_currents(recs):
         r = next((x for x in recs if x["cur"] == cur), None)
@@ -497,14 +498,14 @@ def plot_element(dev, kind, recs, probes, outdir):
         for d, mat in zip(r["diff_su"], mats):
             axx.plot(d[:, 0], d[:, 1] * 1e3, color="#2b7bba", lw=1.1)   # диффур всегда
             axy.plot(d[:, 0], d[:, 2] * 1e3, color="#2b7bba", lw=1.1)
-            if mat is None: continue                                    # матрица разошлась — только диффур
+            if mat is None: continue                                    # кик разошёлся — только диффур
             axx.plot(mat[:, 0], mat[:, 1] * 1e3, color="#d1495b", lw=1.0, ls="--")
             axy.plot(mat[:, 0], mat[:, 2] * 1e3, color="#d1495b", lw=1.0, ls="--")
         ttl2 = " (откл. от опорной)" if kind in ("dipole", "dq") else ""
         for ax in (axx, axy):
             ax.set_xlabel("s, м"); ax.grid(alpha=0.3)
         axx.set_ylabel("x (гориз.), мм"); axy.set_ylabel("y (верт.), мм")
-        axx.set_title(f"x-плоскость — ток {cur:+.2f}А (— диффур, -- матрица)")
+        axx.set_title(f"x-плоскость — ток {cur:+.2f}А (— диффур, -- кик)")
         axy.set_title(f"y-плоскость{ttl2}")
         fig.suptitle(f"{dev} ({kind})  L_eff={Lc:.4f}м  RMS={r['rms_mm']:.4f}мм", fontsize=11)
         fig.tight_layout(rect=[0, 0, 1, 0.96])
@@ -515,7 +516,7 @@ def plot_element(dev, kind, recs, probes, outdir):
 
 
 def plot_xy(dev, kind, recs, probes, outdir):
-    """Проекция пучка в плоскости xy ДО элемента (стартовый круг Ø2мм) и ЗА элементом (диффур ○ vs матрица ✕)
+    """Проекция пучка в плоскости xy ДО элемента (стартовый круг Ø2мм) и ЗА элементом (диффур ○ vs кик ✕)
     при максимальном по модулю токе. Показывает, как элемент преобразует сечение пучка."""
     r = max(recs, key=lambda x: abs(x["cur"])); Lc = recs[0].get("Leff_common", r["Leff"])
     fig, (a0, a1) = plt.subplots(1, 2, figsize=(9.5, 4.6))
@@ -526,7 +527,7 @@ def plot_xy(dev, kind, recs, probes, outdir):
         a1.scatter(d[-1, 1] * 1e3, d[-1, 2] * 1e3, c="#2b7bba", s=34, marker="o")
         if m is not None:
             a1.scatter(m[-1, 1] * 1e3, m[-1, 2] * 1e3, c="#d1495b", s=44, marker="x")
-    a1.set_title(f"за элементом, {r['cur']:+.2f} А  (o диффур, x матрица)")
+    a1.set_title(f"за элементом, {r['cur']:+.2f} А  (o диффур, x кик)")
     for a in (a0, a1):
         a.set_xlabel("x (гориз.), мм"); a.set_ylabel("y (верт.), мм"); a.grid(alpha=0.3); a.set_aspect("equal", "datalim")
     fig.suptitle(f"{dev} ({kind}) — сечение пучка в плоскости xy", fontsize=11)
@@ -553,12 +554,14 @@ def build_report(elements, path):
     from docx import Document
     from docx.shared import Inches, Pt
     doc = Document()
-    doc.add_heading("SynchrotronSim — сопоставление матричной и диффурной моделей по элементам", level=0)
-    doc.add_paragraph("Диффур (C++ SynchrotronTracker, Boris по картам поля) — эталон. Матрица (Python "
-                      "matrix_tracker) подогнана последовательными приближениями: физкоэф на каждый ток + один "
-                      "L_eff на элемент. Пучок 13 частиц (12 по кругу Ø2мм + центр). Прямые токовые — свип "
-                      "−50..+50 А; изгибающие DQ — вокруг рабочего тока; PM-диполи — одна конфигурация (поле "
-                      "фиксировано). Изгибающие сравниваются в проекции Френе (отклонение от опорной дуги).")
+    doc.add_heading("SynchrotronSim — сопоставление киковой и диффурной моделей по элементам", level=0)
+    doc.add_paragraph("Диффур (C++ SynchrotronTracker, Boris по картам поля) — эталон. Киковая модель (Python "
+                      "matrix_tracker в режиме SS_SECTOR — симплектический drift-kick-drift, порт elegant "
+                      "KQUAD/KSEXT/KOCT/CSBEND, а НЕ передаточные матрицы) подогнана последовательными "
+                      "приближениями: физкоэф на каждый ток + один L_eff на элемент. Пучок 13 частиц (12 по "
+                      "кругу Ø2мм + центр). Прямые токовые — свип −50..+50 А; изгибающие DQ — вокруг рабочего "
+                      "тока; PM-диполи — одна конфигурация (поле фиксировано). Изгибающие сравниваются в "
+                      "проекции Френе (отклонение от опорной дуги).")
     for el in elements:
         if el is None: continue
         keys = KIND_COEFF[el["kind"]]
@@ -773,9 +776,9 @@ if __name__ == "__main__":
         print(f"диффур {dev} ({kind}) @ {cur}А: {len(trajs)} частиц, точек/частицу {len(trajs[0])}")
         coeffs, Leff, mse = fit_element(dev, cur, diff_su, geom, kind, probes)
         cs = "  ".join(f"{k}={v:+.4e}" for k, v in coeffs.items())
-        print(f"ФИТ матрицы: {cs}  L_eff={Leff:.4f}м  (старт .lte {HW[dev].get('eff_length')}м)")
+        print(f"ФИТ кика: {cs}  L_eff={Leff:.4f}м  (старт .lte {HW[dev].get('eff_length')}м)")
         print(f"невязка траекторий: RMS={math.sqrt(mse)*1e3:.4f} мм  (MSE={mse:.3e} м²)")
-        # финальные позиции: диффур vs матрица (проверка)
+        # финальные позиции: диффур vs кик (проверка)
         mat = track_set(dev, coeffs, Leff, kind, geom, probes)
         dfin = np.array([_resample(d) for d in diff_su])[:, :, -1]   # (u,v) на финише
         mfin = np.array([_resample(m) for m in mat])[:, :, -1]
