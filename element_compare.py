@@ -758,7 +758,7 @@ def run_dq_combo(base="L400", ngrid=4):
 
 
 # ============================ ПОСТОЯННЫЙ КОНФИГ ДЛЯ VISUALIZE.PY (диффур + кик в 3D) =========
-VIZ_ID = 950   # постоянный id конфига визуализации (не пересекается с 1/2/3 и TMP 900; cleanup не трогает)
+VIZ_START = 4   # id постоянных конфигов визуализации С 4 (1/2/3 — реальные опыты, TMP=900 чистится)
 
 
 def kick_to_lab(kick_trajs, ref_lab):
@@ -787,40 +787,99 @@ def write_bin(path, trajs):
             f.write(struct.pack("I", a.shape[0])); f.write(a.tobytes())
 
 
-def setup_viz(dev, cur=None, viz_id=VIZ_ID):
-    """ПОСТОЯННЫЙ одно-элементный конфиг для visualize.py с ДВУМЯ моделями в лаб-XYZ: диффур
-    (trajectories_exp<viz_id>.bin) и кик (trajectories_exp<viz_id>_kick.bin). Свип даёт общий L_eff+коэф,
-    берётся ближайший к cur ток. Конфиг под viz_id НЕ чистится (visualize.py <viz_id> его найдёт)."""
-    kind = LCROW[dev].get("kind") or "quad"
+def design_current(dev, kind, recs):
+    """Ток, при котором фитируемый ДОМИНАНТНЫЙ физкоэф = ПРОЕКТНОМУ mat_* (.lte СИЛЫ, лежит в БД). Линейная
+    экстраполяция по свипу (coeff ≈ slope·I). DQ — по изгибу mat_B (рабочая точка). PM → '-' (без тока).
+    Знак тока даёт полярность (у части квадов проектный градиент противоположного знака)."""
     if is_pm(dev):
-        cur = 0.0
-    elif cur is None:
-        cur = dq_operating_current(dev) if kind == "dq" else 50.0
-    print(f"=== настройка визуализации {dev} ({kind}) @ ~{cur:.2f}А ===")
-    recs = sweep_currents(dev, kind, PROBES)                # общий L_eff + коэф (чистит TMP)
-    r = min(recs, key=lambda x: abs(x["cur"] - cur))        # ближайший к запрошенному току
-    coeffs, Leff, yaw, cur_use = r["coeffs"], r["Leff_common"], r.get("yaw", 0.0), r["cur"]
-    cs = " ".join(f"{k}={v:+.4e}" for k, v in coeffs.items())
-    print(f"  ток {cur_use:+.2f}А  L_eff={Leff:.4f}м  {cs}")
-    # ПОСТОЯННЫЙ конфиг под viz_id (одна обмотка dev; PM ⇒ arg_val='-')
-    geom = build_windings([(dev, "-" if is_pm(dev) else cur_use)], yaw, lat_id=viz_id, grp_id=viz_id, exp_id=viz_id)
+        return "-"
+    dom = {"quad": "G", "sext": "S", "oct": "O", "dq": "B"}[kind]
+    design = float(LCROW[dev].get({"G": "mat_G", "S": "mat_S", "O": "mat_O", "B": "mat_B"}[dom]) or 0.0)
+    Is = np.array([r["cur"] for r in recs], float); Cs = np.array([r["coeffs"][dom] for r in recs], float)
+    slope = np.polyfit(Is, Cs, 1)[0]                    # coeff ≈ slope·I
+    return round(design / slope, 4) if abs(slope) > 1e-30 else 0.0
+
+
+def setup_viz(dev, cur, viz_id, Leff=None):
+    """ПОСТОЯННЫЙ конфиг id=viz_id для visualize.py: диффур (trajectories_exp<id>.bin) + кик
+    (trajectories_exp<id>_kick.bin) в лаб-XYZ при ТОЧНОМ токе cur ('-' ⇒ PM). Leff — общий L_eff (если None,
+    берётся из свипа). Конфиг НЕ чистится. Возврат dict со сводкой."""
+    kind = LCROW[dev].get("kind") or "quad"
+    bending = kind in ("dipole", "dq"); pm = (cur == "-")
+    if Leff is None:
+        rc = sweep_currents(dev, kind, PROBES); Leff = rc[0]["Leff_common"]
+    cur_val = 0.0 if pm else float(cur)
+    yaw = tune_bend_yaw(dev, cur_val) if bending else 0.0
+    geom = build_windings([(dev, "-" if pm else cur_val)], yaw, lat_id=viz_id, grp_id=viz_id, exp_id=viz_id)
     rr = subprocess.run([EXE, str(viz_id)], capture_output=True, text=True, cwd=ROOT)   # диффур → .bin
     if rr.returncode != 0:
         raise RuntimeError(f"диффур упал: {rr.stderr[-400:]}")
     trajs = read_bin(viz_id); ref_lab = trajs[0]
-    kick_local = track_set(dev, coeffs, Leff, kind, geom, PROBES)    # (s,u,v) → лаб XYZ по ч0
-    kick_lab = kick_to_lab(kick_local, ref_lab)
+    diff_su = diff_local(trajs, geom["xstart"], bending)             # фит коэф при ТОЧНОМ токе (общий L_eff)
+    if kind == "dq":
+        coeffs, mse = _fit_gs_combo(dev, geom, diff_su, Leff, 2.0 * yaw)
+    else:
+        coeffs, mse = _coeff_at_L(dev, kind, geom, PROBES, diff_su, Leff, theta0=2.0 * yaw)
+    kick_lab = kick_to_lab(track_set(dev, coeffs, Leff, kind, geom, PROBES), ref_lab)   # кик → лаб XYZ по ч0
     write_bin(os.path.join(RESULTS, f"trajectories_exp{viz_id}_kick.bin"), kick_lab)
-    print(f"  ГОТОВО: id={viz_id} | диффур {len(trajs)} частиц + кик {len(kick_lab)} частиц (лаб XYZ)")
-    print(f"  визуализировать:  py -3.14 visualize.py {viz_id}")
-    return viz_id
+    rms = math.sqrt(mse) * 1e3; cs = " ".join(f"{k}={v:+.3e}" for k, v in coeffs.items())
+    print(f"  id={viz_id} {dev} ({kind}) ток={'PM' if pm else f'{cur_val:+.3f}А'}  L_eff={Leff:.4f}  {cs}  RMS={rms:.4f}мм")
+    return dict(id=viz_id, dev=dev, kind=kind, cur=("PM" if pm else cur_val), Leff=Leff, coeffs=coeffs, rms=rms)
+
+
+def _drop_config(*ids):
+    """Убрать конфиги с данными id из 4 CSV (при переезде id/пересборке)."""
+    for key in ids:
+        for name in CSV4:
+            h, rows = _rows(name); _write(name, h, [r for r in rows if not (r and r[0] == str(key))])
+        for suf in ("", "_kick"):
+            p = os.path.join(RESULTS, f"trajectories_exp{key}{suf}.bin")
+            if os.path.exists(p): os.remove(p)
+
+
+def setup_viz_all(start_id=VIZ_START):
+    """Постоянные конфиги визуализации для ВСЕХ элементов, id подряд с start_id. Ток каждого = ПРОЕКТНЫЙ
+    (design_current: фит.коэф = mat_* из .lte СИЛЫ). Диполи — PM. Печатает таблицу id↔элемент↔ток."""
+    cands = candidates(("quad", "sext", "oct")) + candidates_bending()
+    print(f"=== визуализация ВСЕХ элементов ({len(cands)}), id с {start_id}, токи по ПРОЕКТНЫМ коэф ===")
+    _drop_config(950, *range(start_id, start_id + len(cands) + 5))   # снять старый 950 и прежние viz-конфиги
+    summary = []
+    try:
+        for i, (dev, kind) in enumerate(cands):
+            vid = start_id + i
+            try:
+                if is_pm(dev):
+                    summary.append(setup_viz(dev, "-", vid, Leff=None))
+                else:
+                    recs = sweep_currents(dev, kind, PROBES)
+                    summary.append(setup_viz(dev, design_current(dev, kind, recs), vid, Leff=recs[0]["Leff_common"]))
+            except Exception as e:
+                print(f"  ! id={vid} {dev}: {type(e).__name__}: {e}"); cleanup()
+    finally:
+        cleanup()
+    print("\n=== СВОДКА (визуализировать: py -3.14 visualize.py <id>) ===")
+    for s in summary:
+        c = s["cur"] if s["cur"] == "PM" else f"{s['cur']:+.3f}А"
+        print(f"  id {s['id']:2d}  {s['dev']:18s} ({s['kind']:6s})  ток {c:>11s}  RMS {s['rms']:.4f}мм")
+    return summary
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "viz-all":
+        setup_viz_all(); sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "viz":
         dev = sys.argv[2] if len(sys.argv) > 2 else "DQ_I1_1A_L400"
-        cur = float(sys.argv[3]) if len(sys.argv) > 3 else None
-        setup_viz(dev, cur); sys.exit(0)
+        vid = int(sys.argv[4]) if len(sys.argv) > 4 else VIZ_START
+        kind = LCROW[dev].get("kind") or "quad"
+        if len(sys.argv) > 3:                              # явный ток: viz <dev> <ток> [id]
+            setup_viz(dev, float(sys.argv[3]), vid)
+        elif is_pm(dev):                                   # проектный ток: viz <dev> [_ id]
+            setup_viz(dev, "-", vid)
+        else:
+            recs = sweep_currents(dev, kind, PROBES)
+            setup_viz(dev, design_current(dev, kind, recs), vid, Leff=recs[0]["Leff_common"])
+        print(f"  визуализировать:  py -3.14 visualize.py {vid}")
+        sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "combo":
         base = sys.argv[2] if len(sys.argv) > 2 else "L400"
         ng = int(sys.argv[3]) if len(sys.argv) > 3 else 4
