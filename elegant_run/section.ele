@@ -1,6 +1,6 @@
 &run_setup
     lattice = "syla_ring.lte", use_beamline = "SEC",
-    p_central_mev = 3000, centroid = "%s.cen", default_order = 1,
+    p_central_mev = 6000, centroid = "%s.cen", default_order = 1,
 &end
 &floor_coordinates filename = "%s.flr", include_vertices = 1 &end
 &run_control n_passes = 1 &end

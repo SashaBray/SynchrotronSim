@@ -2,7 +2,7 @@
 &run_setup
     lattice = "syla_ring.lte",
     use_beamline = "RING",
-    p_central_mev = 3000,
+    p_central_mev = 6000,
     default_order = 1,
     magnets = "%s.mag",
 &end
