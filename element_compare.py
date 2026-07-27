@@ -41,7 +41,7 @@ def _write(name, header, rows):
         w = csv.writer(f, delimiter=";"); w.writerow(header); w.writerows(rows)
 
 
-def make_beam(x0, radius=1e-3, n_circle=12):
+def make_beam(x0, radius=1e-3, n_circle=12, grp_id=TMP_GRP):
     """13 частиц у стартовой плоскости x=x0: 12 по кругу Ø2·radius в поперечной (y,z) + 1 в центре.
     Все летят вдоль +x со скоростью пучка. Возврат список строк particle_groups."""
     parts = [(0.0, 0.0)]
@@ -50,7 +50,7 @@ def make_beam(x0, radius=1e-3, n_circle=12):
         parts.append((radius * math.cos(a), radius * math.sin(a)))
     rows = []
     for pid, (y, z) in enumerate(parts, start=1):
-        rows.append([str(TMP_GRP), str(pid), repr(ME), repr(QE),
+        rows.append([str(grp_id), str(pid), repr(ME), repr(QE),
                      repr(x0), repr(y), repr(z), repr(V_BEAM), "0.0", "0.0"])
     return rows
 
@@ -60,10 +60,11 @@ def build_config(dev, cur, yaw=0.0):
     return build_windings([(dev, cur)], yaw)
 
 
-def build_windings(windings, yaw=0.0):
-    """Записать ВРЕМЕННЫЙ конфиг из N СО-ЛОКОВАННЫХ обмоток (все в CENTER, ось +x, поворот yaw) в 4 CSV.
-    windings = [(dev, cur|'-'), …]. Диффур суперпозирует поля со-локованных элементов (getTotalFields).
-    Возврат dict с геометрией."""
+def build_windings(windings, yaw=0.0, lat_id=TMP_LAT, grp_id=TMP_GRP, exp_id=TMP_EXP):
+    """Записать конфиг из N СО-ЛОКОВАННЫХ обмоток (все в CENTER, ось +x, поворот yaw) в 4 CSV под id
+    lat/grp/exp. windings = [(dev, cur|'-'), …]. Диффур суперпозирует поля со-локованных элементов
+    (getTotalFields). id по умолчанию TMP (900, чистится cleanup); свои id (напр. 950) — ПОСТОЯННЫЙ конфиг
+    (для visualize.py), cleanup не трогает. Возврат dict с геометрией."""
     lat_h, lat_r = _rows("lattice_configs.csv")
     con_h, con_r = _rows("element_connectivity.csv")
     grp_h, grp_r = _rows("particle_groups.csv")
@@ -73,7 +74,7 @@ def build_windings(windings, yaw=0.0):
     lat_rows, con_rows = [], []
     for k, (dev, cur) in enumerate(windings, start=1):     # instance_id 1..N, все в одной точке CENTER
         row = [""] * len(lat_h)
-        row[ci["lattice_id"]] = str(TMP_LAT); row[ci["instance_id"]] = str(k); row[ci["device_type_id"]] = dev
+        row[ci["lattice_id"]] = str(lat_id); row[ci["instance_id"]] = str(k); row[ci["device_type_id"]] = dev
         row[ci["x"]] = repr(CENTER); row[ci["y"]] = "0.0"; row[ci["z"]] = "0.0"
         row[ci["yaw"]] = repr(yaw); row[ci["pitch"]] = "0.0"; row[ci["roll"]] = "0.0"
         row[ci["arg_val"]] = cur if cur == "-" else repr(cur); row[ci["correct_coeff"]] = "1.0"
@@ -81,21 +82,21 @@ def build_windings(windings, yaw=0.0):
             if c in ci: row[ci[c]] = "0"
         lat_rows.append(row)
         crow = [""] * len(con_h)
-        crow[coni["lattice_id"]] = str(TMP_LAT); crow[coni["instance_id"]] = str(k); crow[coni["device_type_id"]] = dev
+        crow[coni["lattice_id"]] = str(lat_id); crow[coni["instance_id"]] = str(k); crow[coni["device_type_id"]] = dev
         con_rows.append(crow)
-    lat_new = [r for r in lat_r if r[0] != str(TMP_LAT)] + lat_rows
-    con_new = [r for r in con_r if r[0] != str(TMP_LAT)] + con_rows
+    lat_new = [r for r in lat_r if r[0] != str(lat_id)] + lat_rows
+    con_new = [r for r in con_r if r[0] != str(lat_id)] + con_rows
     # пучок у стартовой плоскости
-    grp_new = [r for r in grp_r if r[0] != str(TMP_GRP)] + make_beam(CENTER - ENTRY)
+    grp_new = [r for r in grp_r if r[0] != str(grp_id)] + make_beam(CENTER - ENTRY, grp_id=grp_id)
     # опыт: финиш-плоскость на x=CENTER+EXIT, нормаль +x (3 точки + направление)
     xf = CENTER + EXIT
     p1 = (xf, 1.0, 1.0); p2 = (xf, -1.0, 1.0); p3 = (xf, 0.0, -1.0)
-    erow = [str(TMP_EXP), str(TMP_LAT), str(TMP_GRP), "1.00E-11", "0", "1",
+    erow = [str(exp_id), str(lat_id), str(grp_id), "1.00E-11", "0", "1",
             f"{p1[0]:.6f}", f"{p1[1]:.6f}", f"{p1[2]:.6f}",
             f"{p2[0]:.6f}", f"{p2[1]:.6f}", f"{p2[2]:.6f}",
             f"{p3[0]:.6f}", f"{p3[1]:.6f}", f"{p3[2]:.6f}", "1.0", "0.0", "0.0"]
     erow += [""] * (len(exp_h) - len(erow))
-    exp_new = [r for r in exp_r if r and r[0] != str(TMP_EXP)] + [erow]
+    exp_new = [r for r in exp_r if r and r[0] != str(exp_id)] + [erow]
     _write("lattice_configs.csv", lat_h, lat_new)
     _write("element_connectivity.csv", con_h, con_new)
     _write("particle_groups.csv", grp_h, grp_new)
@@ -756,7 +757,70 @@ def run_dq_combo(base="L400", ngrid=4):
     return recs
 
 
+# ============================ ПОСТОЯННЫЙ КОНФИГ ДЛЯ VISUALIZE.PY (диффур + кик в 3D) =========
+VIZ_ID = 950   # постоянный id конфига визуализации (не пересекается с 1/2/3 и TMP 900; cleanup не трогает)
+
+
+def kick_to_lab(kick_trajs, ref_lab):
+    """Киковые ЛОКАЛЬНЫЕ (s,u,v) → лаб XYZ наложением на опорную орбиту ref_lab (диффур ч0, лаб XYZ) в рамке
+    Френе: точка = ч0(s) + u·n(s) + v·ẑ, n — ⊥ в плоскости изгиба X-Y. Обратно к diff_local(bending). Для
+    прямых ч0 идёт вдоль +x ⇒ n=(0,1) ⇒ (X=xstart+s, Y=u, Z=v)."""
+    Xr, Yr, Zr = ref_lab[:, 0], ref_lab[:, 1], ref_lab[:, 2]
+    Sref = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(Xr), np.diff(Yr)))])
+    tx = np.gradient(Xr); ty = np.gradient(Yr); tn = np.hypot(tx, ty); tn[tn == 0] = 1.0
+    tx /= tn; ty /= tn; nx, ny = -ty, tx
+    out = []
+    for kt in kick_trajs:
+        s, u, v = kt[:, 0], kt[:, 1], kt[:, 2]
+        X = np.interp(s, Sref, Xr) + u * np.interp(s, Sref, nx)
+        Y = np.interp(s, Sref, Yr) + u * np.interp(s, Sref, ny)
+        Z = np.interp(s, Sref, Zr) + v
+        out.append(np.column_stack([X, Y, Z]))
+    return out
+
+
+def write_bin(path, trajs):
+    """Траектории (список (N,3) лаб XYZ) → .bin формата C++ (uint32 count + N×3 float64 на частицу)."""
+    with open(path, "wb") as f:
+        for a in trajs:
+            a = np.ascontiguousarray(a, dtype=np.float64)
+            f.write(struct.pack("I", a.shape[0])); f.write(a.tobytes())
+
+
+def setup_viz(dev, cur=None, viz_id=VIZ_ID):
+    """ПОСТОЯННЫЙ одно-элементный конфиг для visualize.py с ДВУМЯ моделями в лаб-XYZ: диффур
+    (trajectories_exp<viz_id>.bin) и кик (trajectories_exp<viz_id>_kick.bin). Свип даёт общий L_eff+коэф,
+    берётся ближайший к cur ток. Конфиг под viz_id НЕ чистится (visualize.py <viz_id> его найдёт)."""
+    kind = LCROW[dev].get("kind") or "quad"
+    if is_pm(dev):
+        cur = 0.0
+    elif cur is None:
+        cur = dq_operating_current(dev) if kind == "dq" else 50.0
+    print(f"=== настройка визуализации {dev} ({kind}) @ ~{cur:.2f}А ===")
+    recs = sweep_currents(dev, kind, PROBES)                # общий L_eff + коэф (чистит TMP)
+    r = min(recs, key=lambda x: abs(x["cur"] - cur))        # ближайший к запрошенному току
+    coeffs, Leff, yaw, cur_use = r["coeffs"], r["Leff_common"], r.get("yaw", 0.0), r["cur"]
+    cs = " ".join(f"{k}={v:+.4e}" for k, v in coeffs.items())
+    print(f"  ток {cur_use:+.2f}А  L_eff={Leff:.4f}м  {cs}")
+    # ПОСТОЯННЫЙ конфиг под viz_id (одна обмотка dev; PM ⇒ arg_val='-')
+    geom = build_windings([(dev, "-" if is_pm(dev) else cur_use)], yaw, lat_id=viz_id, grp_id=viz_id, exp_id=viz_id)
+    rr = subprocess.run([EXE, str(viz_id)], capture_output=True, text=True, cwd=ROOT)   # диффур → .bin
+    if rr.returncode != 0:
+        raise RuntimeError(f"диффур упал: {rr.stderr[-400:]}")
+    trajs = read_bin(viz_id); ref_lab = trajs[0]
+    kick_local = track_set(dev, coeffs, Leff, kind, geom, PROBES)    # (s,u,v) → лаб XYZ по ч0
+    kick_lab = kick_to_lab(kick_local, ref_lab)
+    write_bin(os.path.join(RESULTS, f"trajectories_exp{viz_id}_kick.bin"), kick_lab)
+    print(f"  ГОТОВО: id={viz_id} | диффур {len(trajs)} частиц + кик {len(kick_lab)} частиц (лаб XYZ)")
+    print(f"  визуализировать:  py -3.14 visualize.py {viz_id}")
+    return viz_id
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "viz":
+        dev = sys.argv[2] if len(sys.argv) > 2 else "DQ_I1_1A_L400"
+        cur = float(sys.argv[3]) if len(sys.argv) > 3 else None
+        setup_viz(dev, cur); sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "combo":
         base = sys.argv[2] if len(sys.argv) > 2 else "L400"
         ng = int(sys.argv[3]) if len(sys.argv) > 3 else 4

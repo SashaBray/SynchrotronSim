@@ -303,6 +303,26 @@ def visualize(target_exp_id):
     else:
         print("  WARNING: No trajectories found.")
 
+    # 6b. Киковая модель (наложение для сравнения) — если есть trajectories_exp<id>_kick.bin -----
+    #     Пишется element_compare.setup_viz (диффур цветной по частицам vs кик единым цветом).
+    kick_path = os.path.join(ws, "results", f"trajectories_exp{target_exp_id}_kick.bin")
+    if os.path.exists(kick_path):
+        kick_particles = load_trajectories(kick_path)
+        kcolor = VIZ_CFG.get("kick_color", "black")
+        klw = int(VIZ_CFG.get("kick_line_width", 2))
+        drawn = 0
+        for i, points in enumerate(kick_particles):
+            if len(points) < 2:
+                continue
+            poly = pv.PolyData(points)
+            cells = np.full((1, len(points) + 1), len(points), dtype=np.int_)
+            cells[0, 1:] = np.arange(len(points))
+            poly.lines = cells
+            plotter.add_mesh(poly, color=kcolor, line_width=klw,
+                             label="кик (kick)" if drawn == 0 else None)
+            drawn += 1
+        print(f"  Киковая модель наложена: {drawn} частиц ({kcolor}); диффур — цветной по частицам")
+
     # 7. Оси, легенда, камера --------------------------------------------------
     plotter.show_bounds(
         grid="back", location="outer", all_edges=False,
