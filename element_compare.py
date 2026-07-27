@@ -691,8 +691,8 @@ def _fit_gs_combo(main, geom, diff_su, L, theta0):
         except mt.ParticleLost:
             return 1e3
 
-    res = minimize(obj, x0, method="Nelder-Mead", initial_simplex=simplex,
-                   options=dict(xatol=1e-6, fatol=1e-16, maxiter=4000, maxfev=4000))
+    res = minimize(obj, x0, method="Nelder-Mead",
+                   options=dict(initial_simplex=simplex, xatol=1e-6, fatol=1e-16, maxiter=4000, maxfev=4000))
     return {"B": B, "G": float(res.x[0]), "S": float(res.x[1])}, float(res.fun)
 
 
