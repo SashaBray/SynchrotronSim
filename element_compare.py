@@ -495,7 +495,8 @@ def plot_element(dev, kind, recs, probes, outdir):
         axy.set_title(f"y-плоскость{ttl2}")
         fig.suptitle(f"{dev} ({kind})  L_eff={Lc:.4f}м  RMS={r['rms_mm']:.4f}мм", fontsize=11)
         fig.tight_layout(rect=[0, 0, 1, 0.96])
-        png = os.path.join(outdir, f"traj_{dev}_{cur:+.0f}.png".replace("+", "p").replace("-", "m").replace(".", "_"))
+        tok = f"{cur:+.1f}".replace("+", "p").replace("-", "m").replace(".", "_")   # только токен тока (не .png!)
+        png = os.path.join(outdir, f"traj_{dev}_{tok}.png")
         fig.savefig(png, dpi=110); plt.close(fig); figs.append((cur, png))
     return figs
 
@@ -561,10 +562,11 @@ def build_report(elements, path):
             c = t.add_row().cells; c[0].text = "PM" if pm else f"{r['cur']:+.2f}"
             for j, k in enumerate(keys): c[j + 1].text = f"{r['coeffs'][k]:+.4e}"
             c[len(keys) + 1].text = f"{r['rms_mm']:.4f}"
-        if el.get("xy"):
+        if el.get("xy") and os.path.exists(el["xy"]):
             doc.add_paragraph("Сечение пучка в плоскости xy (до / за элементом):").runs[0].font.size = Pt(10)
             doc.add_picture(el["xy"], width=Inches(5.6))
         for cur, png in el["figs"]:
+            if not os.path.exists(png): continue          # защита: не ронять отчёт из-за одной картинки
             cap = "Траектории (PM):" if pm else f"Траектории при токе {cur:+.2f} А:"
             doc.add_paragraph(cap).runs[0].font.size = Pt(10)
             doc.add_picture(png, width=Inches(6.3))
