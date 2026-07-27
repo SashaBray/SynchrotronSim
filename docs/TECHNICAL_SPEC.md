@@ -67,7 +67,9 @@
 
 6. **Сверка моделей.** Прогон обоими ядрами одного эксперимента (`track3.py`), поэлементное
    сравнение с elegant (`elegant_run/`), стенд сравнения ядер на опытных конфигах
-   (`element_bench.py`, `kickdoc_compare.py`, `elegant_model.py`).
+   (`element_bench.py`, `kickdoc_compare.py`, `elegant_model.py`). Поэлементное сравнение диффур↔кик —
+   `element_compare.py` (свип токов, фит физкоэф+общий L_eff, Word-отчёт, комбо-датасеты DQ, 3D-наложение
+   обеих моделей для `visualize.py`; изгибающие — в проекции Френе). См. `docs/MANUAL.md` §10.
 
 7. **Глобальная настройка.** Оптимизация всех ручек сразу — на диффурном ядре
    (`build/SynchrotronOptimizer.exe`, драйвер `optimize.py`) и на матричном (`matrix_optimizer.py`);

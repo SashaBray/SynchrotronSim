@@ -98,8 +98,9 @@ grid (Ansys output, converted to `.bin`), to which a geometric transform
 | `continuation_tuner.py` | **multi-superperiod driver** (track ring → find loss point → polish window → repeat); see [Continuation tuner](#continuation-tuner-multi-superperiod-periodicity) |
 | `manual_kick.py` | one-shot random kick of all tunable currents/coeffs (±amp%), with ОДЗ clamps |
 | `apply_optim_history.py` | history.json → CSV (state rollback / checkpoint restore) |
-| `visualize.py` | static 3D viewer (PyVista) |
+| `visualize.py` | static 3D viewer (PyVista); overlays kick model if `trajectories_expN_kick.bin` present |
 | `live_visualizer.py` | live-reload viewer (auto-tracker on DB change) |
+| `element_compare.py` | compare **diffur** (Boris/maps) vs **kick** (`matrix_tracker`, `SS_SECTOR`) per element → Word report + datasets + 3D viz configs; commands `all` / `combo` / `viz` / `viz-all` |
 | `viz_optim_history.py` | matplotlib plots of loss / parameter trajectory |
 | `analyze_trajectory_stability.py` | envelope analysis + FFT betatron tunes |
 | `find_orbit_deviation_peaks.py` | locate magnets near orbit deviation maxima |
@@ -164,7 +165,8 @@ SynchrotronSim/
 ├── design_orbit.py                     # in-memory orbit assembly + magnet endpoints
 ├── prepare_optim_config.py             # JSON → flat .optimconfig + design_orbit/endpoints CSV
 ├── assemble_lattice_configs.py         # build lattice_configs.csv from layout + sp_elements
-├── visualize.py                        # PyVista 3D viewer (lattice + trajectories + design orbit)
+├── visualize.py                        # PyVista 3D viewer (lattice + trajectories + design orbit + kick overlay)
+├── element_compare.py                  # diffur vs kick per element (report/datasets/3D viz configs)
 ├── analyze_trajectory_stability.py     # FFT + envelope + amplitude growth diagnostics
 ├── viz_optim_history.py                # convergence curves from history.json
 ├── viz_mc_evolution.py                 # per-parameter evolution heatmap
