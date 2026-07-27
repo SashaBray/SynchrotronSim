@@ -133,7 +133,13 @@ def cleanup():
 os.environ.setdefault("SS_SECTOR", "1")                # секторный/кик режим матрицы
 EFF, PHYS, COUP, TRANS = mt.load_db()
 HW = {r["device_type_id"]: r for r in mt._read("hardware_library.csv")}
+LCROW = {r["device_type_id"]: r for r in mt._read("lattice_configs.csv") if r.get("lattice_id") == "1"}
 DELTA = (bm.GAMMA * 9.109e-31 * V_BEAM - bm.P_MOM) / bm.P_MOM   # δ пучка (усечённая масса, как диффур)
+
+
+def is_pm(dev):
+    """Постоянный магнит (не токовый): nominal_arg='-' ⇒ диффур ставит currentScale=1.0 (поле как снято)."""
+    return (HW.get(dev, {}).get("nominal_arg") or "").strip() == "-"
 KIND_COEFF = {"quad": ["G"], "sext": ["S"], "oct": ["O"], "dipole": ["B", "G"], "dq": ["B", "G"]}
 SGRID = np.linspace(0.0, ENTRY + EXIT, 240)            # общая сетка пути s для сравнения
 
@@ -327,13 +333,16 @@ def fit_shared(dev, kind, probes, runs):
     1D-оптимизация L_eff по СУММАРНОЙ невязке всех токов; внутри — доминантный коэф. при фикс. L_eff. runs —
     список dict(cur, diff_su, geom, theta0). Заполняет r['coeffs','Leff','rms_mm']; возврат Lshared."""
     L0 = float(HW[dev].get("eff_length") or 0.3)
-    strong = [r for r in runs if abs(r["cur"]) >= 30] or runs   # сильные токи констрейнят L_eff надёжнее
+    if is_pm(dev):                                      # PM/чистый изгиб: L_eff ВЫРОЖДЕН (важно только G·L_eff,
+        Lshared = L0                                    # частицы едут параллельно) — не фитим, берём .lte
+    else:
+        strong = [r for r in runs if abs(r["cur"]) >= 30] or runs   # сильные токи констрейнят L_eff надёжнее
 
-    def total(L):                                       # суммарная невязка по сильным токам при общем L_eff
-        return sum(_coeff_at_L(dev, kind, r["geom"], probes, r["diff_su"], L, r["theta0"])[1] for r in strong)
+        def total(L):                                   # суммарная невязка по сильным токам при общем L_eff
+            return sum(_coeff_at_L(dev, kind, r["geom"], probes, r["diff_su"], L, r["theta0"])[1] for r in strong)
 
-    res = minimize_scalar(total, bounds=(0.6 * L0, 1.4 * L0), method="bounded", options=dict(xatol=L0 * 1e-4))
-    Lshared = float(res.x)
+        res = minimize_scalar(total, bounds=(0.6 * L0, 1.4 * L0), method="bounded", options=dict(xatol=L0 * 1e-4))
+        Lshared = float(res.x)
     for r in runs:                                      # физкоэф каждого тока при ОБЩЕМ L_eff
         coeffs, mse = _coeff_at_L(dev, kind, r["geom"], probes, r["diff_su"], Lshared, r["theta0"])
         r["coeffs"] = coeffs; r["Leff"] = Lshared; r["rms_mm"] = math.sqrt(mse) * 1e3
@@ -361,16 +370,38 @@ def tune_bend_yaw(dev, cur, iters=6, tol=1e-6):
 
 
 # ============================ СВИП ТОКОВ + ДАТАСЕТ ==========================================
-CUR_RANGE = list(range(-50, 51, 10))                   # −50..+50 шаг 10 (11 значений)
+CUR_RANGE = list(range(-50, 51, 10))                   # −50..+50 шаг 10 (прямые токовые)
+
+
+def dq_operating_current(dev):
+    """Рабочий ток DQ: где изгиб КАРТЫ = проектному (θ0=QP·mat_B·L). Наклон изгиб/ток — из одного пробного
+    прогона. У DQ карта согласована с mat_B (в отличие от PM-диполей), рабочая точка ~несколько А."""
+    r = LCROW[dev]; B = float(r.get("mat_B") or 0); L = float(r.get("eff_length") or 1.0)
+    th_design = mt.QP * B * L
+    Itest = 5.0; yaw = tune_bend_yaw(dev, Itest); cleanup()
+    slope = (2.0 * yaw) / Itest                          # изгиб на ампер (рад/А)
+    return abs(th_design / slope) if abs(slope) > 1e-12 else Itest
+
+
+def element_currents(dev, kind):
+    """Токи свипа по типу. PM-диполь → одна конфигурация (поле фиксировано). DQ → вокруг РАБОЧЕГО тока
+    (±50А = перегруз ×17, пучок раздувается). Прямой токовый → ±50А."""
+    if is_pm(dev):
+        return [0.0]                                     # одна конфигурация (arg_val игнор — элемент неактивен)
+    if kind == "dq":
+        Iop = dq_operating_current(dev)                  # ~несколько ампер
+        return [round(f * Iop, 3) for f in (0.4, 0.6, 0.8, 1.0, 1.2, 1.4)]
+    return [float(c) for c in CUR_RANGE]
 
 
 def sweep_currents(dev, kind, probes):
     """Свип токов: диффур на каждый ток (сбор датасета), затем ОДИН общий L_eff + физкоэф на каждый ток
     (fit_shared — L_eff геом.константа, одна на все токи). Изгибающие — с подбором yaw (симметрия) и
-    сравнением по ОТКЛОНЕНИЮ от опорной. Возврат записей (Leff у всех = общий)."""
+    сравнением по ОТКЛОНЕНИЮ от опорной. Токи — element_currents (PM=1 конфиг, DQ=вокруг рабочей точки).
+    Возврат записей (Leff у всех = общий)."""
     bending = kind in ("dipole", "dq")
     runs = []
-    for cur in CUR_RANGE:
+    for cur in element_currents(dev, kind):
         yaw = tune_bend_yaw(dev, cur) if bending else 0.0     # изгиб: симметричный поворот
         try:
             trajs, geom = run_diffur(dev, cur, yaw)
@@ -385,7 +416,7 @@ def sweep_currents(dev, kind, probes):
     for r in runs:
         r["Leff_common"] = Lshared
         cs = " ".join(f"{k}={v:+.3e}" for k, v in r["coeffs"].items())
-        print(f"  ток {r['cur']:+3d}А: {cs}  L_eff(общий)={Lshared:.4f}  RMS={r['rms_mm']:.4f}мм")
+        print(f"  ток {r['cur']:+7.2f}А: {cs}  L_eff(общий)={Lshared:.4f}  RMS={r['rms_mm']:.4f}мм")
     return runs
 
 
@@ -410,57 +441,78 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 OUTDIR = os.path.join(RESULTS, "element_compare")
-SHOW_CUR = [-50, 0, 50]                                # показательные токи для графиков
+
+
+def _show_currents(recs):
+    """3 показательных тока: край−середина−край (для изгиба/PM токи не [−50,0,50])."""
+    curs = sorted({r["cur"] for r in recs})
+    return curs if len(curs) <= 3 else [curs[0], curs[len(curs) // 2], curs[-1]]
+
+
+def _mat_for_plot(dev, coeffs, L, kind, geom, probes):
+    """Матрица по пробам для графика: (s,u,v) на пробу, для ИЗГИБА — отклонение от МАТРИЧНОЙ опорной (probe 0).
+    None для потерянных частиц (частица за пределом параксиальности). Возврат список len(probes)."""
+    bending = kind in ("dipole", "dq")
+    ref_uv = None
+    if bending:
+        try:
+            ref_uv = _resample(track_matrix(dev, coeffs, L, kind, geom, probes[0]))   # опорная обязана выжить
+        except mt.ParticleLost:
+            return [None] * len(probes)
+    out = []
+    for p in probes:
+        try:
+            m = track_matrix(dev, coeffs, L, kind, geom, p)
+        except mt.ParticleLost:
+            out.append(None); continue
+        if bending:
+            um, vm = _resample(m); out.append(np.column_stack([SGRID, um - ref_uv[0], vm - ref_uv[1]]))
+        else:
+            out.append(m)
+    return out
 
 
 def plot_element(dev, kind, recs, probes, outdir):
     """Графики траекторий x/y (диффур сплошная синяя vs матрица пунктир красная, 13 частиц) при показательных
-    токах. Матрица — с фитированными физкоэф и ОБЩИМ L_eff. Возврат [(cur, png_path)]."""
+    токах. Матрица — с фитированными физкоэф и ОБЩИМ L_eff. Изгиб: отклонение от опорной. Возврат [(cur, png)]."""
     Lc = recs[0].get("Leff_common", recs[0]["Leff"]); figs = []
-    for cur in SHOW_CUR:
+    for cur in _show_currents(recs):
         r = next((x for x in recs if x["cur"] == cur), None)
         if r is None: continue
         fig, (axx, axy) = plt.subplots(1, 2, figsize=(11, 4.2))
-        for d, p in zip(r["diff_su"], probes):
-            try:
-                mat = track_matrix(dev, r["coeffs"], Lc, kind, r["geom"], p)   # общий L_eff может перефокус.
-            except mt.ParticleLost:
-                try:
-                    mat = track_matrix(dev, r["coeffs"], r["Leff"], kind, r["geom"], p)   # fallback: свой L_eff
-                except mt.ParticleLost:
-                    axx.plot(d[:, 0], d[:, 1] * 1e3, color="#2b7bba", lw=1.1)   # только диффур (матрица разошлась)
-                    axy.plot(d[:, 0], d[:, 2] * 1e3, color="#2b7bba", lw=1.1)
-                    continue
-            axx.plot(d[:, 0], d[:, 1] * 1e3, color="#2b7bba", lw=1.1)
-            axx.plot(mat[:, 0], mat[:, 1] * 1e3, color="#d1495b", lw=1.0, ls="--")
+        mats = _mat_for_plot(dev, r["coeffs"], Lc, kind, r["geom"], probes)
+        for d, mat in zip(r["diff_su"], mats):
+            axx.plot(d[:, 0], d[:, 1] * 1e3, color="#2b7bba", lw=1.1)   # диффур всегда
             axy.plot(d[:, 0], d[:, 2] * 1e3, color="#2b7bba", lw=1.1)
+            if mat is None: continue                                    # матрица разошлась — только диффур
+            axx.plot(mat[:, 0], mat[:, 1] * 1e3, color="#d1495b", lw=1.0, ls="--")
             axy.plot(mat[:, 0], mat[:, 2] * 1e3, color="#d1495b", lw=1.0, ls="--")
-        for ax, ttl in ((axx, "x (гориз.)"), (axy, "y (верт.)")):
-            ax.set_xlabel("s, м"); ax.set_ylabel(f"{ttl}, мм"); ax.grid(alpha=0.3)
-        axx.set_title(f"{ttl and ''}x-плоскость — ток {cur:+d}А (— диффур, -- матрица)")
-        axy.set_title(f"y-плоскость — ток {cur:+d}А")
+        ttl2 = " (откл. от опорной)" if kind in ("dipole", "dq") else ""
+        for ax in (axx, axy):
+            ax.set_xlabel("s, м"); ax.grid(alpha=0.3)
+        axx.set_ylabel("x (гориз.), мм"); axy.set_ylabel("y (верт.), мм")
+        axx.set_title(f"x-плоскость — ток {cur:+.2f}А (— диффур, -- матрица)")
+        axy.set_title(f"y-плоскость{ttl2}")
         fig.suptitle(f"{dev} ({kind})  L_eff={Lc:.4f}м  RMS={r['rms_mm']:.4f}мм", fontsize=11)
         fig.tight_layout(rect=[0, 0, 1, 0.96])
-        png = os.path.join(outdir, f"traj_{dev}_{cur:+d}.png".replace("+", "p").replace("-", "m"))
+        png = os.path.join(outdir, f"traj_{dev}_{cur:+.0f}.png".replace("+", "p").replace("-", "m").replace(".", "_"))
         fig.savefig(png, dpi=110); plt.close(fig); figs.append((cur, png))
     return figs
 
 
 def plot_xy(dev, kind, recs, probes, outdir):
-    """Проекция пучка в плоскости xy ДО элемента (стартовый круг Ø2мм) и ЗА элементом (диффур vs матрица)
-    при показательном токе +50А. Показывает, как элемент преобразует сечение пучка."""
-    r = next((x for x in recs if x["cur"] == 50), recs[-1]); Lc = recs[0].get("Leff_common", r["Leff"])
+    """Проекция пучка в плоскости xy ДО элемента (стартовый круг Ø2мм) и ЗА элементом (диффур ○ vs матрица ✕)
+    при максимальном по модулю токе. Показывает, как элемент преобразует сечение пучка."""
+    r = max(recs, key=lambda x: abs(x["cur"])); Lc = recs[0].get("Leff_common", r["Leff"])
     fig, (a0, a1) = plt.subplots(1, 2, figsize=(9.5, 4.6))
     a0.scatter([p[0] * 1e3 for p in probes], [p[1] * 1e3 for p in probes], c="#2b7bba", s=32)
     a0.set_title("до элемента (старт)")
-    for d, p in zip(r["diff_su"], probes):
+    mats = _mat_for_plot(dev, r["coeffs"], Lc, kind, r["geom"], probes)
+    for d, m in zip(r["diff_su"], mats):
         a1.scatter(d[-1, 1] * 1e3, d[-1, 2] * 1e3, c="#2b7bba", s=34, marker="o")
-        try:
-            m = track_matrix(dev, r["coeffs"], Lc, kind, r["geom"], p)
+        if m is not None:
             a1.scatter(m[-1, 1] * 1e3, m[-1, 2] * 1e3, c="#d1495b", s=44, marker="x")
-        except mt.ParticleLost:
-            pass
-    a1.set_title(f"за элементом, +50 А  (o диффур, x матрица)")
+    a1.set_title(f"за элементом, {r['cur']:+.2f} А  (o диффур, x матрица)")
     for a in (a0, a1):
         a.set_xlabel("x (гориз.), мм"); a.set_ylabel("y (верт.), мм"); a.grid(alpha=0.3); a.set_aspect("equal", "datalim")
     fig.suptitle(f"{dev} ({kind}) — сечение пучка в плоскости xy", fontsize=11)
@@ -490,7 +542,9 @@ def build_report(elements, path):
     doc.add_heading("SynchrotronSim — сопоставление матричной и диффурной моделей по элементам", level=0)
     doc.add_paragraph("Диффур (C++ SynchrotronTracker, Boris по картам поля) — эталон. Матрица (Python "
                       "matrix_tracker) подогнана последовательными приближениями: физкоэф на каждый ток + один "
-                      "L_eff на элемент. Пучок 13 частиц (12 по кругу Ø2мм + центр). Токи −50..+50 А шаг 10.")
+                      "L_eff на элемент. Пучок 13 частиц (12 по кругу Ø2мм + центр). Прямые токовые — свип "
+                      "−50..+50 А; изгибающие DQ — вокруг рабочего тока; PM-диполи — одна конфигурация (поле "
+                      "фиксировано). Изгибающие сравниваются в проекции Френе (отклонение от опорной дуги).")
     for el in elements:
         if el is None: continue
         keys = KIND_COEFF[el["kind"]]
@@ -502,15 +556,17 @@ def build_report(elements, path):
         hdr = t.rows[0].cells; hdr[0].text = "ток, А"
         for j, k in enumerate(keys): hdr[j + 1].text = k
         hdr[len(keys) + 1].text = "RMS, мм"
+        pm = is_pm(el["dev"])
         for r in el["recs"]:
-            c = t.add_row().cells; c[0].text = f"{r['cur']:+d}"
+            c = t.add_row().cells; c[0].text = "PM" if pm else f"{r['cur']:+.2f}"
             for j, k in enumerate(keys): c[j + 1].text = f"{r['coeffs'][k]:+.4e}"
             c[len(keys) + 1].text = f"{r['rms_mm']:.4f}"
         if el.get("xy"):
             doc.add_paragraph("Сечение пучка в плоскости xy (до / за элементом):").runs[0].font.size = Pt(10)
             doc.add_picture(el["xy"], width=Inches(5.6))
         for cur, png in el["figs"]:
-            doc.add_paragraph(f"Траектории при токе {cur:+d} А:").runs[0].font.size = Pt(10)
+            cap = "Траектории (PM):" if pm else f"Траектории при токе {cur:+.2f} А:"
+            doc.add_paragraph(cap).runs[0].font.size = Pt(10)
             doc.add_picture(png, width=Inches(6.3))
     doc.save(path)
     return path
@@ -535,13 +591,31 @@ def candidates(kinds=None):
     return [(d, k) for d, k in out if (kinds is None or k in kinds)]
 
 
+def candidates_bending(kinds=None):
+    """Изгибающие для сравнения: PM-диполи (nominal_arg='-') + ГЛАВНЫЕ обмотки DQ (I1 — несут mat_B/mat_G).
+    I2/I3 (вспомог., mat_*=0) и комбо — отдельным этапом (нет проектных mat_* для сравнения)."""
+    out = []
+    for d, r in sorted(LCROW.items()):
+        k = r.get("kind") or ""
+        has_map = (HW.get(d, {}).get("map_bin_path") or "").strip()
+        if not has_map: continue
+        if k == "dipole" and is_pm(d):
+            out.append((d, "dipole"))
+        elif k == "dq" and "_I1_" in d:
+            out.append((d, "dq"))
+    return [(d, k) for d, k in out if (kinds is None or k in kinds)]
+
+
 PROBES = [(0.0, 0.0)] + [(1e-3 * math.cos(2 * math.pi * k / 12), 1e-3 * math.sin(2 * math.pi * k / 12)) for k in range(12)]
 
 
 def run_all(kinds=("quad", "sext", "oct")):
-    """Полный цикл: обработать все кандидаты (по kinds) → общий Word-отчёт + датасеты."""
+    """Полный цикл: обработать все кандидаты (по kinds) → общий Word-отчёт + датасеты. Прямые токовые —
+    candidates; изгибающие (dipole/dq) — candidates_bending (PM-диполи + главные обмотки DQ)."""
     os.makedirs(OUTDIR, exist_ok=True)
-    devs = candidates(kinds)
+    straight = [k for k in kinds if k in ("quad", "sext", "oct")]
+    bend = [k for k in kinds if k in ("dipole", "dq")]
+    devs = candidates(straight) + (candidates_bending(bend) if bend else [])
     print(f"кандидатов ({','.join(kinds)}): {len(devs)}")
     bak = os.path.join(TB, "_cmp_backup"); os.makedirs(bak, exist_ok=True)
     for f in CSV4: shutil.copy2(os.path.join(TB, f), os.path.join(bak, f))
