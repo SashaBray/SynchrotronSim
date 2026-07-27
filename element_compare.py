@@ -224,14 +224,31 @@ def _estimate_init(dev, diff_su, kind, geom, probes, L0, theta0=0.0):
     return {key: kL / (QP * L0)} if (key and QP) else {}
 
 
+# физический диапазон КОАРС-СКАНА доминантного коэф. по типу (робастный старт вместо аналит. оценки)
+SCAN_RANGE = {"quad": ("G", 3.0), "sext": ("S", 400.0), "oct": ("O", 2e4),
+              "dipole": ("B", 5e-3), "dq": ("G", 5.0)}
+
+
 def fit_element(dev, cur, diff_su, geom, kind, probes, theta0=0.0):
     """Последовательное приближение: подобрать физкоэф (по kind) + L_eff, минимизируя MSE траекторий.
-    L_eff — ОДИН на элемент; физкоэф — на этот ток. theta0 — изгиб опорной (для B у изгибающих). Возврат
-    (coeffs, Leff, mse)."""
+    L_eff — ОДИН на элемент; физкоэф — на этот ток. theta0 — изгиб опорной (для B у изгибающих).
+    Старт доминантного коэф. — КОАРС-СКАН по физ.диапазону (робастно, симметрично; аналит.оценка из наклона
+    ненадёжна). Возврат (coeffs, Leff, mse)."""
     keys = KIND_COEFF[kind]
     L0 = float(HW[dev].get("eff_length") or 0.3)       # старт L_eff — .lte/матричная длина (НЕ диффурная)
-    est = _estimate_init(dev, diff_su, kind, geom, probes, L0, theta0)
-    x0 = [est.get(k, 1e-3) for k in keys] + [L0]
+    base = {"B": theta0 / (mt.QP * L0)} if (kind in ("dipole", "dq") and mt.QP) else {}   # B изгиба фиксирован из угла
+    key, span = SCAN_RANGE[kind]
+    best_v, best_e = 0.0, 1e18                          # коарс-скан доминантного коэф. (61 точка ±span)
+    for val in np.linspace(-span, span, 61):
+        cf = dict(base); cf[key] = float(val)
+        try:
+            mat = [track_matrix(dev, cf, L0, kind, geom, p) for p in probes]; e = traj_mse(diff_su, mat)
+        except mt.ParticleLost:
+            continue
+        if e < best_e:
+            best_e, best_v = e, float(val)
+    init = dict(base); init[key] = best_v
+    x0 = [init.get(k, 0.0) for k in keys] + [L0]
 
     def unpack(x):
         return {k: x[i] for i, k in enumerate(keys)}, x[-1]
@@ -247,7 +264,7 @@ def fit_element(dev, cur, diff_su, geom, kind, probes, theta0=0.0):
         return traj_mse(diff_su, mat)                   # полный путь: дальний дрейф констрейнит выходной угол
 
     res = minimize(obj, x0, method="Nelder-Mead",
-                   options=dict(xatol=1e-7, fatol=1e-18, maxiter=6000))
+                   options=dict(xatol=1e-8, fatol=1e-20, maxiter=12000, maxfev=12000))
     coeffs, Leff = unpack(res.x)
     try:                                                # ПОЛНАЯ невязка (весь путь) с фитированными коэф. — для отчёта
         mat = [track_matrix(dev, coeffs, Leff, kind, geom, p) for p in probes]
@@ -363,6 +380,29 @@ def plot_element(dev, kind, recs, probes, outdir):
     return figs
 
 
+def plot_xy(dev, kind, recs, probes, outdir):
+    """Проекция пучка в плоскости xy ДО элемента (стартовый круг Ø2мм) и ЗА элементом (диффур vs матрица)
+    при показательном токе +50А. Показывает, как элемент преобразует сечение пучка."""
+    r = next((x for x in recs if x["cur"] == 50), recs[-1]); Lc = recs[0].get("Leff_common", r["Leff"])
+    fig, (a0, a1) = plt.subplots(1, 2, figsize=(9.5, 4.6))
+    a0.scatter([p[0] * 1e3 for p in probes], [p[1] * 1e3 for p in probes], c="#2b7bba", s=32)
+    a0.set_title("до элемента (старт)")
+    for d, p in zip(r["diff_su"], probes):
+        a1.scatter(d[-1, 1] * 1e3, d[-1, 2] * 1e3, c="#2b7bba", s=34, marker="o")
+        try:
+            m = track_matrix(dev, r["coeffs"], Lc, kind, r["geom"], p)
+            a1.scatter(m[-1, 1] * 1e3, m[-1, 2] * 1e3, c="#d1495b", s=44, marker="x")
+        except mt.ParticleLost:
+            pass
+    a1.set_title(f"за элементом, +50 А  (o диффур, x матрица)")
+    for a in (a0, a1):
+        a.set_xlabel("x (гориз.), мм"); a.set_ylabel("y (верт.), мм"); a.grid(alpha=0.3); a.set_aspect("equal", "datalim")
+    fig.suptitle(f"{dev} ({kind}) — сечение пучка в плоскости xy", fontsize=11)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    png = os.path.join(outdir, f"xy_{dev}.png"); fig.savefig(png, dpi=110); plt.close(fig)
+    return png
+
+
 def process_element(dev, kind, probes, outdir, bend_yaw=0.0):
     """Полный опыт по одному элементу: свип+фит → датасет + графики. Возврат dict для отчёта."""
     print(f"\n=== элемент {dev} ({kind}) ===")
@@ -371,7 +411,8 @@ def process_element(dev, kind, probes, outdir, bend_yaw=0.0):
         return None
     ds = save_dataset(dev, kind, recs, outdir)
     figs = plot_element(dev, kind, recs, probes, outdir)
-    return dict(dev=dev, kind=kind, recs=recs, figs=figs, dataset=ds,
+    xy = plot_xy(dev, kind, recs, probes, outdir)
+    return dict(dev=dev, kind=kind, recs=recs, figs=figs, xy=xy, dataset=ds,
                 Leff_common=recs[0].get("Leff_common"))
 
 
@@ -398,6 +439,9 @@ def build_report(elements, path):
             c = t.add_row().cells; c[0].text = f"{r['cur']:+d}"
             for j, k in enumerate(keys): c[j + 1].text = f"{r['coeffs'][k]:+.4e}"
             c[len(keys) + 1].text = f"{r['Leff']:.4f}"; c[len(keys) + 2].text = f"{r['rms_mm']:.4f}"
+        if el.get("xy"):
+            doc.add_paragraph("Сечение пучка в плоскости xy (до / за элементом):").runs[0].font.size = Pt(10)
+            doc.add_picture(el["xy"], width=Inches(5.6))
         for cur, png in el["figs"]:
             doc.add_paragraph(f"Траектории при токе {cur:+d} А:").runs[0].font.size = Pt(10)
             doc.add_picture(png, width=Inches(6.3))
