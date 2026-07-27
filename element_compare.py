@@ -295,7 +295,10 @@ def plot_element(dev, kind, recs, probes, outdir):
         if r is None: continue
         fig, (axx, axy) = plt.subplots(1, 2, figsize=(11, 4.2))
         for d, p in zip(r["diff_su"], probes):
-            mat = track_matrix(dev, r["coeffs"], Lc, kind, r["geom"], p)
+            try:
+                mat = track_matrix(dev, r["coeffs"], Lc, kind, r["geom"], p)   # общий L_eff может перефокус.
+            except mt.ParticleLost:
+                mat = track_matrix(dev, r["coeffs"], r["Leff"], kind, r["geom"], p)   # fallback: свой L_eff тока
             axx.plot(d[:, 0], d[:, 1] * 1e3, color="#2b7bba", lw=1.1)
             axx.plot(mat[:, 0], mat[:, 1] * 1e3, color="#d1495b", lw=1.0, ls="--")
             axy.plot(d[:, 0], d[:, 2] * 1e3, color="#2b7bba", lw=1.1)
@@ -353,7 +356,58 @@ def build_report(elements, path):
     return path
 
 
+# ============================ ПЕРЕЧИСЛЕНИЕ + ПОЛНЫЙ ЦИКЛ ====================================
+def candidates(kinds=None):
+    """Устройства с картой поля И mat_* И ТОКОВЫЕ (nominal_arg — число) → [(dev, kind)]. Фильтр по kinds.
+    nominal_arg='-' ⇒ постоянный/PM (Сибирь s2_, диполи DP) — свип тока бессмыслен, исключаем."""
+    def current_driven(d):
+        na = (HW[d].get("nominal_arg") or "").strip()
+        try: return float(na) > 0
+        except ValueError: return False
+    maps = {d for d, r in HW.items() if (r.get("map_bin_path") or "").strip() and current_driven(d)}
+    kd = {}
+    for r in mt._read("lattice_configs.csv"):
+        d = r["device_type_id"]
+        if d in maps and d not in kd and any((r.get(k) or "").strip() not in ("", "0")
+                                             for k in ("mat_B", "mat_G", "mat_S", "mat_O")):
+            kd[d] = r.get("kind") or ""
+    out = [(d, k) for d, k in sorted(kd.items()) if k]
+    return [(d, k) for d, k in out if (kinds is None or k in kinds)]
+
+
+PROBES = [(0.0, 0.0)] + [(1e-3 * math.cos(2 * math.pi * k / 12), 1e-3 * math.sin(2 * math.pi * k / 12)) for k in range(12)]
+
+
+def run_all(kinds=("quad", "sext", "oct")):
+    """Полный цикл: обработать все кандидаты (по kinds) → общий Word-отчёт + датасеты."""
+    os.makedirs(OUTDIR, exist_ok=True)
+    devs = candidates(kinds)
+    print(f"кандидатов ({','.join(kinds)}): {len(devs)}")
+    bak = os.path.join(TB, "_cmp_backup"); os.makedirs(bak, exist_ok=True)
+    for f in CSV4: shutil.copy2(os.path.join(TB, f), os.path.join(bak, f))
+    elements = []
+    try:
+        for dev, kind in devs:
+            try:
+                el = process_element(dev, kind, PROBES, OUTDIR)
+                if el: elements.append(el)
+            except Exception as e:
+                print(f"  ! {dev}: {type(e).__name__}: {e}"); cleanup()
+    finally:
+        cleanup()
+        for f in CSV4:                                # восстановить при сбое очистки
+            b = os.path.join(bak, f)
+            if os.path.exists(b) and os.path.getsize(os.path.join(TB, f)) == 0:
+                shutil.copy2(b, os.path.join(TB, f))
+    rep = build_report(elements, os.path.join(OUTDIR, "element_compare_report.docx"))
+    print(f"\nГОТОВО: {len(elements)} элементов → {rep}")
+    return elements
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "all":
+        kinds = tuple(sys.argv[2].split(",")) if len(sys.argv) > 2 else ("quad", "sext", "oct")
+        run_all(kinds); sys.exit(0)
     dev = sys.argv[1] if len(sys.argv) > 1 else "QP_L_1A_L295"
     cur = float(sys.argv[2]) if len(sys.argv) > 2 else 50.0
     kind = {r["device_type_id"]: r.get("kind") for r in mt._read("lattice_configs.csv") if r.get("kind")}.get(dev, "quad")
