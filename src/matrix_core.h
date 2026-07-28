@@ -3,8 +3,10 @@
 // Дословный порт локальной физики Python-ядра matrix_tracker.py (симплектический секторный интегратор —
 // порт elegant CSBEND integrate_csbend_ordn — + мультипольный кик KQUAD/KSEXT/KOCT + распределённое
 // синхротронное излучение). Канонические координаты (x, px, y, py, t, delta): px,py нормированы на p0,
-// delta=Δp/p0. Все выражения и порядок операций сохранены как в Python, чтобы результат совпадал с
-// эталоном (matrix_tracker.py) — см. регрессию test_matrix_core_cpp.py.
+// delta=Δp/p0. Порядок операций сохранён как в Python, чтобы результат совпадал с эталоном
+// (matrix_tracker.py) — см. регрессию test_matrix_core_cpp.py. ИСКЛЮЧЕНИЕ (оптимизация скорости):
+// секторный дрейф использует ТОЖДЕСТВО сложения углов (asin/sin/cos → sqrt + прекэш sinA/cosA) — физически
+// эквивалентно, но не побитово (расхождение ~1e-14/элемент, ~3e-12/оборот кольца; тесты проходят).
 //
 // Python-ядро остаётся эталоном для разработки/опытов; нововведения переносятся сюда и валидируются.
 #pragma once
@@ -89,6 +91,7 @@ struct Element {
     double rad_coef = 0;                                  // распределённое СИ (классическое); ISR пока не портирован
     double rho0 = 0, h = 0, b1 = 0, b2 = 0, b3 = 0;       // ПРЕКЭШ сектора: ρ, 1/ρ, bₙ=kₙ·ρ (не пересчитывать в цикле)
     double s_slice = 0;                                   // длина среза Leff/nsl (сектор/кик)
+    double sinA[4] = {0,0,0,0}, cosA[4] = {0,0,0,0};      // ПРЕКЭШ sin/cos угла стадии dsh/ρ (замена asin/sin/cos в дрейфе)
     Yoshida4 ys;
 
     // Сборка из физкоэф. mat_* (B,G,Gv,S,O — суммы обмоток) + Leff + проектной энергии — как Magnet.__init__.
@@ -112,6 +115,10 @@ struct Element {
         if (e.sector) {                                             // ПРЕКЭШ геометрии/полей сектора
             e.rho0 = -Leff / e.theta0; e.h = 1.0 / e.rho0;          // ρ>0 (конвенция elegant)
             e.b1 = e.k1 * e.rho0; e.b2 = e.k2 * e.rho0; e.b3 = e.k3 * e.rho0;
+            for (int j = 0; j < 4; ++j) {                           // sin/cos угла стадии a=dsh/ρ=s·d[j]/ρ (постоянно)
+                double a = e.s_slice * e.ys.d[j] / e.rho0;
+                e.sinA[j] = std::sin(a); e.cosA[j] = std::cos(a);
+            }
         }
         if (e.sector && sr) {                                        // распределённое СИ (классическое)
             double gamma = design_mev / MC2_MEV;
@@ -138,16 +145,16 @@ private:
         double dist = 0.0;
         for (int i = 0; i < N; ++i) {
             for (int j = 0; j < 4; ++j) {
-                double dsh = s * ys.d[j];          // -- точный секторный ДРЕЙФ (движение по кругу) --
+                // -- точный секторный ДРЕЙФ (по кругу); asin/sin/cos → sqrt + сложение углов (прекэш sinA/cosA[j])
                 double f = (1.0 + DP) * (1.0 + DP) - QY * QY;
                 if (f <= 0.0) throw ParticleLost("sector: p_perp>p (drift)");
                 f = std::sqrt(f);
-                if (std::fabs(QX / f) > 1.0) throw ParticleLost("sector: |QX/f|>1 (drift)");
-                double sin_phi = QX / f;
-                double phi = std::asin(sin_phi);
-                double sine = std::sin(dsh / rho0 + phi), cosi = std::cos(dsh / rho0 + phi);
+                double sin_phi = QX / f;                              // φ=asin(QX/f)∈[−π/2,π/2]
+                if (std::fabs(sin_phi) > 1.0) throw ParticleLost("sector: |QX/f|>1 (drift)");
+                double cos_phi = std::sqrt(1.0 - sin_phi * sin_phi);  // =cos(asin(QX/f))
+                double sine = sinA[j] * cos_phi + cosA[j] * sin_phi;  // sin(dsh/ρ+φ) — тождество сложения
+                double cosi = cosA[j] * cos_phi - sinA[j] * sin_phi;  // cos(dsh/ρ+φ)
                 if (cosi == 0.0) throw ParticleLost("sector: cos=0 (drift)");
-                double cos_phi = std::cos(phi);
                 QX = f * sine;
                 double factor = (rho0 + X) * cos_phi / f * (sine / cosi - sin_phi / cos_phi);
                 Y += QY * factor;
