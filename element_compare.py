@@ -701,26 +701,30 @@ def _fit_gs_combo(main, geom, diff_su, L, theta0):
 
 
 def save_combo_dataset(base, Leff, recs, outdir):
-    """CSV комбо: I1;I2;I3;B;G;S;RMS (запятая-десятичная для Excel, ; поле). L_eff общий в шапке."""
+    """CSV комбо: I1;I2;I3;B;G[;S];RMS (запятая-десятичная для Excel, ; поле). Столбец S — только если фит
+    его давал (sext=True). L_eff общий в шапке."""
     os.makedirs(outdir, exist_ok=True)
+    has_s = bool(recs) and "S" in recs[0]["coeffs"]
+    keys = ["B", "G", "S"] if has_s else ["B", "G"]
     path = os.path.join(outdir, f"combo_dataset_{base}.csv")
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";")
         w.writerow(["L_eff_общий_м", str(Leff).replace(".", ",")]); w.writerow([])
-        w.writerow(["I1_А", "I2_А", "I3_А", "B", "G", "S", "RMS_мм"])
+        w.writerow(["I1_А", "I2_А", "I3_А"] + keys + ["RMS_мм"])
         for r in recs:
-            c = r["coeffs"]
-            row = [r["i1"], r["i2"], r["i3"], c["B"], c["G"], c.get("S", 0.0), r["rms_mm"]]
+            row = [r["i1"], r["i2"], r["i3"]] + [r["coeffs"][k] for k in keys] + [r["rms_mm"]]
             w.writerow([str(x).replace(".", ",") for x in row])
-    print(f"  датасет: {path} ({len(recs)} комбо)")
+    print(f"  датасет: {path} ({len(recs)} комбо, {'B,G,S' if has_s else 'B,G'})")
     return path
 
 
-def run_dq_combo(base="L400", ngrid=4):
+def run_dq_combo(base="L400", ngrid=4, sext=False):
     """Комбо-датасет DQ: перебор ВСЕХ комбинаций токов обмоток I1/I2/I3. Шаг подобран под лимит ≤120 примеров:
     ngrid=4 ⇒ 4³=64 (5³=125 превысило бы). Диапазон [−Iмакс,+Iмакс] на обмотку, Iмакс = рабочий ток I1
     (dq_operating_current). L_eff — общий (из свипа I1). На комбо: yaw(симметрия) → диффур(суперпозиция
-    полей обмоток) → фит B(из угла)+G+S при фикс. L_eff. Датасет (I1,I2,I3)→(B,G,S,RMS)."""
+    полей обмоток) → фит B(из угла)+G [+S если sext] при фикс. L_eff. sext=False (по умолч.) — DQ как
+    чистый диполь+квадруполь (как elegant/.lte: CSBEND с K1, K2=0; секступоль — физ.феномен карт, не elegant,
+    см. dq_gk_diagnosis). Датасет (I1,I2,I3)→(B,G[,S],RMS)."""
     wdev = [f"DQ_I{k}_1A_{base}" for k in (1, 2, 3)]
     main = wdev[0]; N3 = ngrid ** 3
     Imax = dq_operating_current(main)
@@ -738,7 +742,10 @@ def run_dq_combo(base="L400", ngrid=4):
                 yaw = tune_bend_yaw_windings(wnd)
                 trajs, geom = run_diffur_windings(wnd, yaw)
                 diff_su = diff_local(trajs, geom["xstart"], bending=True)
-                coeffs, mse = _fit_gs_combo(main, geom, diff_su, Leff, 2.0 * yaw)
+                if sext:
+                    coeffs, mse = _fit_gs_combo(main, geom, diff_su, Leff, 2.0 * yaw)          # B+G+S
+                else:
+                    coeffs, mse = _coeff_at_L(main, "dq", geom, PROBES, diff_su, Leff, theta0=2.0 * yaw)  # B+G
                 recs.append(dict(i1=float(i1), i2=float(i2), i3=float(i3), coeffs=coeffs, rms_mm=math.sqrt(mse) * 1e3))
             except Exception as e:
                 print(f"  [{n}/{N3}] I=({i1:.2f},{i2:.2f},{i3:.2f}): {type(e).__name__}: {e}")
@@ -866,11 +873,15 @@ def setup_viz_all(start_id=VIZ_START):
 
 # ============================ МАТРИЦЫ СВЯЗИ ТОК→ФИЗКОЭФ + РАЗДЕЛ ОТЧЁТА =======================
 def _load_combo(base):
+    """Возврат (X:токи Nx3, Y:выходы NxK, syms:имена выходов). Выходы — по ЗАГОЛОВКУ (B,G или B,G,S)."""
     fv = lambda s: float(s.replace(",", "."))
     rows = list(csv.reader(open(os.path.join(OUTDIR, f"combo_dataset_{base}.csv"), encoding="utf-8-sig"), delimiter=";"))
-    d = [r for r in rows if len(r) >= 7 and r[0] and r[0][0] in "+-0123456789" and "," in r[0]]
-    return (np.array([[fv(r[0]), fv(r[1]), fv(r[2])] for r in d]),
-            np.array([[fv(r[3]), fv(r[4]), fv(r[5])] for r in d]))
+    hdr = next(r for r in rows if r and r[0] == "I1_А")
+    syms = [c for c in hdr[3:] if c in ("B", "G", "S", "O")]           # выходные коэф. (без RMS)
+    d = [r for r in rows if len(r) >= 4 + len(syms) and r[0] and r[0][0] in "+-0123456789" and "," in r[0]]
+    X = np.array([[fv(r[0]), fv(r[1]), fv(r[2])] for r in d])
+    Y = np.array([[fv(r[3 + j]) for j in range(len(syms))] for r in d])
+    return X, Y, syms
 
 
 def _load_single(dev):
@@ -885,16 +896,16 @@ def _r2(y, yhat):
 
 
 def compute_coupling():
-    """Матрицы связи ток→физкоэф (МНК по датасетам element_compare). DQ: (I1,I2,I3)→(B,G,S), матрица 3×3.
-    Одиночные: coef = k·I (скаляр). Возврат dict(dq=[…], single=[…]) с M/k, R² и ОДЗ (диапазон токов)."""
+    """Матрицы связи ток→физкоэф (МНК по датасетам element_compare). DQ: (I1,I2,I3)→(B,G[,S]), матрица Kx3
+    (K=число выходов в датасете). Одиночные: coef = k·I (скаляр). Возврат dict(dq=[…], single=[…])."""
     out = {"dq": [], "single": []}
     for base in ("L400", "L1000"):
         if not os.path.exists(os.path.join(OUTDIR, f"combo_dataset_{base}.csv")):
             continue
-        X, Y = _load_combo(base)
-        MT = np.linalg.lstsq(X, Y, rcond=None)[0]                    # Y = X·MTᵀ, MT: 3×3
-        R2 = [_r2(Y[:, k], X @ MT[:, k]) for k in range(3)]
-        out["dq"].append(dict(base=base, M=MT.T, R2=R2, Imax=float(np.abs(X).max())))
+        X, Y, syms = _load_combo(base)
+        MT = np.linalg.lstsq(X, Y, rcond=None)[0]                    # Y = X·MTᵀ, MT: 3×K
+        R2 = [_r2(Y[:, k], X @ MT[:, k]) for k in range(Y.shape[1])]
+        out["dq"].append(dict(base=base, M=MT.T, R2=R2, syms=syms, Imax=float(np.abs(X).max())))
     dom = {"quad": "G", "sext": "S", "oct": "O"}
     for dev, kind in candidates(("quad", "sext", "oct")):
         if not os.path.exists(os.path.join(OUTDIR, f"dataset_{dev}.csv")):
@@ -916,9 +927,16 @@ def _fmt_sci(x, sig=3):
 
 
 def _matrix_latex(M, label="M"):
-    """ОДНА матрица с меткой (напр. 'M_{L400}=…'). Office MML2OMML.XSL надёжно рендерит лишь ОДИН
-    \\begin{pmatrix} на формулу — вектор-уравнение (B,G,S)=M(I) даём текстом, не формулой."""
-    body = r"\\".join(" & ".join(_fmt_sci(M[i, j]) for j in range(3)) for i in range(3))
+    """ОДНА числовая матрица (форма по M.shape) с меткой. Office MML2OMML.XSL надёжно рендерит лишь ОДИН
+    \\begin{pmatrix} на формулу — вектор-уравнение даём текстом, не формулой."""
+    nr, nc = M.shape
+    body = r"\\".join(" & ".join(_fmt_sci(M[i, j]) for j in range(nc)) for i in range(nr))
+    return label + r"=\begin{pmatrix}" + body + r"\end{pmatrix}"
+
+
+def _sym_matrix_latex(nr, nc=3, label="M"):
+    """Символьная матрица nr×nc: M=(m_{ij})."""
+    body = r"\\".join(" & ".join(f"m_{{{i+1}{j+1}}}" for j in range(nc)) for i in range(nr))
     return label + r"=\begin{pmatrix}" + body + r"\end{pmatrix}"
 
 
@@ -963,7 +981,7 @@ def build_coupling_report(path=None):
            ("S", "секступольный коэф. mat_S (k₂ = QP·S)"),
            ("O", "октупольный коэф. mat_O (k₃ = QP·O)"),
            ("k", "чувствительность — наклон coef/ток, [коэф]/А"),
-           ("M", "матрица связи (строки B, G, S; столбцы I₁, I₂, I₃)"),
+           ("M", "матрица связи DQ (строки — выходные коэф. B, G; столбцы — токи I₁, I₂, I₃)"),
            ("R²", "качество линейной аппроксимации (1 = идеально)"),
            ("ОДЗ", "область токов, где линейная модель справедлива"),
            ("QP", "q/p₀ — опорная жёсткость пучка (≈ −84.9)")]
@@ -984,24 +1002,29 @@ def build_coupling_report(path=None):
         c[3].text = f"{s['R2']:.4f}"; c[4].text = f"±{s['Imax']:.0f}"
     # --- 2. DQ матрицы ---
     doc.add_heading("2. DQ (диполь-квадруполи) — матричная связь", level=2)
-    doc.add_paragraph("Три обмотки → (B, G, S). Связь линейна:  (B, G, S)ᵀ = M · (I₁, I₂, I₃)ᵀ,  где M — "
-                      "матрица связи 3×3 (строки — B, G, S; столбцы — I₁, I₂, I₃):")
-    lo.add_formula(doc.add_paragraph(),
-                   r"M=\begin{pmatrix}m_{11} & m_{12} & m_{13}\\m_{21} & m_{22} & m_{23}\\m_{31} & m_{32} & m_{33}\end{pmatrix}")
+    syms = data["dq"][0]["syms"] if data["dq"] else ["B", "G"]
+    vec = ", ".join(syms)
+    doc.add_paragraph(
+        f"DQ смоделирован как ЧИСТЫЙ диполь+квадруполь ({vec}) — БЕЗ секступольного момента, в согласии с "
+        "elegant/.lte (там DQ = CSBEND с K1, K2=0). Физический секступоль карт поля (feed-down при уходе "
+        "орбиты off-axis) здесь НАМЕРЕННО опущен — это увеличивает невязку траекторий, но даёт модель, "
+        f"эквивалентную elegant. Связь линейна:  ({vec})ᵀ = M · (I₁, I₂, I₃)ᵀ,  где M — матрица "
+        f"{len(syms)}×3 (строки — {vec}; столбцы — I₁, I₂, I₃):")
+    lo.add_formula(doc.add_paragraph(), _sym_matrix_latex(len(syms)))
     for dq in data["dq"]:
+        sm = dq["syms"]
         doc.add_heading(f"DQ_I1_1A_{dq['base']} (рабочий ток ~{dq['Imax']:.1f} А)", level=3)
         lo.add_formula(doc.add_paragraph(), _matrix_latex(dq["M"], f"M_{{{dq['base']}}}"))
         r2 = dq["R2"]
-        para = doc.add_paragraph(
-            f"R²: B = {r2[0]:.4f}, G = {r2[1]:.4f}, S = {r2[2]:.4f}.  "
-            f"ОДЗ: |I₁|, |I₂|, |I₃| ≤ {dq['Imax']:.2f} А.")
+        r2str = ", ".join(f"{sm[k]} = {r2[k]:.4f}" for k in range(len(sm)))
+        para = doc.add_paragraph(f"R²: {r2str}.  ОДЗ: |I₁|, |I₂|, |I₃| ≤ {dq['Imax']:.2f} А.")
         para.runs[0].font.size = Pt(10)
-        if min(r2[0], r2[1]) < 0.95:
+        if min(r2[:2]) < 0.95:
             wp = doc.add_paragraph(
-                "⚠ На рабочем токе линейность ограничена (B, G: R²≈{:.2f}): при |I|≳ нескольких "
-                "ампер поле насыщается. Линейная матрица годна лишь в узком ОДЗ (|I|≲ 2.5 А, там "
-                "R²≈0.97); для полного диапазона нужна интерполяция или квадратичные члены. Секступоль "
-                "S — нелинеен (feed-down): линейный R² низок.".format(min(r2[0], r2[1])))
+                "⚠ На рабочем токе линейность ограничена (B, G: R²≈{:.2f}): при |I|≳ нескольких ампер поле "
+                "насыщается (плюс здесь без секступоля G берёт на себя часть feed-down). Линейная матрица "
+                "годна лишь в узком ОДЗ (|I|≲ 2.5 А, там R²≈0.97); для полного диапазона нужна интерполяция "
+                "или квадратичные члены.".format(min(r2[0], r2[1])))
             wp.runs[0].italic = True
     # --- 3. ОДЗ и рекомендация ---
     doc.add_heading("3. ОДЗ, вырождение и рекомендация", level=2)
@@ -1012,9 +1035,10 @@ def build_coupling_report(path=None):
         "Матрицы точны там, где физика линейна: одиночные обмотки (R²≈1 на всём ±50 А) и DQ L400 на "
         "рабочем ±3 А (R²>0.99 для B, G). Для B и G матрица физически строга — это суперпозиция полей "
         "обмоток; она компактна и ОБРАТИМА (даёт токи по нужным коэффициентам).",
-        "Рекомендация — гибрид: линейная матрица как основа (B, G), + квадратичная поправка или интерполяция "
-        "для секступоля S (feed-down) и сильных токов L1000, где линейность рушится. Интерполяция ловит "
-        "нелинейность, но не обратима и требует хранить датасет."):
+        "Секступоль опущен намеренно (модель = elegant, K2=0). Плата — рост невязки траекторий: физический "
+        "секступоль карт (feed-down при уходе орбиты off-axis) частично поглощается эффективным G, частично "
+        "уходит в остаток. Если понадобится реальное поле карт — вернуть строку S (флаг sext) и/или "
+        "интерполяцию/квадратичные члены; для воспроизведения проектной оптики elegant текущий B+G корректен."):
         doc.add_paragraph(txt, style="List Bullet")
     doc.save(path)
     print(f"раздел «{SENT}» дописан → {path}")
