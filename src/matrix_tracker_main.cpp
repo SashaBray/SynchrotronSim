@@ -111,11 +111,15 @@ static int runTrack(const std::string& ws, int exp, int turns, double x0_mm, dou
     std::printf("# exp %d lattice %d group %d: %zu particles, %s, %zu elements, sr=%d rf=%s design=%.0f turns=%d\n",
                 exp, lattice, group, inj.states.size(), inj.closed ? "closed" : "open",
                 inj.ordered.size(), (int)sr, rf_ideal ? "ideal" : "none", design, turns);
-    // трек + сбор turn-by-turn для .npz (mode=long)
+    // трек + сбор turn-by-turn для .npz (mode=long). Частицы НЕЗАВИСИМЫ → OpenMP (кольцо read-only).
     std::vector<double> tx, txp, ty, typ;
     std::vector<int64_t> tt_counts, surv;
-    for (size_t i = 0; i < inj.states.size(); ++i) {
-        mc::LongResult lr = mc::trackLong(inj, inj.states[i], turns, rf_ideal);
+    std::vector<mc::LongResult> results(inj.states.size());
+#pragma omp parallel for schedule(dynamic)
+    for (int i = 0; i < (int)inj.states.size(); ++i)
+        results[i] = mc::trackLong(inj, inj.states[i], turns, rf_ideal);
+    for (size_t i = 0; i < results.size(); ++i) {              // сбор В ПОРЯДКЕ + вывод (серийно, детерминизм)
+        mc::LongResult& lr = results[i];
         tt_counts.push_back((int64_t)lr.tt.size());
         surv.push_back(lr.surv_turns);
         for (auto& a : lr.tt) { tx.push_back(a[0]); txp.push_back(a[1]); ty.push_back(a[2]); typ.push_back(a[3]); }

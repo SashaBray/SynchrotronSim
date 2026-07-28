@@ -87,6 +87,8 @@ struct Element {
     bool   sector = false;                                // изгиб (dipole/dq) с theta0≠0 → секторный интегратор
     bool   kick   = false;                                // прямой мультиполь (quad/sext/oct)
     double rad_coef = 0;                                  // распределённое СИ (классическое); ISR пока не портирован
+    double rho0 = 0, h = 0, b1 = 0, b2 = 0, b3 = 0;       // ПРЕКЭШ сектора: ρ, 1/ρ, bₙ=kₙ·ρ (не пересчитывать в цикле)
+    double s_slice = 0;                                   // длина среза Leff/nsl (сектор/кик)
     Yoshida4 ys;
 
     // Сборка из физкоэф. mat_* (B,G,Gv,S,O — суммы обмоток) + Leff + проектной энергии — как Magnet.__init__.
@@ -106,10 +108,14 @@ struct Element {
         e.sector = bend;
         bool nonzero = e.theta0 || e.k1 || e.k1v || e.k2 || e.k3 || e.kEdge1 || e.kEdge2;
         e.kick = (!bend) && nonzero && (kind == "quad" || kind == "sext" || kind == "oct");
+        if (e.sector || e.kick) e.s_slice = Leff / e.nsl;           // ПРЕКЭШ длины среза
+        if (e.sector) {                                             // ПРЕКЭШ геометрии/полей сектора
+            e.rho0 = -Leff / e.theta0; e.h = 1.0 / e.rho0;          // ρ>0 (конвенция elegant)
+            e.b1 = e.k1 * e.rho0; e.b2 = e.k2 * e.rho0; e.b3 = e.k3 * e.rho0;
+        }
         if (e.sector && sr) {                                        // распределённое СИ (классическое)
             double gamma = design_mev / MC2_MEV;
-            double rho0  = -Leff / e.theta0;                         // ρ>0 (конвенция elegant)
-            e.rad_coef = RAD_K * gamma * gamma * gamma / (rho0 * rho0);
+            e.rad_coef = RAD_K * gamma * gamma * gamma / (e.rho0 * e.rho0);
         }
         return e;
     }
@@ -125,10 +131,8 @@ private:
     // Секторный интегратор изгиба (+ классическое СИ) — matrix_tracker._body_sector_symplectic.
     State body_sector(const State& st) const {
         double x = st.x, px = st.px, y = st.y, py = st.py, t = st.t, d = st.delta;
-        double rho0 = -Leff / theta0;              // ρ>0 (конвенция elegant), θ0<0 у изгиба
-        double h = 1.0 / rho0;
-        double b1 = k1 * rho0, b2 = k2 * rho0, b3 = k3 * rho0, b4 = 0.0;
-        int N = nsl; double s = Leff / N;
+        const double b4 = 0.0;                     // rho0/h/b1..b3/s_slice — ПРЕКЭШ (Element::make), не пересчёт
+        int N = nsl; double s = s_slice;
         px += kEdge1 * x; py -= kEdge1 * y;        // вход: краевой фокус E1
         double X = x, QX = px, Y = y, QY = py, DP = d;
         double dist = 0.0;
@@ -177,7 +181,7 @@ private:
     // Прямой мультиполь (KQUAD/KSEXT/KOCT) — matrix_tracker._body_kick_symplectic.
     State body_kick(const State& st) const {
         State p = st;
-        int N = nsl; double ds = Leff / N;
+        int N = nsl; double ds = s_slice;          // Leff/nsl — ПРЕКЭШ
         for (int i = 0; i < N; ++i) {
             for (int j = 0; j < 4; ++j) {
                 p = drift(p, ds * ys.d[j]);        // дрейф по слопу
