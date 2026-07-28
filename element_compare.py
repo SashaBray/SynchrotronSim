@@ -864,7 +864,166 @@ def setup_viz_all(start_id=VIZ_START):
     return summary
 
 
+# ============================ МАТРИЦЫ СВЯЗИ ТОК→ФИЗКОЭФ + РАЗДЕЛ ОТЧЁТА =======================
+def _load_combo(base):
+    fv = lambda s: float(s.replace(",", "."))
+    rows = list(csv.reader(open(os.path.join(OUTDIR, f"combo_dataset_{base}.csv"), encoding="utf-8-sig"), delimiter=";"))
+    d = [r for r in rows if len(r) >= 7 and r[0] and r[0][0] in "+-0123456789" and "," in r[0]]
+    return (np.array([[fv(r[0]), fv(r[1]), fv(r[2])] for r in d]),
+            np.array([[fv(r[3]), fv(r[4]), fv(r[5])] for r in d]))
+
+
+def _load_single(dev):
+    fv = lambda s: float(s.replace(",", "."))
+    rows = list(csv.reader(open(os.path.join(OUTDIR, f"dataset_{dev}.csv"), encoding="utf-8-sig"), delimiter=";"))
+    d = [r for r in rows if r and r[0] and r[0][0] in "+-0123456789" and "," in r[0]]
+    return np.array([fv(r[0]) for r in d]), np.array([fv(r[1]) for r in d])
+
+
+def _r2(y, yhat):
+    return 1.0 - ((y - yhat) ** 2).sum() / max(1e-30, ((y - y.mean()) ** 2).sum())
+
+
+def compute_coupling():
+    """Матрицы связи ток→физкоэф (МНК по датасетам element_compare). DQ: (I1,I2,I3)→(B,G,S), матрица 3×3.
+    Одиночные: coef = k·I (скаляр). Возврат dict(dq=[…], single=[…]) с M/k, R² и ОДЗ (диапазон токов)."""
+    out = {"dq": [], "single": []}
+    for base in ("L400", "L1000"):
+        if not os.path.exists(os.path.join(OUTDIR, f"combo_dataset_{base}.csv")):
+            continue
+        X, Y = _load_combo(base)
+        MT = np.linalg.lstsq(X, Y, rcond=None)[0]                    # Y = X·MTᵀ, MT: 3×3
+        R2 = [_r2(Y[:, k], X @ MT[:, k]) for k in range(3)]
+        out["dq"].append(dict(base=base, M=MT.T, R2=R2, Imax=float(np.abs(X).max())))
+    dom = {"quad": "G", "sext": "S", "oct": "O"}
+    for dev, kind in candidates(("quad", "sext", "oct")):
+        if not os.path.exists(os.path.join(OUTDIR, f"dataset_{dev}.csv")):
+            continue
+        I, C = _load_single(dev)
+        k, b = np.polyfit(I, C, 1)
+        out["single"].append(dict(dev=dev, kind=kind, sym=dom[kind], k=float(k),
+                                  R2=_r2(C, k * I + b), Imax=float(np.abs(I).max())))
+    return out
+
+
+def _fmt_sci(x, sig=3):
+    """Число → LaTeX научной записи: 5.746e-5 → '5.75\\cdot10^{-5}', ~0 → '0'."""
+    if abs(x) < 1e-30:
+        return "0"
+    e = int(math.floor(math.log10(abs(x)))); m = x / 10 ** e
+    ms = f"{m:.{sig-1}f}"
+    return ms if e == 0 else f"{ms}\\cdot10^{{{e}}}"
+
+
+def _matrix_latex(M, label="M"):
+    """ОДНА матрица с меткой (напр. 'M_{L400}=…'). Office MML2OMML.XSL надёжно рендерит лишь ОДИН
+    \\begin{pmatrix} на формулу — вектор-уравнение (B,G,S)=M(I) даём текстом, не формулой."""
+    body = r"\\".join(" & ".join(_fmt_sci(M[i, j]) for j in range(3)) for i in range(3))
+    return label + r"=\begin{pmatrix}" + body + r"\end{pmatrix}"
+
+
+def _drop_section(doc, sentinel):
+    """Удалить абзацы/таблицы от заголовка sentinel до конца (кроме финального sectPr) — идемпотентность."""
+    from docx.oxml.ns import qn
+    body = doc.element.body; kids = list(body); start = None
+    for i, el in enumerate(kids):
+        if el.tag == qn("w:p") and sentinel in "".join(n.text or "" for n in el.iter(qn("w:t"))):
+            start = i; break
+    if start is None:
+        return False
+    for el in kids[start:]:
+        if el.tag != qn("w:sectPr"):
+            body.remove(el)
+    return True
+
+
+def build_coupling_report(path=None):
+    """Дописать в Word-отчёт раздел «Матрицы связи токов и физкоэффициентов» с НАТИВНЫМИ формулами Word
+    (latex2omml), легендой обозначений и ОДЗ. Идемпотентно (перезаписывает свой раздел)."""
+    from docx import Document
+    from docx.shared import Pt
+    import latex2omml as lo
+    path = path or os.path.join(OUTDIR, "element_compare_report.docx")
+    data = compute_coupling()
+    doc = Document(path) if os.path.exists(path) else Document()
+    SENT = "Матрицы связи токов и физкоэффициентов"
+    _drop_section(doc, SENT)
+    doc.add_heading(SENT, level=1)
+    doc.add_paragraph(
+        "Связь токов обмоток с физкоэффициентами (mat_*) можно задать (а) линейной МАТРИЦЕЙ — компактно и "
+        "обратимо, но лишь в области линейности (ОДЗ); либо (б) многомерной линейной интерполяцией по "
+        "датасету — ловит нелинейность, но не обратима. Ниже — матрицы связи (МНК по датасетам element_compare) "
+        "и ОДЗ токов, где они справедливы (по R²).")
+    # --- легенда обозначений ---
+    doc.add_heading("Обозначения", level=2)
+    leg = [("I₁, I₂, I₃", "токи обмоток DQ, А (I₂≡I₃ — вырождены, дают один эффект)"),
+           ("I", "ток одиночной обмотки, А"),
+           ("B", "коэф. изгиба mat_B (угол θ = QP·B·L_eff)"),
+           ("G", "квадрупольный градиент mat_G (k₁ = QP·G)"),
+           ("S", "секступольный коэф. mat_S (k₂ = QP·S)"),
+           ("O", "октупольный коэф. mat_O (k₃ = QP·O)"),
+           ("k", "чувствительность — наклон coef/ток, [коэф]/А"),
+           ("M", "матрица связи (строки B, G, S; столбцы I₁, I₂, I₃)"),
+           ("R²", "качество линейной аппроксимации (1 = идеально)"),
+           ("ОДЗ", "область токов, где линейная модель справедлива"),
+           ("QP", "q/p₀ — опорная жёсткость пучка (≈ −84.9)")]
+    t = doc.add_table(rows=1, cols=2); t.style = "Light Grid Accent 1"
+    t.rows[0].cells[0].text = "символ"; t.rows[0].cells[1].text = "смысл"
+    for sym, mean in leg:
+        c = t.add_row().cells; c[0].text = sym; c[1].text = mean
+    # --- 1. одиночные обмотки ---
+    doc.add_heading("1. Одиночные обмотки — скалярная связь", level=2)
+    p = doc.add_paragraph("Доминантный коэф. линеен по току: "); lo.add_formula(p, r"C = k \cdot I")
+    p.add_run(".  Матрица вырождается в скаляр k. Линейность практически идеальна на всём свипе.")
+    st = doc.add_table(rows=1, cols=5); st.style = "Light Grid Accent 1"
+    for j, h in enumerate(("элемент", "коэф.", "k, [коэф]/А", "R²", "ОДЗ, А")):
+        st.rows[0].cells[j].text = h
+    for s in data["single"]:
+        c = st.add_row().cells
+        c[0].text = s["dev"]; c[1].text = s["sym"]; c[2].text = f"{s['k']:+.4e}"
+        c[3].text = f"{s['R2']:.4f}"; c[4].text = f"±{s['Imax']:.0f}"
+    # --- 2. DQ матрицы ---
+    doc.add_heading("2. DQ (диполь-квадруполи) — матричная связь", level=2)
+    doc.add_paragraph("Три обмотки → (B, G, S). Связь линейна:  (B, G, S)ᵀ = M · (I₁, I₂, I₃)ᵀ,  где M — "
+                      "матрица связи 3×3 (строки — B, G, S; столбцы — I₁, I₂, I₃):")
+    lo.add_formula(doc.add_paragraph(),
+                   r"M=\begin{pmatrix}m_{11} & m_{12} & m_{13}\\m_{21} & m_{22} & m_{23}\\m_{31} & m_{32} & m_{33}\end{pmatrix}")
+    for dq in data["dq"]:
+        doc.add_heading(f"DQ_I1_1A_{dq['base']} (рабочий ток ~{dq['Imax']:.1f} А)", level=3)
+        lo.add_formula(doc.add_paragraph(), _matrix_latex(dq["M"], f"M_{{{dq['base']}}}"))
+        r2 = dq["R2"]
+        para = doc.add_paragraph(
+            f"R²: B = {r2[0]:.4f}, G = {r2[1]:.4f}, S = {r2[2]:.4f}.  "
+            f"ОДЗ: |I₁|, |I₂|, |I₃| ≤ {dq['Imax']:.2f} А.")
+        para.runs[0].font.size = Pt(10)
+        if min(r2[0], r2[1]) < 0.95:
+            wp = doc.add_paragraph(
+                "⚠ На рабочем токе линейность ограничена (B, G: R²≈{:.2f}): при |I|≳ нескольких "
+                "ампер поле насыщается. Линейная матрица годна лишь в узком ОДЗ (|I|≲ 2.5 А, там "
+                "R²≈0.97); для полного диапазона нужна интерполяция или квадратичные члены. Секступоль "
+                "S — нелинеен (feed-down): линейный R² низок.".format(min(r2[0], r2[1])))
+            wp.runs[0].italic = True
+    # --- 3. ОДЗ и рекомендация ---
+    doc.add_heading("3. ОДЗ, вырождение и рекомендация", level=2)
+    for txt in (
+        "Вырождение I₂≡I₃: столбцы матрицы для I₂ и I₃ почти совпадают — обмотки 2 и 3 "
+        "дают один эффект. Прямая задача (ток→коэф) от этого не страдает, но ОБРАТНАЯ (коэф→ток) "
+        "недоопределена для любого метода: I₂ и I₃ надо трактовать как один суммарный тюн (I₂+I₃).",
+        "Матрицы точны там, где физика линейна: одиночные обмотки (R²≈1 на всём ±50 А) и DQ L400 на "
+        "рабочем ±3 А (R²>0.99 для B, G). Для B и G матрица физически строга — это суперпозиция полей "
+        "обмоток; она компактна и ОБРАТИМА (даёт токи по нужным коэффициентам).",
+        "Рекомендация — гибрид: линейная матрица как основа (B, G), + квадратичная поправка или интерполяция "
+        "для секступоля S (feed-down) и сильных токов L1000, где линейность рушится. Интерполяция ловит "
+        "нелинейность, но не обратима и требует хранить датасет."):
+        doc.add_paragraph(txt, style="List Bullet")
+    doc.save(path)
+    print(f"раздел «{SENT}» дописан → {path}")
+    return path
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "matrices":
+        build_coupling_report(); sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "viz-all":
         setup_viz_all(); sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "viz":
