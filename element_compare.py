@@ -872,6 +872,79 @@ def setup_viz_all(start_id=VIZ_START):
 
 
 # ============================ МАТРИЦЫ СВЯЗИ ТОК→ФИЗКОЭФ + РАЗДЕЛ ОТЧЁТА =======================
+# Мультипольные моменты, извлекаемые из КИКА (изменения угла): гориз/верт диполь, норм/скью квад, секступ, окт.
+MULTIPOLES = ["B", "Bv", "G", "Gv", "S", "O"]
+
+
+def extract_coeffs(windings, L):
+    """Диффур комбинации СО-ЛОКОВАННЫХ обмоток (прямой элемент, yaw=0) → мультипольные mat_* из КИКА:
+    выходной наклон (sy=dY/dX гориз, sz=dZ/dX верт) 13 частиц раскладывается по (Y,Z) до октуполя.
+    Даёт ВСЕ моменты, вкл. ВЕРТИКАЛЬНЫЙ диполь (Bv), которого нет в столбцах БД. Возврат dict MULTIPOLES→коэф."""
+    trajs, _ = run_diffur_windings(windings, 0.0)
+    Y = np.array([p[0] for p in PROBES]); Z = np.array([p[1] for p in PROBES])
+    sy, sz = [], []
+    for a in trajs:
+        s = a[:, 0]; m = s > (s[-1] - 0.3)                           # выходной дрейф — прямая
+        sy.append(np.polyfit(a[m, 0], a[m, 1], 1)[0]); sz.append(np.polyfit(a[m, 0], a[m, 2], 1)[0])
+    cleanup()
+    A = np.column_stack([np.ones(len(Y)), Y, Z, 0.5 * (Y * Y - Z * Z), Y * Z,
+                         (Y ** 3 - 3 * Y * Z * Z) / 6.0, (3 * Y * Y * Z - Z ** 3) / 6.0])
+    ay = np.linalg.lstsq(A, np.array(sy), rcond=None)[0]
+    az = np.linalg.lstsq(A, np.array(sz), rcond=None)[0]
+    QPL = mt.QP * L                                                  # физкоэф = -кик/(QP·L) (диполь без минуса)
+    return {"B": ay[0] / QPL, "Bv": az[0] / QPL, "G": -ay[1] / QPL, "Gv": -ay[2] / QPL,
+            "S": -ay[3] / QPL, "O": -ay[5] / QPL}
+
+
+def winding_matrix(wdevs, L, curs=(15.0, 30.0, 45.0)):
+    """Матрица связи [len(MULTIPOLES) × len(wdevs)]: на КАЖДУЮ обмотку (одна в конфиге) — свип тока, линейный
+    наклон mat_*/ток = столбец. Линейная (суперпозиция полей) — комбо не нужны для матрицы."""
+    M = np.zeros((len(MULTIPOLES), len(wdevs)))
+    for j, wd in enumerate(wdevs):
+        data = {mp: [] for mp in MULTIPOLES}
+        for cur in curs:
+            c = extract_coeffs([(wd, cur)], L)
+            for mp in MULTIPOLES: data[mp].append(c[mp])
+        for i, mp in enumerate(MULTIPOLES):
+            M[i, j] = np.polyfit(curs, data[mp], 1)[0]
+    return M
+
+
+def element_windings():
+    """Все токовые элементы реш.1 с картами → (base, kind, [обмотки], L, [метки обмоток]). Группировка по
+    базовому имени (суффикс обмотки _I<k>/_c<k>/_main). DQ/DP/PM исключены (DQ=combo, DP=PM)."""
+    import re
+    grp = {}
+    for d, r in LCROW.items():
+        if not (HW.get(d, {}).get("map_bin_path") or "").strip(): continue
+        if (HW.get(d, {}).get("nominal_arg") or "").strip() == "-": continue     # PM
+        base = re.sub(r"_I\d+|_c\d+|_main", "", d)
+        grp.setdefault((base, r.get("kind") or ""), []).append(d)
+    out = []
+    for (base, kind), devs in sorted(grp.items()):
+        if kind not in ("quad", "sext", "oct", "kicker"): continue               # DQ отдельно (combo)
+        devs = sorted(devs)
+        labels = [(re.search(r"_(I\d+|c\d+|main)", d).group(1) if re.search(r"_(I\d+|c\d+|main)", d) else "I") for d in devs]
+        out.append((base, kind, devs, float(LCROW[devs[0]].get("eff_length") or 0.1), labels))
+    return out
+
+
+def compute_element_matrices():
+    """Матрицы связи [мультиполи × обмотки] для всех токовых элементов (кроме DQ). Возврат список dict."""
+    res = []
+    r = 1e-3                                                          # опорный радиус пучка (1мм) для значимости
+    scale = np.array([1.0, 1.0, r, r, 0.5 * r * r, r ** 3 / 6.0])    # вклад в КИК на единицу mat_* при 1мм (n=0..3)
+    for base, kind, devs, L, labels in element_windings():
+        M = winding_matrix(devs, L)
+        kick = np.abs(M).max(axis=1) * abs(mt.QP * L) * scale        # физ. вклад строки в кик при 1мм
+        kmax = kick.max() or 1.0                                     # значимость по КИКУ, не по «сырой» величине
+        rows = [i for i in range(len(MULTIPOLES))
+                if kick[i] > 1e-4 * kmax and (i != 5 or kind == "oct")]   # O — только у октуполя (иначе шум фита)
+        rows = rows or [int(kick.argmax())]
+        res.append(dict(base=base, kind=kind, labels=labels, M=M, rows=rows, L=L))
+    return res
+
+
 def _load_combo(base):
     """Возврат (X:токи Nx3, Y:выходы NxK, syms:имена выходов). Выходы — по ЗАГОЛОВКУ (B,G или B,G,S)."""
     fv = lambda s: float(s.replace(",", "."))
@@ -963,25 +1036,29 @@ def build_coupling_report(path=None):
     import latex2omml as lo
     path = path or os.path.join(OUTDIR, "element_compare_report.docx")
     data = compute_coupling()
+    data_el = compute_element_matrices()                 # матрицы мультиполей всех токовых элементов (кроме DQ)
     doc = Document(path) if os.path.exists(path) else Document()
     SENT = "Матрицы связи токов и физкоэффициентов"
     _drop_section(doc, SENT)
     doc.add_heading(SENT, level=1)
     doc.add_paragraph(
-        "Связь токов обмоток с физкоэффициентами (mat_*) можно задать (а) линейной МАТРИЦЕЙ — компактно и "
-        "обратимо, но лишь в области линейности (ОДЗ); либо (б) многомерной линейной интерполяцией по "
-        "датасету — ловит нелинейность, но не обратима. Ниже — матрицы связи (МНК по датасетам element_compare) "
-        "и ОДЗ токов, где они справедливы (по R²).")
+        "Связь токов обмоток с физкоэффициентами задаётся линейной МАТРИЦЕЙ M (компактно, обратимо, в области "
+        "линейности). §1 — матрицы МУЛЬТИПОЛЬНЫХ МОМЕНТОВ каждого токового элемента (столбцы = обмотки, строки "
+        "= моменты, извлечённые из кика; есть у всех элементов, вкл. одно-обмоточные и корректор с 5 обмотками). "
+        "§2 — DQ отдельно (свип по рабочему току). Многообмоточные секступоли и корректор дают матрицу "
+        "нескольких моментов на несколько обмоток.")
     # --- легенда обозначений ---
     doc.add_heading("Обозначения", level=2)
-    leg = [("I₁, I₂, I₃", "токи обмоток DQ, А (I₂≡I₃ — вырождены, дают один эффект)"),
-           ("I", "ток одиночной обмотки, А"),
-           ("B", "коэф. изгиба mat_B (угол θ = QP·B·L_eff)"),
-           ("G", "квадрупольный градиент mat_G (k₁ = QP·G)"),
+    leg = [("I", "ток одиночной обмотки, А"),
+           ("I₁,I₂ / I₁,I₂,I₃", "токи обмоток секступоля (2) / DQ (3), А"),
+           ("I_c1..I_c4, I_main", "токи 5 обмоток корректора, А"),
+           ("B", "коэф. ГОРИЗ. изгиба mat_B (θ_гор = QP·B·L_eff)"),
+           ("Bv", "коэф. ВЕРТ. изгиба (θ_верт = QP·Bv·L; извлечён из вертикального кика — столбца в БД нет)"),
+           ("G", "норм. квадруп. градиент mat_G (k₁ = QP·G)"),
+           ("Gv", "СКЬЮ (повёрнутый) квадруп. градиент mat_Gv"),
            ("S", "секступольный коэф. mat_S (k₂ = QP·S)"),
            ("O", "октупольный коэф. mat_O (k₃ = QP·O)"),
-           ("k", "чувствительность — наклон coef/ток, [коэф]/А"),
-           ("M", "матрица связи DQ (строки — выходные коэф. B, G; столбцы — токи I₁, I₂, I₃)"),
+           ("M", "матрица связи: строки — мультипольные моменты, столбцы — токи обмоток; элементы [коэф]/А"),
            ("R²", "качество линейной аппроксимации (1 = идеально)"),
            ("ОДЗ", "область токов, где линейная модель справедлива"),
            ("QP", "q/p₀ — опорная жёсткость пучка (≈ −84.9)")]
@@ -989,17 +1066,20 @@ def build_coupling_report(path=None):
     t.rows[0].cells[0].text = "символ"; t.rows[0].cells[1].text = "смысл"
     for sym, mean in leg:
         c = t.add_row().cells; c[0].text = sym; c[1].text = mean
-    # --- 1. одиночные обмотки ---
-    doc.add_heading("1. Одиночные обмотки — скалярная связь", level=2)
-    p = doc.add_paragraph("Доминантный коэф. линеен по току: "); lo.add_formula(p, r"C = k \cdot I")
-    p.add_run(".  Матрица вырождается в скаляр k. Линейность практически идеальна на всём свипе.")
-    st = doc.add_table(rows=1, cols=5); st.style = "Light Grid Accent 1"
-    for j, h in enumerate(("элемент", "коэф.", "k, [коэф]/А", "R²", "ОДЗ, А")):
-        st.rows[0].cells[j].text = h
-    for s in data["single"]:
-        c = st.add_row().cells
-        c[0].text = s["dev"]; c[1].text = s["sym"]; c[2].text = f"{s['k']:+.4e}"
-        c[3].text = f"{s['R2']:.4f}"; c[4].text = f"±{s['Imax']:.0f}"
+    # --- 1. матрицы мультипольных моментов (все токовые элементы) ---
+    doc.add_heading("1. Матрицы мультипольных моментов (ток → физкоэф)", level=2)
+    doc.add_paragraph(
+        "Для КАЖДОГО токового элемента — матрица связи M: столбцы = токи обмоток, строки = мультипольные "
+        "моменты, извлечённые из КИКА (изменения угла пучка) диффурной модели разложением по (Y,Z) до 3-го "
+        "порядка. Связь линейна (суперпозиция полей обмоток), M_ij = ∂(коэф_i)/∂(ток_j), /А. Показаны физически "
+        "значимые строки. Матрица есть у всех элементов (у одно-обмоточных — один столбец) и может быть "
+        "вырожденной (напр. обе обмотки секступоля дают один момент). Связь:  (моменты)ᵀ = M · (токи обмоток)ᵀ.")
+    for el in data_el:
+        rows = el["rows"]; Msub = el["M"][rows]; mps = ", ".join(MULTIPOLES[i] for i in rows)
+        labs = ", ".join(el["labels"])
+        doc.add_heading(f"{el['base']}  ({el['kind']}, обмоток: {len(el['labels'])})", level=3)
+        doc.add_paragraph(f"строки — {mps};  столбцы — {labs}:").runs[0].font.size = Pt(10)
+        lo.add_formula(doc.add_paragraph(), _matrix_latex(Msub, "M"))
     # --- 2. DQ матрицы ---
     doc.add_heading("2. DQ (диполь-квадруполи) — матричная связь", level=2)
     syms = data["dq"][0]["syms"] if data["dq"] else ["B", "G"]
@@ -1040,7 +1120,12 @@ def build_coupling_report(path=None):
         "уходит в остаток. Если понадобится реальное поле карт — вернуть строку S (флаг sext) и/или "
         "интерполяцию/квадратичные члены; для воспроизведения проектной оптики elegant текущий B+G корректен."):
         doc.add_paragraph(txt, style="List Bullet")
-    doc.save(path)
+    try:
+        doc.save(path)
+    except PermissionError:                              # отчёт открыт в Word → писать в фолбэк
+        path = os.path.splitext(path)[0] + "_new.docx"
+        doc.save(path)
+        print(f"  (основной .docx заблокирован — записан {os.path.basename(path)}; закрой Word и переименуй)")
     print(f"раздел «{SENT}» дописан → {path}")
     return path
 
