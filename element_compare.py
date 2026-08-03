@@ -77,7 +77,7 @@ def build_windings(windings, yaw=0.0, lat_id=TMP_LAT, grp_id=TMP_GRP, exp_id=TMP
         row[ci["lattice_id"]] = str(lat_id); row[ci["instance_id"]] = str(k); row[ci["device_type_id"]] = dev
         row[ci["x"]] = repr(CENTER); row[ci["y"]] = "0.0"; row[ci["z"]] = "0.0"
         row[ci["yaw"]] = repr(yaw); row[ci["pitch"]] = "0.0"; row[ci["roll"]] = "0.0"
-        row[ci["arg_val"]] = cur if cur == "-" else repr(cur); row[ci["correct_coeff"]] = "1.0"
+        row[ci["arg_val"]] = cur if cur == "-" else repr(float(cur)); row[ci["correct_coeff"]] = "1.0"  # float(): np.float64 repr ломает C++ stod
         for c in ("mat_B", "mat_G", "mat_S", "mat_O"):
             if c in ci: row[ci[c]] = "0"
         lat_rows.append(row)
@@ -896,21 +896,117 @@ def extract_coeffs(windings, L):
             "S": -ay[3] / QPL, "O": -ay[5] / QPL}
 
 
-CUR_MATRIX = (15.0, 30.0, 45.0)                          # токи свипа для матриц мультиполей (линейно, /А)
+DOM = {"quad": "G", "sext": "S", "oct": "O"}              # доминантный (проектный) момент чистого элемента
+LIN_FRACS = 3                                            # первые N точек лестницы (около рабочей точки) — линейны, по ним НАКЛОН
 
 
-def winding_matrix(wdevs, L, curs=CUR_MATRIX):
-    """Матрица связи [len(MULTIPOLES) × len(wdevs)]: на КАЖДУЮ обмотку (одна в конфиге) — свип тока, линейный
-    наклон mat_*/ток = столбец. Линейная (суперпозиция полей) — комбо не нужны для матрицы."""
+def _ladder_fracs(kind):
+    """Доли рабочего тока для свипа. Чистый элемент — вверх за рабочую точку (ищем начало нелинейности);
+    корректор (kicker) — доли номинала (не гонять за паспорт)."""
+    if kind in DOM:
+        return np.array([0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
+    return np.array([0.25, 0.5, 0.75, 1.0, 1.25])
+
+
+def element_operating_current(kind, devs, L):
+    """Ток масштаба РАБОЧЕЙ точки (где designed-момент = проектному mat_* из .lte). Корректор → номинал из
+    имени (…_100A_…). Нужен лишь для МАСШТАБА лестницы (наклон инвариантен к масштабу, связь линейна через 0)."""
+    import re
+    if kind in DOM:
+        mp = DOM[kind]; col = {"G": "mat_G", "S": "mat_S", "O": "mat_O"}[mp]
+        design, dwd = 0.0, devs[0]
+        for d in devs:                                       # доминантная обмотка = с ненулевым проектным mat_*
+            v = float(LCROW[d].get(col) or 0.0)
+            if abs(v) > abs(design): design, dwd = v, d
+        sl = extract_coeffs([(dwd, 1.0)], L)[mp]             # наклон коэф/ток около нуля (1 А заведомо линейно)
+        if abs(design) > 1e-30 and abs(sl) > 1e-30:
+            return abs(design / sl)
+    m = re.search(r"_(\d+(?:\.\d+)?)A", devs[0])             # номинал из имени устройства
+    return float(m.group(1)) if m else 45.0
+
+
+def winding_matrix(wdevs, L, i_op, fracs):
+    """Матрица связи [мультиполи × обмотки] + сырьё для оценки релевантного диапазона. На КАЖДУЮ обмотку —
+    свип по лестнице i_op·fracs; НАКЛОН mat_*/ток берётся в ЛИНЕЙНОЙ области (первые LIN_FRACS точек, около
+    рабочей точки), т.к. связь линейна через 0 (суперпозиция полей). Возврат (M, curs, Vals[момент,обмотка,ток])."""
+    curs = i_op * np.asarray(fracs, float)
+    nlin = min(LIN_FRACS, len(curs))
     M = np.zeros((len(MULTIPOLES), len(wdevs)))
+    Vals = np.zeros((len(MULTIPOLES), len(wdevs), len(curs)))
     for j, wd in enumerate(wdevs):
-        data = {mp: [] for mp in MULTIPOLES}
-        for cur in curs:
+        for t, cur in enumerate(curs):
             c = extract_coeffs([(wd, cur)], L)
-            for mp in MULTIPOLES: data[mp].append(c[mp])
-        for i, mp in enumerate(MULTIPOLES):
-            M[i, j] = np.polyfit(curs, data[mp], 1)[0]
-    return M
+            for i, mp in enumerate(MULTIPOLES): Vals[i, j, t] = c[mp]
+        for i in range(len(MULTIPOLES)):
+            M[i, j] = np.polyfit(curs[:nlin], Vals[i, j, :nlin], 1)[0]
+    return M, curs, Vals
+
+
+def _prefix_r2(curs, y, t):
+    """R² линейного фита coef=slope·ток по префиксу из t точек (t≥2; 2 точки → 1.0)."""
+    cx = curs[:t]; yy = y[:t]; sl, bb = np.polyfit(cx, yy, 1)
+    sst = ((yy - yy.mean()) ** 2).sum()
+    return (1.0 - ((yy - (sl * cx + bb)) ** 2).sum() / sst) if sst > 1e-30 else 1.0
+
+
+def _relevant_imax(curs, vals_rows, thr=0.95):
+    """Макс. ток лестницы, при котором линейный фит по префиксу [0..t] держит R²≥thr для ВСЕХ значимых
+    (row,обмотка). Возврат (Imax, R²_на_Imax). vals_rows — список массивов коэф(ток)."""
+    n = len(curs); best = 2                                   # 2 точки → линия точна (R²=1)
+    for t in range(3, n + 1):
+        if all(_prefix_r2(curs, y, t) >= thr for y in vals_rows): best = t
+        else: break
+    r2 = min((_prefix_r2(curs, y, best) for y in vals_rows), default=1.0)
+    return float(curs[best - 1]), float(r2)
+
+
+def _combo_grid(nw, lvl):
+    """Узлы комбо-сетки токов обмоток в кубе [−lvl,lvl]^nw (без нулевого узла). Малая размерность (3^nw≤30) —
+    полная 3-уровневая сетка; средняя (2^nw≤40) — углы куба; большая — случайная выборка (фикс. seed)."""
+    import itertools
+    if 3 ** nw <= 30:
+        pts = list(itertools.product([-lvl, 0.0, lvl], repeat=nw))
+    elif 2 ** nw <= 40:
+        pts = list(itertools.product([-lvl, lvl], repeat=nw))
+    else:
+        rng = np.random.default_rng(0); pts = [tuple(rng.uniform(-lvl, lvl, nw)) for _ in range(32)]
+    return [p for p in pts if any(abs(x) > 1e-9 for x in p)]
+
+
+def save_combo_verify(base, devs, L, mps, recs):
+    """CSV комбо-проверки суперпозиции: токи обмоток; извлечённые моменты; предсказание матрицы; |невязка|.
+    Запятая-десятичная (Excel, память csv-comma-decimal-for-excel), ';' поле."""
+    import re
+    lbls = [(re.search(r"_(I\d+|c\d+|main)", d).group(1) if re.search(r"_(I\d+|c\d+|main)", d) else "I") for d in devs]
+    path = os.path.join(OUTDIR, f"combo_verify_{base}.csv")
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f, delimiter=";")
+        w.writerow(["L_eff_м", str(round(L, 6)).replace(".", ",")]); w.writerow([])
+        w.writerow([f"I_{l}_А" for l in lbls] + [f"{m}_извл" for m in mps]
+                   + [f"{m}_матрица" for m in mps] + [f"|Δ{m}|" for m in mps])
+        for I, act, pred in recs:
+            row = list(I) + list(act) + list(pred) + list(np.abs(np.asarray(act) - np.asarray(pred)))
+            w.writerow([str(round(float(x), 8)).replace(".", ",") for x in row])
+    return path
+
+
+def combo_verify(base, devs, L, M, rows, imax, save=True):
+    """Проверка СУПЕРПОЗИЦИИ многообмоточного элемента: комбо-сетка токов обмоток в ±0.5·Imax → диффур
+    (со-локованные обмотки суперпозируют поля, getTotalFields) → извлечённые designed-моменты vs предсказание
+    ЛИНЕЙНОЙ матрицы M·I. Малая невязка = матрица корректно описывает комбинированное возбуждение. Датасет →
+    combo_verify_<base>.csv. Возврат dict(n, max_abs, rel, moments, path)."""
+    grid = _combo_grid(len(devs), 0.5 * imax)
+    Mk = M[rows]; mps = [MULTIPOLES[i] for i in rows]
+    recs = []; maxa = np.zeros(len(rows)); num = np.zeros(len(rows)); den = np.zeros(len(rows))
+    for I in grid:
+        c = extract_coeffs([(devs[j], float(I[j])) for j in range(len(devs))], L)
+        actual = np.array([c[MULTIPOLES[i]] for i in rows]); pred = Mk @ np.asarray(I, float)
+        d = np.abs(actual - pred); maxa = np.maximum(maxa, d)
+        num += d ** 2; den += actual ** 2
+        recs.append((I, actual, pred))
+    per = {mps[k]: float(math.sqrt(num[k] / max(den[k], 1e-30))) for k in range(len(rows))}  # отн. невязка по каждому моменту
+    path = save_combo_verify(base, devs, L, mps, recs) if save else None
+    return dict(n=len(grid), per=per, max_abs=float(maxa.max()), moments=mps, path=path)
 
 
 def element_windings():
@@ -932,19 +1028,33 @@ def element_windings():
     return out
 
 
+# Чистый элемент несёт ТОЛЬКО свой мультипольный момент (как elegant: KQUAD=K1, KSEXT=K2, KOCT=K3 — без
+# посторонних членов). Корректор (kicker) — многофункциональный, показываем все значимые моменты.
+DESIGNED_MOMENT = {"quad": ["G"], "sext": ["S"], "oct": ["O"]}
+
+
 def compute_element_matrices():
-    """Матрицы связи [мультиполи × обмотки] для всех токовых элементов (кроме DQ). Возврат список dict."""
+    """Матрицы связи [мультиполи × обмотки] токовых элементов (кроме DQ). Для чистых элементов — ТОЛЬКО
+    designed-момент (как elegant); корректор — все значимые по кику. + R² линейности. Возврат список dict."""
     res = []
     r = 1e-3                                                          # опорный радиус пучка (1мм) для значимости
     scale = np.array([1.0, 1.0, r, r, 0.5 * r * r, r ** 3 / 6.0])    # вклад в КИК на единицу mat_* при 1мм (n=0..3)
     for base, kind, devs, L, labels in element_windings():
-        M = winding_matrix(devs, L)
-        kick = np.abs(M).max(axis=1) * abs(mt.QP * L) * scale        # физ. вклад строки в кик при 1мм
-        kmax = kick.max() or 1.0                                     # значимость по КИКУ, не по «сырой» величине
-        rows = [i for i in range(len(MULTIPOLES))
-                if kick[i] > 1e-4 * kmax and (i != 5 or kind == "oct")]   # O — только у октуполя (иначе шум фита)
-        rows = rows or [int(kick.argmax())]
-        res.append(dict(base=base, kind=kind, labels=labels, M=M, rows=rows, L=L))
+        i_op = element_operating_current(kind, devs, L)              # масштаб лестницы = рабочая точка / номинал
+        M, curs, Vals = winding_matrix(devs, L, i_op, _ladder_fracs(kind))
+        if kind in DESIGNED_MOMENT:                                  # чистый элемент — ТОЛЬКО свой момент
+            rows = [MULTIPOLES.index(mp) for mp in DESIGNED_MOMENT[kind]]
+            pairs = [(i, j) for i in rows for j in range(len(labels))]
+        else:                                                        # корректор — все значимые по физ.вкладу в кик
+            kick = np.abs(M).max(axis=1) * abs(mt.QP * L) * scale
+            kmax = kick.max() or 1.0
+            rows = [i for i in range(len(MULTIPOLES)) if kick[i] > 1e-4 * kmax and i != 5] or [int(kick.argmax())]
+            kij = np.abs(M) * (abs(mt.QP * L) * scale)[:, None]      # линейность по ДОМИНАНТНОМУ (по кику) выходу обмотки
+            pairs = [(int(kij[:, j].argmax()), j) for j in range(len(labels))]
+        imax, r2 = _relevant_imax(curs, [Vals[i, j] for i, j in pairs])
+        combo = combo_verify(base, devs, L, M, rows, imax) if len(devs) > 1 else None   # суперпозиция многообмоточных
+        res.append(dict(base=base, kind=kind, labels=labels, M=M, rows=rows, L=L, r2=r2,
+                        imax=imax, i_op=i_op, combo=combo))
     return res
 
 
@@ -1031,6 +1141,45 @@ def _drop_section(doc, sentinel):
     return True
 
 
+# Заголовки, которыми начинаются наши приложения (сводка/корректор/секции сводки). Всё от ПЕРВОГО такого
+# заголовка до конца документа — приложения матриц (идут ПОСЛЕ реальных глав элементов из run_all).
+MATRIX_SENT = "Сводка: матрицы связи и диапазоны валидности"
+MATRIX_CORR = "Матрицы связи ток→физкоэф (элементы без отдельной главы)"
+_ARTIFACT_HEADINGS = {MATRIX_SENT, MATRIX_CORR, "Матрицы связи токов и физкоэффициентов",
+                      "Обозначения", "Диапазоны тестов и валидности", "Все матрицы", "Замечания"}
+
+
+_REAL_CHAPTER = __import__("re").compile(r"\((oct|dipole|dq|quad|sext|kicker)\)\s*$")
+
+
+def _purge_matrix_artifacts(doc):
+    """Надёжная идемпотентность: удалить ВСЕ прежние приложения матриц — от первого артефактного заголовка до
+    конца документа. Артефакт = заголовок из фикс. набора / с «, обмоток:» ЛИБО любая H1 ПОСЛЕ реальных глав
+    элементов, не являющаяся главой элемента (не оканчивается на «(oct|dipole|dq|quad|sext|kicker)»). Ловит
+    приложения любого прошлого названия (напр. переименованную сборную главу) и осиротевшие секции."""
+    from docx.oxml.ns import qn
+    seen_real = False; target = None
+    for p in doc.paragraphs:
+        st = p.style.name; txt = p.text.strip()
+        is_h1 = (st == "Heading 1"); is_head = st.startswith(("Heading", "Заголовок"))
+        if is_h1 and _REAL_CHAPTER.search(txt):
+            seen_real = True; continue
+        artifact = (is_head and (txt in _ARTIFACT_HEADINGS or ", обмоток:" in p.text)) \
+            or (is_h1 and seen_real and txt and not _REAL_CHAPTER.search(txt))
+        if artifact:
+            target = p._p; break
+    if target is None:
+        return
+    body = doc.element.body; kids = list(body)
+    try:
+        start = kids.index(target)
+    except ValueError:
+        return
+    for el in kids[start:]:
+        if el.tag != qn("w:sectPr"):
+            body.remove(el)
+
+
 def _ltag(name):
     import re
     m = re.search(r"L\d+", name); return m.group(0) if m else name
@@ -1063,27 +1212,45 @@ def _chapter_next_p(doc, ltag):
 
 
 def _drop_inserted_matrices(doc):
-    """Убрать ранее вставленные в главы блоки матриц (маркер+формула+диапазоны = 3 абзаца) — идемпотентность."""
+    """Убрать ранее вставленные в главы блоки матриц (прямая+M, обратная+M⁺, диапазоны = 5 абзацев) —
+    идемпотентность. Совместимо со старым 3-абзацным блоком (лишние берутся до след. не-нашего абзаца)."""
     from docx.oxml.ns import qn
     body = doc.element.body; kids = list(body); rm = []
     for i, el in enumerate(kids):
         if el.tag == qn("w:p") and "".join(n.text or "" for n in el.iter(qn("w:t"))).startswith("Матрица связи (ток→коэф)"):
-            rm += [k for k in kids[i:i + 3] if k.tag == qn("w:p")]
+            rm += [k for k in kids[i:i + 5] if k.tag == qn("w:p")]
     for el in rm:
         if el.getparent() is not None: body.remove(el)
 
 
 def _matrix_block(doc, m, before, lo):
-    """Блок матрицы (3 абзаца: вектор-уравнение с маркером, формула M, диапазоны). before=None → в конец."""
+    """Блок матрицы (5 абзацев: прямое вектор-уравнение + M, обратное вектор-уравнение + M⁺/M⁻¹, диапазоны).
+    before=None → в конец. Прямая: коэф = M·ток; обратная: ток = M⁺·коэф (M⁻¹ для квадратной невырожденной)."""
     from docx.shared import Pt
-    ov = ", ".join(m["outputs"]); iv = ", ".join(_curname(l) for l in m["labels"]); cmax = max(m["cur"])
-    crng = ";  ".join(f"|{m['outputs'][i]}|≤{np.abs(m['M'][i]).sum() * cmax:.2e}" for i in range(len(m["outputs"])))
+    ov = ", ".join(m["outputs"]); iv = ", ".join(_curname(l) for l in m["labels"])
+    M = np.asarray(m["M"], float); nr, nc = M.shape
+    imax = float(m.get("imax", 0.0)); r2 = m.get("r2", 1.0)
+    Minv = np.linalg.pinv(M)                                          # псевдообратная (= M⁻¹ для квадратной невырожденной)
+    square = (nr == nc and abs(np.linalg.det(M)) > 1e-30)
+    ilab = "M^{-1}" if square else "M^{+}"
+    ihint = ("" if square else
+             (" (M⁺ — псевдообратная минимальной нормы: обмоток больше моментов)" if nc > nr
+              else " (M⁺ — псевдообратная МНК: моментов больше обмоток)"))
+    crng = ";  ".join(f"|{m['outputs'][i]}|≤{np.abs(M[i]).sum() * imax:.2e}" for i in range(nr))
+    valid = (f"весь тест-диапазон (R²={r2:.3f}≥0.95)" if r2 >= 0.95
+             else f"УЖЕ — R²={r2:.3f}<0.95 (связь нелинейна выше)")
+    cb = m.get("combo")
+    combo_txt = (f"  Проверка суперпозиции ({cb['n']} комбо обмоток в ±0.5·Imax; отн. невязка матрица↔диффур по "
+                 f"моментам): " + ", ".join(f"{k} {v * 100:.1f}%" for k, v in cb["per"].items()) + "." if cb else "")
     p1 = doc.add_paragraph(f"Матрица связи (ток→коэф):  ({ov})ᵀ = M · ({iv})ᵀ  — строки M: {ov};  столбцы: {iv}.")
-    p2 = doc.add_paragraph(); lo.add_formula(p2, _matrix_latex(m["M"], "M"))
-    p3 = doc.add_paragraph(f"Тест: |ток| ≤ {cmax:.0f} А  ⇒  диапазон коэф. (где связь справедлива):  {crng}.  {m.get('note', '')}")
-    p3.runs[0].font.size = Pt(9)
+    p2 = doc.add_paragraph(); lo.add_formula(p2, _matrix_latex(M, "M"))
+    p3 = doc.add_paragraph(f"Обратный расчёт (коэф→ток):  ({iv})ᵀ = {'M⁻¹' if square else 'M⁺'} · ({ov})ᵀ.{ihint}")
+    p4 = doc.add_paragraph(); lo.add_formula(p4, _matrix_latex(Minv, ilab))
+    p5 = doc.add_paragraph(f"Релевантный ток (критерий R²≥0.95): |ток| ≤ {imax:.1f} А — {valid}.  "
+                           f"Диапазон коэф.: {crng}.  {m.get('note', '')}{combo_txt}")
+    p5.runs[0].font.size = Pt(9)
     if before is not None:
-        for p in (p1, p2, p3): before.addprevious(p._p)
+        for p in (p1, p2, p3, p4, p5): before.addprevious(p._p)
 
 
 def _coupling_summary(doc, mats, lo):
@@ -1091,29 +1258,38 @@ def _coupling_summary(doc, mats, lo):
     from docx.shared import Pt
     doc.add_paragraph("Все матрицы связи ток→физкоэф в одном месте. Указан диапазон ТОКОВ, в котором проведены "
                       "тесты, и соответствующий диапазон ФИЗКОЭФ (в этих пределах линейная связь справедлива). "
-                      "Связь: (моменты)ᵀ = M · (токи обмоток)ᵀ, элемент M_ij = ∂(коэф_i)/∂(ток_j).")
+                      "Прямой расчёт: (моменты)ᵀ = M · (токи обмоток)ᵀ, элемент M_ij = ∂(коэф_i)/∂(ток_j).  "
+                      "Обратный расчёт (требуемые коэф → токи): (токи)ᵀ = M⁺ · (моменты)ᵀ, где M⁺ — псевдообратная "
+                      "Мура–Пенроуза (= M⁻¹ для квадратной невырожденной M; при избытке обмоток — решение "
+                      "минимальной нормы, при недостатке — МНК). Числовая M⁺/M⁻¹ приведена в разделе каждого элемента.")
     doc.add_heading("Обозначения", level=2)
     leg = [("I, I₁,I₂,I₃, I_c1..main", "токи обмоток, А (одиночная / секступоль-DQ / корректор)"),
            ("B, Bv", "гориз./верт. дипольный момент (mat_B; Bv извлечён из вертикального кика)"),
            ("G, Gv", "норм./скью квадрупольный градиент (mat_G / mat_Gv)"),
            ("S, O", "секступольный / октупольный коэф. (mat_S / mat_O)"),
-           ("M", "матрица связи: строки — моменты, столбцы — токи обмоток; [коэф]/А"),
+           ("M", "прямая матрица: строки — моменты, столбцы — токи обмоток; [коэф]/А"),
+           ("M⁻¹, M⁺", "обратная матрица (коэф→ток): (токи)ᵀ = M⁺·(моменты)ᵀ; M⁺ = M⁻¹ для квадратной невырожденной"),
            ("QP", "q/p₀ — опорная жёсткость (≈ −84.9); θ=QP·B·L, k₁=QP·G, k₂=QP·S")]
     t = doc.add_table(rows=1, cols=2); t.style = "Light Grid Accent 1"
     t.rows[0].cells[0].text = "символ"; t.rows[0].cells[1].text = "смысл"
     for s, mn in leg:
         c = t.add_row().cells; c[0].text = s; c[1].text = mn
     doc.add_heading("Диапазоны тестов и валидности", level=2)
-    st = doc.add_table(rows=1, cols=5); st.style = "Light Grid Accent 1"
-    for j, h in enumerate(("элемент", "обмотки", "моменты", "тест-ток, А", "диапазон |коэф| (валидность)")):
+    doc.add_paragraph("Релевантный диапазон тока — тот, в котором линейная связь справедлива. КРИТЕРИЙ: R² ≥ 0.95 "
+                      "(R² линейного фита коэф.=slope·ток по тест-точкам от рабочей точки вверх). Ток свипа привязан "
+                      "к РАБОЧЕЙ точке каждого элемента (не фиксирован): у слабых квадов рабочий ток ~2 А, гнать их "
+                      "до десятков А физически бессмысленно (перегруз, насыщение). Релевантный |ток| — максимальный, "
+                      "при котором R² ещё ≥ 0.95; в этих пределах матрица (и обратная к ней) справедлива.")
+    st = doc.add_table(rows=1, cols=6); st.style = "Light Grid Accent 1"
+    for j, h in enumerate(("элемент", "обмотки", "моменты", "релевантный ток, А (критерий R²≥0.95)", "R²", "диапазон |коэф|")):
         st.rows[0].cells[j].text = h
     for m in mats:
-        cmax = max(m["cur"])
-        crng = ";  ".join(f"|{m['outputs'][i]}|≤{np.abs(m['M'][i]).sum() * cmax:.1e}" for i in range(len(m["outputs"])))
+        imax = float(m.get("imax", 0.0)); r2 = m.get("r2", 1.0)
+        crng = ";  ".join(f"|{m['outputs'][i]}|≤{np.abs(m['M'][i]).sum() * imax:.1e}" for i in range(len(m["outputs"])))
+        rng = f"|I|≤{imax:.1f}" + ("" if r2 >= 0.95 else "  (R²<0.95 — уже)")
         c = st.add_row().cells
         c[0].text = m["name"]; c[1].text = ", ".join(m["labels"]); c[2].text = ", ".join(m["outputs"])
-        c[3].text = f"±{cmax:.1f}" if m["kind"] == "dq" else f"{min(m['cur']):.0f}–{cmax:.0f}"
-        c[4].text = crng
+        c[3].text = rng; c[4].text = f"{r2:.3f}"; c[5].text = crng
     doc.add_heading("Все матрицы", level=2)
     for m in mats:
         doc.add_heading(m["name"], level=3)
@@ -1121,20 +1297,25 @@ def _coupling_summary(doc, mats, lo):
     doc.add_heading("Замечания", level=2)
     for txt in (
         "Связь линейна (суперпозиция полей обмоток), поэтому столбцы матрицы получены НЕЗАВИСИМЫМ свипом каждой "
-        "обмотки — комбо-сетка не нужна. Валидность — в пределах тестового диапазона токов и соответствующих коэф.",
+        "обмотки. Для многообмоточных (секступоли, корректор) суперпозиция ПОДТВЕРЖДЕНА комбо-сеткой токов: "
+        "предсказание матрицы M·I сверено с диффуром на комбинациях возбуждения (строка «Проверка суперпозиции» "
+        "в разделе элемента, датасеты combo_verify_<элемент>.csv). Секступоли — невязка <0.1%. Корректор: сильные "
+        "моменты (гориз./верт. диполь) сверяются на 1–4%, а слабые квадрупольный и особенно секступольный моменты "
+        "у корректора на ШУМОВОМ ПОЛУ карты (невязка не убывает с амплитудой) — они мало влияют на коррекцию.",
         "Вертикальный диполь Bv извлечён из вертикального кика (столбца mat_Bv в БД нет). Октуполь O показан "
         "только у октуполя (у прочих — шум кубического члена при 1 мм).",
         "Вырождения нормальны (обе обмотки секступоля дают один момент; у DQ I₂≡I₃): прямая задача ток→коэф "
-        "корректна, ОБРАТНАЯ коэф→ток недоопределена.",
+        "корректна, ОБРАТНАЯ коэф→ток недоопределена — псевдообратная M⁺ даёт решение минимальной нормы "
+        "(ток распределяется между обмотками по их чувствительности); при недостатке обмоток M⁺ — МНК-решение.",
         "DQ смоделирован как B+G (без секступоля = elegant/.lte K2=0); у L1000 на рабочем токе линейность "
         "ограничена (R²≈0.7, при |I|≳2.5 А нужна интерполяция/квадратичные члены)."):
         doc.add_paragraph(txt, style="List Bullet")
 
 
 def build_coupling_report(path=None):
-    """Матрицы связи ток→физкоэф в Word-отчёте: (1) блок матрицы (вектор-уравнение + M + диапазоны) в главу
-    КАЖДОГО элемента; корректор — своя глава; (2) сводная глава в конце (все матрицы + тест-диапазоны
-    токов/коэф = валидность). Нативные формулы Word. Идемпотентно."""
+    """Матрицы связи ток→физкоэф в Word-отчёте: (1) блок матрицы (прямая M + обратная M⁺/M⁻¹ + диапазоны) в
+    главу КАЖДОГО элемента; элементы без своей главы — сборная глава; (2) сводная глава в конце (все матрицы +
+    тест-диапазоны токов/коэф = валидность, критерий R²≥0.95). Нативные формулы Word. Идемпотентно."""
     from docx import Document
     from docx.shared import Pt
     import latex2omml as lo
@@ -1142,30 +1323,33 @@ def build_coupling_report(path=None):
     data = compute_coupling()
     data_el = compute_element_matrices()                 # матрицы мультиполей всех токовых элементов (кроме DQ)
     doc = Document(path) if os.path.exists(path) else Document()
-    SENT = "Сводка: матрицы связи и диапазоны валидности"
-    CORR = "Корректор — матрица моментов"
-    _drop_inserted_matrices(doc)                                 # идемпотентность: снять прежние вставки/главы
-    for s in (SENT, CORR, "Матрицы связи токов и физкоэффициентов"):
-        _drop_section(doc, s)
+    SENT = MATRIX_SENT
+    CORR = MATRIX_CORR
+    _drop_inserted_matrices(doc)                                 # снять вставленные в главы блоки матриц (маркер)
+    _purge_matrix_artifacts(doc)                                 # снять все прежние приложения (сводка/корректор/сироты)
     # унифицированный список матриц: элементы (мультиполи) + DQ (B,G)
     mats = []
     for el in data_el:
         rows = el["rows"]
         mats.append(dict(name=el["base"], kind=el["kind"], ltag=_ltag(el["base"]),
                          outputs=[MULTIPOLES[i] for i in rows], labels=el["labels"],
-                         M=el["M"][rows], cur=CUR_MATRIX, note=""))
+                         M=el["M"][rows], imax=el["imax"], i_op=el["i_op"], r2=el["r2"],
+                         combo=el.get("combo"), note=""))
     for dq in data["dq"]:
         r2 = dq["R2"]; sm = dq["syms"]
         mats.append(dict(name=f"DQ_I1_1A_{dq['base']}", kind="dq", ltag=dq["base"],
-                         outputs=sm, labels=["I1", "I2", "I3"], M=dq["M"], cur=(dq["Imax"],),
+                         outputs=sm, labels=["I1", "I2", "I3"], M=dq["M"], imax=dq["Imax"], i_op=dq["Imax"],
+                         r2=float(min(r2)),
                          note="R²: " + ", ".join(f"{sm[k]}={r2[k]:.3f}" for k in range(len(sm))) +
                               f" (рабочий ток ~{dq['Imax']:.1f}А)."))
-    # элементы БЕЗ своей главы в отчёте (корректор) → отдельная глава с матрицей
+    # элементы БЕЗ своей главы в отчёте (квады, секступоли, корректор, DQ_L400) → сборная глава с матрицами
     orphan = [m for m in mats if not _has_chapter(doc, m["ltag"])]
     if orphan:
         doc.add_heading(CORR, level=1)
-        doc.add_paragraph("Многофункциональный корректор (kicker): разные обмотки дают горизонтальный и "
-                          "вертикальный дипольные моменты, квадруполь, скью-квадруполь, секступоль.")
+        doc.add_paragraph("Прямая (ток→коэф) и обратная (коэф→ток) матрицы для токовых элементов, у которых нет "
+                          "собственной главы в отчёте: квадруполи (→G), секступоли (2 обмотки →S), корректор и DQ. "
+                          "Корректор (kicker) многофункционален: обмотки дают горизонтальный и вертикальный дипольные "
+                          "моменты, нормальный и скью квадруполь, секступоль.")
         for m in orphan:
             doc.add_heading(f"{m['name']}  ({m['kind']}, обмоток: {len(m['labels'])})", level=2)
             _matrix_block(doc, m, None, lo)
