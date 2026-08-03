@@ -896,7 +896,10 @@ def extract_coeffs(windings, L):
             "S": -ay[3] / QPL, "O": -ay[5] / QPL}
 
 
-def winding_matrix(wdevs, L, curs=(15.0, 30.0, 45.0)):
+CUR_MATRIX = (15.0, 30.0, 45.0)                          # токи свипа для матриц мультиполей (линейно, /А)
+
+
+def winding_matrix(wdevs, L, curs=CUR_MATRIX):
     """Матрица связи [len(MULTIPOLES) × len(wdevs)]: на КАЖДУЮ обмотку (одна в конфиге) — свип тока, линейный
     наклон mat_*/ток = столбец. Линейная (суперпозиция полей) — комбо не нужны для матрицы."""
     M = np.zeros((len(MULTIPOLES), len(wdevs)))
@@ -1028,9 +1031,110 @@ def _drop_section(doc, sentinel):
     return True
 
 
+def _ltag(name):
+    import re
+    m = re.search(r"L\d+", name); return m.group(0) if m else name
+
+
+def _curname(lbl):
+    """Имя тока в вектор-уравнении: I1/I2/I3 как есть, c1/main → I_c1/I_main, одиночная → I."""
+    return lbl if lbl.startswith("I") else ("I_" + lbl)
+
+
+def _match_ltag(text, ltag):
+    """ltag в тексте с границей: за ним НЕ цифра (иначе L100 матчит L1000)."""
+    import re
+    return re.search(re.escape(ltag) + r"(?!\d)", text) is not None
+
+
+def _has_chapter(doc, ltag):
+    return any(p.style.name == "Heading 1" and _match_ltag(p.text, ltag) for p in doc.paragraphs)
+
+
+def _chapter_next_p(doc, ltag):
+    """_p следующего H1 после главы с ltag (точка вставки в конец главы). None если главы/след. H1 нет."""
+    ps = doc.paragraphs; idx = None
+    for i, p in enumerate(ps):
+        if p.style.name == "Heading 1" and _match_ltag(p.text, ltag): idx = i; break
+    if idx is None: return None
+    for j in range(idx + 1, len(ps)):
+        if ps[j].style.name == "Heading 1": return ps[j]._p
+    return None
+
+
+def _drop_inserted_matrices(doc):
+    """Убрать ранее вставленные в главы блоки матриц (маркер+формула+диапазоны = 3 абзаца) — идемпотентность."""
+    from docx.oxml.ns import qn
+    body = doc.element.body; kids = list(body); rm = []
+    for i, el in enumerate(kids):
+        if el.tag == qn("w:p") and "".join(n.text or "" for n in el.iter(qn("w:t"))).startswith("Матрица связи (ток→коэф)"):
+            rm += [k for k in kids[i:i + 3] if k.tag == qn("w:p")]
+    for el in rm:
+        if el.getparent() is not None: body.remove(el)
+
+
+def _matrix_block(doc, m, before, lo):
+    """Блок матрицы (3 абзаца: вектор-уравнение с маркером, формула M, диапазоны). before=None → в конец."""
+    from docx.shared import Pt
+    ov = ", ".join(m["outputs"]); iv = ", ".join(_curname(l) for l in m["labels"]); cmax = max(m["cur"])
+    crng = ";  ".join(f"|{m['outputs'][i]}|≤{np.abs(m['M'][i]).sum() * cmax:.2e}" for i in range(len(m["outputs"])))
+    p1 = doc.add_paragraph(f"Матрица связи (ток→коэф):  ({ov})ᵀ = M · ({iv})ᵀ  — строки M: {ov};  столбцы: {iv}.")
+    p2 = doc.add_paragraph(); lo.add_formula(p2, _matrix_latex(m["M"], "M"))
+    p3 = doc.add_paragraph(f"Тест: |ток| ≤ {cmax:.0f} А  ⇒  диапазон коэф. (где связь справедлива):  {crng}.  {m.get('note', '')}")
+    p3.runs[0].font.size = Pt(9)
+    if before is not None:
+        for p in (p1, p2, p3): before.addprevious(p._p)
+
+
+def _coupling_summary(doc, mats, lo):
+    """Сводная глава: обозначения, таблица тест-диапазонов (ток→коэф = валидность), все матрицы, замечания."""
+    from docx.shared import Pt
+    doc.add_paragraph("Все матрицы связи ток→физкоэф в одном месте. Указан диапазон ТОКОВ, в котором проведены "
+                      "тесты, и соответствующий диапазон ФИЗКОЭФ (в этих пределах линейная связь справедлива). "
+                      "Связь: (моменты)ᵀ = M · (токи обмоток)ᵀ, элемент M_ij = ∂(коэф_i)/∂(ток_j).")
+    doc.add_heading("Обозначения", level=2)
+    leg = [("I, I₁,I₂,I₃, I_c1..main", "токи обмоток, А (одиночная / секступоль-DQ / корректор)"),
+           ("B, Bv", "гориз./верт. дипольный момент (mat_B; Bv извлечён из вертикального кика)"),
+           ("G, Gv", "норм./скью квадрупольный градиент (mat_G / mat_Gv)"),
+           ("S, O", "секступольный / октупольный коэф. (mat_S / mat_O)"),
+           ("M", "матрица связи: строки — моменты, столбцы — токи обмоток; [коэф]/А"),
+           ("QP", "q/p₀ — опорная жёсткость (≈ −84.9); θ=QP·B·L, k₁=QP·G, k₂=QP·S")]
+    t = doc.add_table(rows=1, cols=2); t.style = "Light Grid Accent 1"
+    t.rows[0].cells[0].text = "символ"; t.rows[0].cells[1].text = "смысл"
+    for s, mn in leg:
+        c = t.add_row().cells; c[0].text = s; c[1].text = mn
+    doc.add_heading("Диапазоны тестов и валидности", level=2)
+    st = doc.add_table(rows=1, cols=5); st.style = "Light Grid Accent 1"
+    for j, h in enumerate(("элемент", "обмотки", "моменты", "тест-ток, А", "диапазон |коэф| (валидность)")):
+        st.rows[0].cells[j].text = h
+    for m in mats:
+        cmax = max(m["cur"])
+        crng = ";  ".join(f"|{m['outputs'][i]}|≤{np.abs(m['M'][i]).sum() * cmax:.1e}" for i in range(len(m["outputs"])))
+        c = st.add_row().cells
+        c[0].text = m["name"]; c[1].text = ", ".join(m["labels"]); c[2].text = ", ".join(m["outputs"])
+        c[3].text = f"±{cmax:.1f}" if m["kind"] == "dq" else f"{min(m['cur']):.0f}–{cmax:.0f}"
+        c[4].text = crng
+    doc.add_heading("Все матрицы", level=2)
+    for m in mats:
+        doc.add_heading(m["name"], level=3)
+        _matrix_block(doc, m, None, lo)
+    doc.add_heading("Замечания", level=2)
+    for txt in (
+        "Связь линейна (суперпозиция полей обмоток), поэтому столбцы матрицы получены НЕЗАВИСИМЫМ свипом каждой "
+        "обмотки — комбо-сетка не нужна. Валидность — в пределах тестового диапазона токов и соответствующих коэф.",
+        "Вертикальный диполь Bv извлечён из вертикального кика (столбца mat_Bv в БД нет). Октуполь O показан "
+        "только у октуполя (у прочих — шум кубического члена при 1 мм).",
+        "Вырождения нормальны (обе обмотки секступоля дают один момент; у DQ I₂≡I₃): прямая задача ток→коэф "
+        "корректна, ОБРАТНАЯ коэф→ток недоопределена.",
+        "DQ смоделирован как B+G (без секступоля = elegant/.lte K2=0); у L1000 на рабочем токе линейность "
+        "ограничена (R²≈0.7, при |I|≳2.5 А нужна интерполяция/квадратичные члены)."):
+        doc.add_paragraph(txt, style="List Bullet")
+
+
 def build_coupling_report(path=None):
-    """Дописать в Word-отчёт раздел «Матрицы связи токов и физкоэффициентов» с НАТИВНЫМИ формулами Word
-    (latex2omml), легендой обозначений и ОДЗ. Идемпотентно (перезаписывает свой раздел)."""
+    """Матрицы связи ток→физкоэф в Word-отчёте: (1) блок матрицы (вектор-уравнение + M + диапазоны) в главу
+    КАЖДОГО элемента; корректор — своя глава; (2) сводная глава в конце (все матрицы + тест-диапазоны
+    токов/коэф = валидность). Нативные формулы Word. Идемпотентно."""
     from docx import Document
     from docx.shared import Pt
     import latex2omml as lo
@@ -1038,95 +1142,48 @@ def build_coupling_report(path=None):
     data = compute_coupling()
     data_el = compute_element_matrices()                 # матрицы мультиполей всех токовых элементов (кроме DQ)
     doc = Document(path) if os.path.exists(path) else Document()
-    SENT = "Матрицы связи токов и физкоэффициентов"
-    _drop_section(doc, SENT)
-    doc.add_heading(SENT, level=1)
-    doc.add_paragraph(
-        "Связь токов обмоток с физкоэффициентами задаётся линейной МАТРИЦЕЙ M (компактно, обратимо, в области "
-        "линейности). §1 — матрицы МУЛЬТИПОЛЬНЫХ МОМЕНТОВ каждого токового элемента (столбцы = обмотки, строки "
-        "= моменты, извлечённые из кика; есть у всех элементов, вкл. одно-обмоточные и корректор с 5 обмотками). "
-        "§2 — DQ отдельно (свип по рабочему току). Многообмоточные секступоли и корректор дают матрицу "
-        "нескольких моментов на несколько обмоток.")
-    # --- легенда обозначений ---
-    doc.add_heading("Обозначения", level=2)
-    leg = [("I", "ток одиночной обмотки, А"),
-           ("I₁,I₂ / I₁,I₂,I₃", "токи обмоток секступоля (2) / DQ (3), А"),
-           ("I_c1..I_c4, I_main", "токи 5 обмоток корректора, А"),
-           ("B", "коэф. ГОРИЗ. изгиба mat_B (θ_гор = QP·B·L_eff)"),
-           ("Bv", "коэф. ВЕРТ. изгиба (θ_верт = QP·Bv·L; извлечён из вертикального кика — столбца в БД нет)"),
-           ("G", "норм. квадруп. градиент mat_G (k₁ = QP·G)"),
-           ("Gv", "СКЬЮ (повёрнутый) квадруп. градиент mat_Gv"),
-           ("S", "секступольный коэф. mat_S (k₂ = QP·S)"),
-           ("O", "октупольный коэф. mat_O (k₃ = QP·O)"),
-           ("M", "матрица связи: строки — мультипольные моменты, столбцы — токи обмоток; элементы [коэф]/А"),
-           ("R²", "качество линейной аппроксимации (1 = идеально)"),
-           ("ОДЗ", "область токов, где линейная модель справедлива"),
-           ("QP", "q/p₀ — опорная жёсткость пучка (≈ −84.9)")]
-    t = doc.add_table(rows=1, cols=2); t.style = "Light Grid Accent 1"
-    t.rows[0].cells[0].text = "символ"; t.rows[0].cells[1].text = "смысл"
-    for sym, mean in leg:
-        c = t.add_row().cells; c[0].text = sym; c[1].text = mean
-    # --- 1. матрицы мультипольных моментов (все токовые элементы) ---
-    doc.add_heading("1. Матрицы мультипольных моментов (ток → физкоэф)", level=2)
-    doc.add_paragraph(
-        "Для КАЖДОГО токового элемента — матрица связи M: столбцы = токи обмоток, строки = мультипольные "
-        "моменты, извлечённые из КИКА (изменения угла пучка) диффурной модели разложением по (Y,Z) до 3-го "
-        "порядка. Связь линейна (суперпозиция полей обмоток), M_ij = ∂(коэф_i)/∂(ток_j), /А. Показаны физически "
-        "значимые строки. Матрица есть у всех элементов (у одно-обмоточных — один столбец) и может быть "
-        "вырожденной (напр. обе обмотки секступоля дают один момент). Связь:  (моменты)ᵀ = M · (токи обмоток)ᵀ.")
+    SENT = "Сводка: матрицы связи и диапазоны валидности"
+    CORR = "Корректор — матрица моментов"
+    _drop_inserted_matrices(doc)                                 # идемпотентность: снять прежние вставки/главы
+    for s in (SENT, CORR, "Матрицы связи токов и физкоэффициентов"):
+        _drop_section(doc, s)
+    # унифицированный список матриц: элементы (мультиполи) + DQ (B,G)
+    mats = []
     for el in data_el:
-        rows = el["rows"]; Msub = el["M"][rows]; mps = ", ".join(MULTIPOLES[i] for i in rows)
-        labs = ", ".join(el["labels"])
-        doc.add_heading(f"{el['base']}  ({el['kind']}, обмоток: {len(el['labels'])})", level=3)
-        doc.add_paragraph(f"строки — {mps};  столбцы — {labs}:").runs[0].font.size = Pt(10)
-        lo.add_formula(doc.add_paragraph(), _matrix_latex(Msub, "M"))
-    # --- 2. DQ матрицы ---
-    doc.add_heading("2. DQ (диполь-квадруполи) — матричная связь", level=2)
-    syms = data["dq"][0]["syms"] if data["dq"] else ["B", "G"]
-    vec = ", ".join(syms)
-    doc.add_paragraph(
-        f"DQ смоделирован как ЧИСТЫЙ диполь+квадруполь ({vec}) — БЕЗ секступольного момента, в согласии с "
-        "elegant/.lte (там DQ = CSBEND с K1, K2=0). Физический секступоль карт поля (feed-down при уходе "
-        "орбиты off-axis) здесь НАМЕРЕННО опущен — это увеличивает невязку траекторий, но даёт модель, "
-        f"эквивалентную elegant. Связь линейна:  ({vec})ᵀ = M · (I₁, I₂, I₃)ᵀ,  где M — матрица "
-        f"{len(syms)}×3 (строки — {vec}; столбцы — I₁, I₂, I₃):")
-    lo.add_formula(doc.add_paragraph(), _sym_matrix_latex(len(syms)))
+        rows = el["rows"]
+        mats.append(dict(name=el["base"], kind=el["kind"], ltag=_ltag(el["base"]),
+                         outputs=[MULTIPOLES[i] for i in rows], labels=el["labels"],
+                         M=el["M"][rows], cur=CUR_MATRIX, note=""))
     for dq in data["dq"]:
-        sm = dq["syms"]
-        doc.add_heading(f"DQ_I1_1A_{dq['base']} (рабочий ток ~{dq['Imax']:.1f} А)", level=3)
-        lo.add_formula(doc.add_paragraph(), _matrix_latex(dq["M"], f"M_{{{dq['base']}}}"))
-        r2 = dq["R2"]
-        r2str = ", ".join(f"{sm[k]} = {r2[k]:.4f}" for k in range(len(sm)))
-        para = doc.add_paragraph(f"R²: {r2str}.  ОДЗ: |I₁|, |I₂|, |I₃| ≤ {dq['Imax']:.2f} А.")
-        para.runs[0].font.size = Pt(10)
-        if min(r2[:2]) < 0.95:
-            wp = doc.add_paragraph(
-                "⚠ На рабочем токе линейность ограничена (B, G: R²≈{:.2f}): при |I|≳ нескольких ампер поле "
-                "насыщается (плюс здесь без секступоля G берёт на себя часть feed-down). Линейная матрица "
-                "годна лишь в узком ОДЗ (|I|≲ 2.5 А, там R²≈0.97); для полного диапазона нужна интерполяция "
-                "или квадратичные члены.".format(min(r2[0], r2[1])))
-            wp.runs[0].italic = True
-    # --- 3. ОДЗ и рекомендация ---
-    doc.add_heading("3. ОДЗ, вырождение и рекомендация", level=2)
-    for txt in (
-        "Вырождение I₂≡I₃: столбцы матрицы для I₂ и I₃ почти совпадают — обмотки 2 и 3 "
-        "дают один эффект. Прямая задача (ток→коэф) от этого не страдает, но ОБРАТНАЯ (коэф→ток) "
-        "недоопределена для любого метода: I₂ и I₃ надо трактовать как один суммарный тюн (I₂+I₃).",
-        "Матрицы точны там, где физика линейна: одиночные обмотки (R²≈1 на всём ±50 А) и DQ L400 на "
-        "рабочем ±3 А (R²>0.99 для B, G). Для B и G матрица физически строга — это суперпозиция полей "
-        "обмоток; она компактна и ОБРАТИМА (даёт токи по нужным коэффициентам).",
-        "Секступоль опущен намеренно (модель = elegant, K2=0). Плата — рост невязки траекторий: физический "
-        "секступоль карт (feed-down при уходе орбиты off-axis) частично поглощается эффективным G, частично "
-        "уходит в остаток. Если понадобится реальное поле карт — вернуть строку S (флаг sext) и/или "
-        "интерполяцию/квадратичные члены; для воспроизведения проектной оптики elegant текущий B+G корректен."):
-        doc.add_paragraph(txt, style="List Bullet")
+        r2 = dq["R2"]; sm = dq["syms"]
+        mats.append(dict(name=f"DQ_I1_1A_{dq['base']}", kind="dq", ltag=dq["base"],
+                         outputs=sm, labels=["I1", "I2", "I3"], M=dq["M"], cur=(dq["Imax"],),
+                         note="R²: " + ", ".join(f"{sm[k]}={r2[k]:.3f}" for k in range(len(sm))) +
+                              f" (рабочий ток ~{dq['Imax']:.1f}А)."))
+    # элементы БЕЗ своей главы в отчёте (корректор) → отдельная глава с матрицей
+    orphan = [m for m in mats if not _has_chapter(doc, m["ltag"])]
+    if orphan:
+        doc.add_heading(CORR, level=1)
+        doc.add_paragraph("Многофункциональный корректор (kicker): разные обмотки дают горизонтальный и "
+                          "вертикальный дипольные моменты, квадруполь, скью-квадруполь, секступоль.")
+        for m in orphan:
+            doc.add_heading(f"{m['name']}  ({m['kind']}, обмоток: {len(m['labels'])})", level=2)
+            _matrix_block(doc, m, None, lo)
+    # сводная глава В КОНЦЕ (все матрицы + диапазоны)
+    doc.add_heading(SENT, level=1)
+    _coupling_summary(doc, mats, lo)
+    # разнести матрицы по главам своих элементов (у кого глава в отчёте есть) — вектор-уравнение + M + диапазоны
+    for m in mats:
+        nxt = _chapter_next_p(doc, m["ltag"])
+        if nxt is not None:
+            _matrix_block(doc, m, nxt, lo)
     try:
         doc.save(path)
     except PermissionError:                              # отчёт открыт в Word → писать в фолбэк
         path = os.path.splitext(path)[0] + "_new.docx"
         doc.save(path)
         print(f"  (основной .docx заблокирован — записан {os.path.basename(path)}; закрой Word и переименуй)")
-    print(f"раздел «{SENT}» дописан → {path}")
+    print(f"матрицы разнесены по главам + сводка «{SENT}» → {path}")
     return path
 
 
