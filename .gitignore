@@ -32,6 +32,9 @@ workspace/tables/sp_elements.csv
 workspace/tables/lattice_layout.csv
 workspace/tables/lattice_configs.csv
 
+# Таблица матриц связи ток→физкоэф (генерируется element_compare.py library)
+workspace/tables/coupling_matrices.csv
+
 # Сгенерированные optimconfig (производные от JSON)
 workspace/optim_inputs/*.optimconfig
 

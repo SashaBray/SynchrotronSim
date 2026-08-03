@@ -372,5 +372,47 @@ class TestLocalNpz(unittest.TestCase):
         np.testing.assert_allclose(d["parts"][0]["Z"], glo[0][:, 2])    # глоб. Z сохранён
 
 
+class TestCouplingTable(unittest.TestCase):
+    """Таблица БД coupling_matrices: формат прямых/обратных строк, реконструкция M·M⁺≈I, PM (fixed), UPSERT."""
+
+    def test_matrix_table_roundtrip(self):
+        import element_compare as ec
+        M = np.array([[1.0, 2.0], [0.5, 3.0]])
+        m = dict(name="T", kind="quad", outputs=["G", "S"], labels=["I1", "I2"], L=0.3, M=M,
+                 imax=10.0, i_op=2.0, r2=0.99)
+        rows = ec._matrix_table_rows(m)
+        fw = {(r[5], r[6]): float(r[7]) for r in rows if r[4] == "forward"}
+        Mr = np.array([[fw[(o, i)] for i in ("I1", "I2")] for o in ("G", "S")])
+        np.testing.assert_allclose(Mr, M)                                   # forward восстанавливает M
+        inv = {(r[5], r[6]): float(r[7]) for r in rows if r[4] == "inverse"}
+        Mir = np.array([[inv[(w, o)] for o in ("G", "S")] for w in ("I1", "I2")])
+        np.testing.assert_allclose(M @ Mir, np.eye(2), atol=1e-9)           # M·M⁺ ≈ I
+
+    def test_pm_fixed_rows(self):
+        import element_compare as ec
+        rows = ec._matrix_table_rows(dict(name="DP", kind="dipole", outputs=["B", "G"], labels=["I"],
+                                          L=0.4, pm=True, fixed={"B": 1e-4, "G": 2e-5}))
+        self.assertTrue(all(r[4] == "fixed" for r in rows))
+        self.assertEqual({r[5] for r in rows}, {"B", "G"})
+
+    def test_upsert_preserves_others(self):
+        import element_compare as ec, tempfile, csv as _csv
+        row = lambda el: [el, "quad", "1", "1", "forward", "G", "I", "1.0", "coef/A", "0.3", "2.0", "10.0", "0.99"]
+        old = ec.TB
+        with tempfile.TemporaryDirectory() as td:
+            ec.TB = td
+            try:
+                ec.upsert_coupling_table({"A": [row("A")], "B": [row("B")]})
+                ec.upsert_coupling_table({"A": [row("A")[:2] + ["upd"] + row("A")[3:]]})   # обновить ТОЛЬКО A
+                with open(os.path.join(td, ec.COUPLING_TABLE), encoding="utf-8") as f:
+                    rr = list(_csv.reader(f, delimiter=";"))[1:]
+                els = [r[0] for r in rr if r]
+                self.assertEqual(els.count("B"), 1)                         # чужой B не тронут
+                self.assertEqual(els.count("A"), 1)                         # A заменён, не продублирован
+                self.assertIn("upd", [c for r in rr for c in r])            # новое значение A записано
+            finally:
+                ec.TB = old
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")

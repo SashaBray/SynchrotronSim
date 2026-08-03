@@ -451,6 +451,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 OUTDIR = os.path.join(RESULTS, "element_compare")
+DATASETS = os.path.join(OUTDIR, "datasets")        # свип- и комбо-датасеты матриц связи
+HTML_OUT = os.path.join(RESULTS, "html")           # HTML-отчёты элементов (viz_html)
 
 
 def _show_currents(recs):
@@ -925,6 +927,21 @@ def element_operating_current(kind, devs, L):
     return float(m.group(1)) if m else 45.0
 
 
+def save_sweep_dataset(base, labels, curs, Vals):
+    """Свип-датасет матрицы: для КАЖДОЙ обмотки — лестница токов → извлечённые мультиполи (по которым построена
+    M). Запятая-десятичная (Excel), ';'. → datasets/sweep_<base>.csv."""
+    os.makedirs(DATASETS, exist_ok=True)
+    path = os.path.join(DATASETS, f"sweep_{base}.csv")
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f, delimiter=";")
+        w.writerow(["обмотка", "ток_А"] + MULTIPOLES)
+        for j, lbl in enumerate(labels):
+            for t, cur in enumerate(curs):
+                row = [lbl, cur] + [Vals[i, j, t] for i in range(len(MULTIPOLES))]
+                w.writerow([row[0]] + [str(round(float(x), 8)).replace(".", ",") for x in row[1:]])
+    return path
+
+
 def winding_matrix(wdevs, L, i_op, fracs):
     """Матрица связи [мультиполи × обмотки] + сырьё для оценки релевантного диапазона. На КАЖДУЮ обмотку —
     свип по лестнице i_op·fracs; НАКЛОН mat_*/ток берётся в ЛИНЕЙНОЙ области (первые LIN_FRACS точек, около
@@ -978,7 +995,8 @@ def save_combo_verify(base, devs, L, mps, recs):
     Запятая-десятичная (Excel, память csv-comma-decimal-for-excel), ';' поле."""
     import re
     lbls = [(re.search(r"_(I\d+|c\d+|main)", d).group(1) if re.search(r"_(I\d+|c\d+|main)", d) else "I") for d in devs]
-    path = os.path.join(OUTDIR, f"combo_verify_{base}.csv")
+    os.makedirs(DATASETS, exist_ok=True)
+    path = os.path.join(DATASETS, f"combo_{base}.csv")
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";")
         w.writerow(["L_eff_м", str(round(L, 6)).replace(".", ",")]); w.writerow([])
@@ -1009,39 +1027,57 @@ def combo_verify(base, devs, L, M, rows, imax, save=True):
     return dict(n=len(grid), per=per, max_abs=float(maxa.max()), moments=mps, path=path)
 
 
-def element_windings():
-    """Все токовые элементы реш.1 с картами → (base, kind, [обмотки], L, [метки обмоток]). Группировка по
-    базовому имени (суффикс обмотки _I<k>/_c<k>/_main). DQ/DP/PM исключены (DQ=combo, DP=PM)."""
+def element_windings(kinds=("quad", "sext", "oct", "kicker"), include_pm=False):
+    """Токовые элементы реш.1 с картами → (base, kind, [обмотки], L, [метки обмоток]). Группировка по базовому
+    имени (суффикс обмотки _I<k>/_c<k>/_main). `kinds` — какие виды включать; `include_pm=True` добавляет
+    PM-диполи (фикс. поле, без свипа — ветка fixed). DQ всегда отдельно (combo, compute_coupling)."""
     import re
     grp = {}
     for d, r in LCROW.items():
         if not (HW.get(d, {}).get("map_bin_path") or "").strip(): continue
-        if (HW.get(d, {}).get("nominal_arg") or "").strip() == "-": continue     # PM
+        pm = (HW.get(d, {}).get("nominal_arg") or "").strip() == "-"
+        if pm and not include_pm: continue
         base = re.sub(r"_I\d+|_c\d+|_main", "", d)
         grp.setdefault((base, r.get("kind") or ""), []).append(d)
     out = []
     for (base, kind), devs in sorted(grp.items()):
-        if kind not in ("quad", "sext", "oct", "kicker"): continue               # DQ отдельно (combo)
+        if kind not in kinds: continue                                           # DQ отдельно (combo)
         devs = sorted(devs)
         labels = [(re.search(r"_(I\d+|c\d+|main)", d).group(1) if re.search(r"_(I\d+|c\d+|main)", d) else "I") for d in devs]
         out.append((base, kind, devs, float(LCROW[devs[0]].get("eff_length") or 0.1), labels))
     return out
 
 
+def library_windings():
+    """Полный охват матриц: все элементы реш.1 с картами И проектными lte-данными — прямые (quad/sext/oct/
+    kicker) + PM-диполи (dipole, fixed). DQ добавляется отдельно (combo) на уровне таблицы/отчёта."""
+    return element_windings(kinds=("quad", "sext", "oct", "kicker", "dipole"), include_pm=True)
+
+
 # Чистый элемент несёт ТОЛЬКО свой мультипольный момент (как elegant: KQUAD=K1, KSEXT=K2, KOCT=K3 — без
 # посторонних членов). Корректор (kicker) — многофункциональный, показываем все значимые моменты.
-DESIGNED_MOMENT = {"quad": ["G"], "sext": ["S"], "oct": ["O"]}
+# dipole (PM) — фикс. поле: диполь B + слабый краевой градиент G (свипа тока нет, ветка fixed).
+DESIGNED_MOMENT = {"quad": ["G"], "sext": ["S"], "oct": ["O"], "dipole": ["B", "G"]}
 
 
-def compute_element_matrices():
-    """Матрицы связи [мультиполи × обмотки] токовых элементов (кроме DQ). Для чистых элементов — ТОЛЬКО
-    designed-момент (как elegant); корректор — все значимые по кику. + R² линейности. Возврат список dict."""
+def compute_element_matrices(elements=None):
+    """Матрицы связи [мультиполи × обмотки] токовых элементов (кроме DQ — combo). Для чистых элементов —
+    ТОЛЬКО designed-момент (как elegant); корректор — все значимые по кику; PM-диполи — ФИКС. состав (свипа
+    нет, ветка pm). + R² линейности, комбо-проверка. `elements` — список из element_windings/library_windings
+    (None → element_windings()). Возврат список dict (pm=True → есть fixed{момент:коэф}, нет M/imax)."""
     res = []
     r = 1e-3                                                          # опорный радиус пучка (1мм) для значимости
     scale = np.array([1.0, 1.0, r, r, 0.5 * r * r, r ** 3 / 6.0])    # вклад в КИК на единицу mat_* при 1мм (n=0..3)
-    for base, kind, devs, L, labels in element_windings():
+    for base, kind, devs, L, labels in (element_windings() if elements is None else elements):
+        if is_pm(devs[0]):                                           # PM: фикс. поле, без свипа → ФИКС. состав
+            c = extract_coeffs([(devs[0], "-")], L)
+            rows = [MULTIPOLES.index(mp) for mp in DESIGNED_MOMENT.get(kind, ["B", "G"])]
+            res.append(dict(base=base, kind=kind, labels=labels, L=L, pm=True, rows=rows,
+                            fixed={MULTIPOLES[i]: float(c[MULTIPOLES[i]]) for i in rows}))
+            continue
         i_op = element_operating_current(kind, devs, L)              # масштаб лестницы = рабочая точка / номинал
         M, curs, Vals = winding_matrix(devs, L, i_op, _ladder_fracs(kind))
+        save_sweep_dataset(base, labels, curs, Vals)                 # датасет свипа (токи обмоток → мультиполи)
         if kind in DESIGNED_MOMENT:                                  # чистый элемент — ТОЛЬКО свой момент
             rows = [MULTIPOLES.index(mp) for mp in DESIGNED_MOMENT[kind]]
             pairs = [(i, j) for i in rows for j in range(len(labels))]
@@ -1054,7 +1090,7 @@ def compute_element_matrices():
         imax, r2 = _relevant_imax(curs, [Vals[i, j] for i, j in pairs])
         combo = combo_verify(base, devs, L, M, rows, imax) if len(devs) > 1 else None   # суперпозиция многообмоточных
         res.append(dict(base=base, kind=kind, labels=labels, M=M, rows=rows, L=L, r2=r2,
-                        imax=imax, i_op=i_op, combo=combo))
+                        imax=imax, i_op=i_op, combo=combo, pm=False))
     return res
 
 
@@ -1217,16 +1253,28 @@ def _drop_inserted_matrices(doc):
     from docx.oxml.ns import qn
     body = doc.element.body; kids = list(body); rm = []
     for i, el in enumerate(kids):
-        if el.tag == qn("w:p") and "".join(n.text or "" for n in el.iter(qn("w:t"))).startswith("Матрица связи (ток→коэф)"):
+        if el.tag != qn("w:p"): continue
+        txt = "".join(n.text or "" for n in el.iter(qn("w:t")))
+        if txt.startswith("Матрица связи (ток→коэф)"):
             rm += [k for k in kids[i:i + 5] if k.tag == qn("w:p")]
+        elif txt.startswith("PM-диполь — ФИКСИРОВАННОЕ"):             # PM-блок = 1 абзац
+            rm.append(el)
     for el in rm:
         if el.getparent() is not None: body.remove(el)
 
 
 def _matrix_block(doc, m, before, lo):
     """Блок матрицы (5 абзацев: прямое вектор-уравнение + M, обратное вектор-уравнение + M⁺/M⁻¹, диапазоны).
-    before=None → в конец. Прямая: коэф = M·ток; обратная: ток = M⁺·коэф (M⁻¹ для квадратной невырожденной)."""
+    before=None → в конец. Прямая: коэф = M·ток; обратная: ток = M⁺·коэф (M⁻¹ для квадратной невырожденной).
+    PM-диполь (fixed): один абзац с фикс. составом (матрицы связи нет — свипа тока нет)."""
     from docx.shared import Pt
+    if m.get("pm"):                                                  # PM: фикс. поле, матрицы нет
+        fx = ";  ".join(f"{k}={v:+.3e}" for k, v in m["fixed"].items())
+        p = doc.add_paragraph(f"PM-диполь — ФИКСИРОВАННОЕ поле (свипа тока нет ⇒ матрицы связи ток→коэф нет). "
+                              f"Мультипольный состав из карты (диффур): {fx}.  {m.get('note', '')}")
+        p.runs[0].font.size = Pt(9)
+        if before is not None: before.addprevious(p._p)
+        return
     ov = ", ".join(m["outputs"]); iv = ", ".join(_curname(l) for l in m["labels"])
     M = np.asarray(m["M"], float); nr, nc = M.shape
     imax = float(m.get("imax", 0.0)); r2 = m.get("r2", 1.0)
@@ -1284,12 +1332,17 @@ def _coupling_summary(doc, mats, lo):
     for j, h in enumerate(("элемент", "обмотки", "моменты", "релевантный ток, А (критерий R²≥0.95)", "R²", "диапазон |коэф|")):
         st.rows[0].cells[j].text = h
     for m in mats:
-        imax = float(m.get("imax", 0.0)); r2 = m.get("r2", 1.0)
-        crng = ";  ".join(f"|{m['outputs'][i]}|≤{np.abs(m['M'][i]).sum() * imax:.1e}" for i in range(len(m["outputs"])))
-        rng = f"|I|≤{imax:.1f}" + ("" if r2 >= 0.95 else "  (R²<0.95 — уже)")
         c = st.add_row().cells
-        c[0].text = m["name"]; c[1].text = ", ".join(m["labels"]); c[2].text = ", ".join(m["outputs"])
-        c[3].text = rng; c[4].text = f"{r2:.3f}"; c[5].text = crng
+        c[0].text = m["name"]; c[2].text = ", ".join(m["outputs"])
+        if m.get("pm"):                                              # PM: фикс. поле, диапазона нет
+            c[1].text = "— (PM)"; c[3].text = "фикс. поле"; c[4].text = "—"
+            c[5].text = ";  ".join(f"{k}={v:+.1e}" for k, v in m["fixed"].items())
+            continue
+        imax = float(m.get("imax", 0.0)); r2 = m.get("r2", 1.0)
+        c[1].text = ", ".join(m["labels"])
+        c[3].text = f"|I|≤{imax:.1f}" + ("" if r2 >= 0.95 else "  (R²<0.95 — уже)")
+        c[4].text = f"{r2:.3f}"
+        c[5].text = ";  ".join(f"|{m['outputs'][i]}|≤{np.abs(m['M'][i]).sum() * imax:.1e}" for i in range(len(m["outputs"])))
     doc.add_heading("Все матрицы", level=2)
     for m in mats:
         doc.add_heading(m["name"], level=3)
@@ -1312,46 +1365,124 @@ def _coupling_summary(doc, mats, lo):
         doc.add_paragraph(txt, style="List Bullet")
 
 
-def build_coupling_report(path=None):
+# ---- Унифицированный список матриц + таблица БД coupling_matrices (прямые + обратные, upsert) ----
+COUPLING_TABLE = "coupling_matrices.csv"
+COUPLING_HEADER = ["element", "kind", "n_windings", "n_moments", "direction",
+                   "out_label", "in_label", "value", "units", "eff_length", "i_op", "imax", "r2"]
+
+
+def _num(x):
+    """Число → строка с ТОЧКОЙ (машинная таблица, память csv-comma-decimal); пусто/None → '-'."""
+    return "-" if x in ("", None) else repr(float(x))
+
+
+def build_all_mats(elements=None, dq_bases=None):
+    """Унифицированный список матриц связи: прямые элементы (мультиполи из кика) + DQ (combo B+G) + PM (fixed,
+    состав карты). elements=None → library_windings() (весь охват); dq_bases=None → все DQ, [] → без DQ,
+    [<base>] → только эти. Каждый dict: name/kind/ltag/outputs/labels + либо (M,imax,i_op,r2,combo,L)
+    [токовый], либо (fixed,L,pm=True) [PM]."""
+    els = library_windings() if elements is None else elements
+    data_el = compute_element_matrices(els)
+    mats = []
+    for el in data_el:
+        if el.get("pm"):
+            mats.append(dict(name=el["base"], kind=el["kind"], ltag=_ltag(el["base"]), pm=True, L=el["L"],
+                             outputs=[MULTIPOLES[i] for i in el["rows"]], labels=el["labels"],
+                             fixed=el["fixed"], note="PM: фикс. поле (свипа тока нет); состав из карты."))
+        else:
+            rows = el["rows"]
+            mats.append(dict(name=el["base"], kind=el["kind"], ltag=_ltag(el["base"]), pm=False, L=el["L"],
+                             outputs=[MULTIPOLES[i] for i in rows], labels=el["labels"],
+                             M=el["M"][rows], imax=el["imax"], i_op=el["i_op"], r2=el["r2"],
+                             combo=el.get("combo"), note=""))
+    data = compute_coupling()                                        # DQ (combo-датасеты, дёшево)
+    for dq in data["dq"]:
+        if dq_bases is not None and dq["base"] not in dq_bases: continue
+        r2 = dq["R2"]; sm = dq["syms"]
+        L = LCROW.get(f"DQ_I1_1A_{dq['base']}", {}).get("eff_length", "")
+        mats.append(dict(name=f"DQ_I1_1A_{dq['base']}", kind="dq", ltag=dq["base"], pm=False, L=L,
+                         outputs=sm, labels=["I1", "I2", "I3"], M=dq["M"], imax=dq["Imax"], i_op=dq["Imax"],
+                         r2=float(min(r2)), combo=None,
+                         note="R²: " + ", ".join(f"{sm[k]}={r2[k]:.3f}" for k in range(len(sm))) +
+                              f" (рабочий ток ~{dq['Imax']:.1f}А)."))
+    return mats
+
+
+def _matrix_table_rows(m):
+    """Строки таблицы coupling_matrices для одного элемента: forward (коэф←ток) + inverse (ток←коэф);
+    PM → fixed. value с ТОЧКОЙ. Восстановление матрицы: группировка по (element,direction)."""
+    el, kind = m["name"], m["kind"]
+    outs, labs = m["outputs"], m["labels"]
+    nw, nmo = len(labs), len(outs); L = _num(m.get("L", ""))
+    if m.get("pm"):
+        return [[el, kind, "0", str(nmo), "fixed", mp, "-", repr(float(m["fixed"][mp])),
+                 "coef", L, "-", "-", "-"] for mp in outs]
+    M = np.asarray(m["M"], float); Minv = np.linalg.pinv(M)          # forward (nmo×nw), inverse (nw×nmo)
+    iop, imax, r2 = _num(m.get("i_op", "")), _num(m.get("imax", "")), _num(m.get("r2", ""))
+    rows = []
+    for i, mp in enumerate(outs):                                    # прямая: момент ← токи обмоток
+        for j, lb in enumerate(labs):
+            rows.append([el, kind, str(nw), str(nmo), "forward", mp, _curname(lb),
+                         repr(float(M[i, j])), "coef/A", L, iop, imax, r2])
+    for j, lb in enumerate(labs):                                    # обратная: ток обмотки ← моменты
+        for i, mp in enumerate(outs):
+            rows.append([el, kind, str(nw), str(nmo), "inverse", _curname(lb), mp,
+                         repr(float(Minv[j, i])), "A/coef", L, iop, imax, r2])
+    return rows
+
+
+def upsert_coupling_table(rows_by_element):
+    """UPSERT в workspace/tables/coupling_matrices.csv: нет файла → создать; есть → удалить строки ТОЛЬКО
+    обновляемых элементов (колонка element) и дописать новые. rows_by_element: dict element→list[row]."""
+    path = os.path.join(TB, COUPLING_TABLE)
+    existing = []
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            rd = list(csv.reader(f, delimiter=";"))
+        existing = rd[1:] if rd else []
+    upd = set(rows_by_element)
+    keep = [r for r in existing if r and r[0] not in upd]            # чужие элементы не трогаем
+    new = keep + [row for el in rows_by_element for row in rows_by_element[el]]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f, delimiter=";"); w.writerow(COUPLING_HEADER); w.writerows(new)
+    return path, len(upd), len(new)
+
+
+def write_coupling_table(mats):
+    """Записать/обновить таблицу БД coupling_matrices из списка mats (прямые+обратные / fixed для PM)."""
+    path, nupd, ntot = upsert_coupling_table({m["name"]: _matrix_table_rows(m) for m in mats})
+    print(f"  таблица БД: обновлено элементов {nupd}, всего строк {ntot} → workspace/tables/{COUPLING_TABLE}")
+    return path
+
+
+def build_coupling_report(path=None, mats=None):
     """Матрицы связи ток→физкоэф в Word-отчёте: (1) блок матрицы (прямая M + обратная M⁺/M⁻¹ + диапазоны) в
     главу КАЖДОГО элемента; элементы без своей главы — сборная глава; (2) сводная глава в конце (все матрицы +
-    тест-диапазоны токов/коэф = валидность, критерий R²≥0.95). Нативные формулы Word. Идемпотентно."""
+    тест-диапазоны токов/коэф = валидность, критерий R²≥0.95). Нативные формулы Word. Идемпотентно.
+    mats=None → строит по всему охвату (library) через build_all_mats."""
     from docx import Document
     from docx.shared import Pt
     import latex2omml as lo
     path = path or os.path.join(OUTDIR, "element_compare_report.docx")
-    data = compute_coupling()
-    data_el = compute_element_matrices()                 # матрицы мультиполей всех токовых элементов (кроме DQ)
+    if mats is None:
+        mats = build_all_mats()
     doc = Document(path) if os.path.exists(path) else Document()
     SENT = MATRIX_SENT
     CORR = MATRIX_CORR
     _drop_inserted_matrices(doc)                                 # снять вставленные в главы блоки матриц (маркер)
     _purge_matrix_artifacts(doc)                                 # снять все прежние приложения (сводка/корректор/сироты)
-    # унифицированный список матриц: элементы (мультиполи) + DQ (B,G)
-    mats = []
-    for el in data_el:
-        rows = el["rows"]
-        mats.append(dict(name=el["base"], kind=el["kind"], ltag=_ltag(el["base"]),
-                         outputs=[MULTIPOLES[i] for i in rows], labels=el["labels"],
-                         M=el["M"][rows], imax=el["imax"], i_op=el["i_op"], r2=el["r2"],
-                         combo=el.get("combo"), note=""))
-    for dq in data["dq"]:
-        r2 = dq["R2"]; sm = dq["syms"]
-        mats.append(dict(name=f"DQ_I1_1A_{dq['base']}", kind="dq", ltag=dq["base"],
-                         outputs=sm, labels=["I1", "I2", "I3"], M=dq["M"], imax=dq["Imax"], i_op=dq["Imax"],
-                         r2=float(min(r2)),
-                         note="R²: " + ", ".join(f"{sm[k]}={r2[k]:.3f}" for k in range(len(sm))) +
-                              f" (рабочий ток ~{dq['Imax']:.1f}А)."))
     # элементы БЕЗ своей главы в отчёте (квады, секступоли, корректор, DQ_L400) → сборная глава с матрицами
     orphan = [m for m in mats if not _has_chapter(doc, m["ltag"])]
     if orphan:
         doc.add_heading(CORR, level=1)
-        doc.add_paragraph("Прямая (ток→коэф) и обратная (коэф→ток) матрицы для токовых элементов, у которых нет "
-                          "собственной главы в отчёте: квадруполи (→G), секступоли (2 обмотки →S), корректор и DQ. "
-                          "Корректор (kicker) многофункционален: обмотки дают горизонтальный и вертикальный дипольные "
-                          "моменты, нормальный и скью квадруполь, секступоль.")
+        doc.add_paragraph("Прямая (ток→коэф) и обратная (коэф→ток) матрицы для элементов, у которых нет "
+                          "собственной главы в отчёте: квадруполи (→G), секступоли (2 обмотки →S), корректор, DQ, "
+                          "PM-диполи. Корректор (kicker) многофункционален: обмотки дают горизонтальный и вертикальный "
+                          "дипольные моменты, нормальный и скью квадруполь, секступоль. PM-диполи — фикс. поле "
+                          "(матрицы связи нет, приведён извлечённый из карты состав).")
         for m in orphan:
-            doc.add_heading(f"{m['name']}  ({m['kind']}, обмоток: {len(m['labels'])})", level=2)
+            tag = "PM, фикс. поле" if m.get("pm") else f"обмоток: {len(m['labels'])}"
+            doc.add_heading(f"{m['name']}  ({m['kind']}, {tag})", level=2)
             _matrix_block(doc, m, None, lo)
     # сводная глава В КОНЦЕ (все матрицы + диапазоны)
     doc.add_heading(SENT, level=1)
@@ -1371,7 +1502,100 @@ def build_coupling_report(path=None):
     return path
 
 
+# ---- Единый конвейер: матрицы для отдельного элемента / всей библиотеки + таблица БД + demo + Word + HTML ----
+def _resolve_single(name):
+    """<element> → (elements для compute_element_matrices, dq_bases). Prime/PM элемент по base ИЛИ DQ (L400/L1000)."""
+    for tup in library_windings():
+        if tup[0] == name:
+            return [tup], []
+    for b in ("L400", "L1000"):
+        if name == b or name.endswith(b):
+            return [], [b]
+    raise SystemExit(f"элемент '{name}' не в охвате. Ожидается имя из library (напр. QP_L_1A_L295, "
+                     f"SP_1A_L166, corrector_100A_L100, DP_sh_PM_L49) или DQ (L400 / L1000).")
+
+
+def print_matrices(mats):
+    """Печать прямой M и обратной M⁺/M⁻¹ каждого элемента (single-режим)."""
+    for m in mats:
+        if m.get("pm"):
+            print(f"  {m['name']} (PM, фикс. поле): " + ", ".join(f"{k}={v:+.4e}" for k, v in m["fixed"].items()))
+            continue
+        M = np.asarray(m["M"], float); Minv = np.linalg.pinv(M)
+        print(f"  {m['name']} ({m['kind']}): моменты={m['outputs']} обмотки={m['labels']} "
+              f"Imax={m.get('imax', 0):.1f}А R²={m.get('r2', 1):.3f}")
+        print("    M (коэф←ток):   " + " | ".join("  ".join(f"{x:+.3e}" for x in row) for row in M))
+        print("    M⁺ (ток←коэф):  " + " | ".join("  ".join(f"{x:+.3e}" for x in row) for row in Minv))
+
+
+def _config_device(eid):
+    """device_type_id первого инстанса конфига lattice_id=eid (для имени HTML-файла)."""
+    _, rows = _rows("lattice_configs.csv")
+    for r in rows:
+        if r and r[0] == str(eid):
+            return r[2]
+    return None
+
+
+def generate_html_reports(ids=None):
+    """HTML-отчёты (viz_html: 3D-магнит + траектории в относит. координатах внизу) для демо-конфигов.
+    ids=None → все id≥VIZ_START из experiments.csv. Лёгкая версия (glyph). Устойчиво к сбоям отдельных."""
+    os.makedirs(HTML_OUT, exist_ok=True)
+    try:
+        import viz_html                                            # тяжёлые pyvista/plotly — импорт лениво
+    except Exception as e:
+        print(f"  ! HTML пропущен (viz_html не импортируется: {type(e).__name__}: {e})"); return []
+    if ids is None:
+        _, ex = _rows("experiments.csv")
+        ids = sorted({int(r[0]) for r in ex if r and r[0].isdigit() and int(r[0]) >= VIZ_START})
+    done = []
+    for eid in ids:
+        dev = _config_device(eid) or str(eid)
+        out = os.path.join(HTML_OUT, f"element_{dev}.html")
+        try:
+            viz_html.main(eid, glyph=True, out=out); done.append(out)
+            print(f"  HTML id={eid} {dev} → {os.path.relpath(out, ROOT)}")
+        except Exception as e:
+            print(f"  ! HTML id={eid} {dev}: {type(e).__name__}: {e}")
+    return done
+
+
+def build_library(single=None, do_report=None, do_demo=None, do_html=None):
+    """Единый конвейер матриц связи. single=None → ВСЯ библиотека (матрицы+датасеты+таблица БД+Word+demo+HTML);
+    single=<element> → ОДИН элемент (матрица+датасет+UPSERT его записи+печать M/M⁺; Word/demo/HTML — по флагам,
+    и они пересобирают ОБЩИЕ артефакты). do_report/demo/html: None → all=True, single=False."""
+    allmode = (single is None)
+    if do_report is None: do_report = allmode
+    if do_demo is None: do_demo = allmode
+    if do_html is None: do_html = allmode
+    els, dq_bases = (None, None) if allmode else _resolve_single(single)
+    print(f"=== матрицы связи ток→физкоэф: {'ВСЯ БИБЛИОТЕКА' if allmode else single} ===")
+    mats = build_all_mats(els, dq_bases)                          # матрицы (+ свип/комбо датасеты внутри)
+    write_coupling_table(mats)                                    # таблица БД (upsert)
+    if not allmode:
+        print_matrices(mats)
+    if do_report:                                                # Word — всегда полный охват (общий артефакт)
+        build_coupling_report(mats=(mats if allmode else build_all_mats()))
+    ids = None
+    if do_demo:                                                  # демо-конфиги (setup_viz_all — весь набор)
+        try:
+            ids = [s["id"] for s in setup_viz_all()]
+        except Exception as e:
+            print(f"  ! демо-конфиги: {type(e).__name__}: {e}")
+    if do_html:
+        generate_html_reports(ids)
+    print(f"=== готово: элементов {len(mats)} ===")
+    return mats
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "library":
+        a = sys.argv[2:]; flags = {x for x in a if x.startswith("--")}; pos = [x for x in a if not x.startswith("--")]
+        kw = {}
+        for name, key in (("report", "do_report"), ("demo", "do_demo"), ("html", "do_html")):
+            if f"--{name}" in flags: kw[key] = True
+            if f"--no-{name}" in flags: kw[key] = False
+        build_library(pos[0] if pos else None, **kw); sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "matrices":
         build_coupling_report(); sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "viz-all":
