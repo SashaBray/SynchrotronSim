@@ -126,16 +126,20 @@ class Thinner:
         return np.asarray(self.pay, dtype=np.float64) if (self.pay and self.pay[0] is not None) else None
 
 
-def _cpp_full_dev(exp):
-    """C++ `MatrixTracker --full <exp> 1` → траектории (s,x,y,X,Y,Z) на частицу пучка конфига (кик-модель на
-    C++, демо-сегмент: ведущий дрейф → элемент → завершающий дрейф). Замена Python-трекинга в deviation_paths
-    для демо (по просьбе: программа расчёта траекторий = киковое C++ ядро). Порядок частиц = particle_groups."""
+def _cpp_full(exp):
+    """C++ `MatrixTracker --full <exp> 1` → read_local_npz dict (parts с S,x,y,X,Y,Z,survived; кик-модель на
+    C++, демо-сегмент: ведущий дрейф → элемент → завершающий дрейф). Единый источник для deviation_paths и
+    experiment_closure — программа расчёта траекторий = киковое C++ ядро (по просьбе)."""
     import subprocess
     r = subprocess.run([EXE_MT, "--full", str(int(exp)), "1"], capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"MatrixTracker --full упал: {r.stderr[-400:]}")
-    d = read_local_npz(os.path.join(RESULTS, f"trajectories_local_exp{int(exp)}.npz"))
-    return [np.column_stack([p["S"], p["x"], p["y"], p["X"], p["Y"], p["Z"]]) for p in d["parts"]]
+    return read_local_npz(os.path.join(RESULTS, f"trajectories_local_exp{int(exp)}.npz"))
+
+
+def _cpp_full_dev(exp):
+    """Траектории (s,x,y,X,Y,Z) на частицу пучка конфига из C++ --full. Порядок частиц = particle_groups."""
+    return [np.column_stack([p["S"], p["x"], p["y"], p["X"], p["Y"], p["Z"]]) for p in _cpp_full(exp)["parts"]]
 
 
 def deviation_paths(lattice, group, radius=1e-3, source="physical", settings=None, use_config_beam=False):
@@ -221,11 +225,14 @@ def deviation_paths(lattice, group, radius=1e-3, source="physical", settings=Non
     return out, labels, meta, mags_meta
 
 
-def experiment_closure(lattice, group, source="physical", settings=None):
-    """Сводка замыкания опыта для подписи визуализации: инжектированный пучок, 1 оборот, СЕКТОРНЫМ телом
-    (m.body()+modified_drift — как бит-в-бит). Возврат dict(closed, turns, n, survived, residual_mm).
-    closed из инжекции (замкнутое кольцо vs открытый сегмент); residual_mm — макс. поперечн. невязка
-    старт↔финиш за оборот (только для замкнутого)."""
+def experiment_closure(lattice, group, source="physical", settings=None, use_config_beam=False):
+    """Сводка замыкания опыта для подписи визуализации: инжектированный пучок, 1 оборот, СЕКТОРНЫМ телом.
+    Возврат dict(closed, turns, n, survived, residual_mm). Для ДЕМО (use_config_beam) выживание берётся из
+    C++ --full (кик-модель C++, открытый сегмент — residual нет); иначе Python (m.body()+modified_drift)."""
+    if use_config_beam:                                                # ДЕМО: счётчик выживания из C++ --full
+        parts = _cpp_full(lattice)["parts"]
+        return dict(closed=False, turns=1, n=len(parts),
+                    survived=sum(1 for p in parts if p.get("survived")), residual_mm=None)
     import beam_injection as bi
     plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings)
     finish = info.get("finish", plane); closed = info.get("closed", True)
