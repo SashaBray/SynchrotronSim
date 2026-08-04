@@ -125,7 +125,7 @@ class Thinner:
         return np.asarray(self.pay, dtype=np.float64) if (self.pay and self.pay[0] is not None) else None
 
 
-def deviation_paths(lattice, group, radius=1e-3, source="physical", settings=None):
+def deviation_paths(lattice, group, radius=1e-3, source="physical", settings=None, use_config_beam=False):
     """Отклонение ПРОБНОГО пучка от ОПОРНОЙ орбиты — 3D-траектория (глоб.) + 2D-графики x(s), y(s).
 
     Пучок [опорная(0), +x, −x, +y, −y] инжектируется В ПЛОСКОСТИ ИНЖЕКЦИИ опыта (как реальный пучок,
@@ -141,18 +141,26 @@ def deviation_paths(lattice, group, radius=1e-3, source="physical", settings=Non
     plane, ordered, _st, info = bi.inject(lattice, group, source=source, settings=settings)
     finish = info.get("finish", plane); closed = bool(info.get("closed", True))
     r = float(radius)
-    beam = [(0, 0, 0, 0, 0, 0), (r, 0, 0, 0, 0, 0), (-r, 0, 0, 0, 0, 0),
-            (0, 0, r, 0, 0, 0), (0, 0, -r, 0, 0, 0)]
-    labels = ["опорная", "+x", "−x", "+y", "−y"]
+    if use_config_beam:                                              # РЕАЛЬНЫЙ пучок опыта (напр. 13 частиц демо)
+        beam = [tuple(float(v) for v in s) for s in _st]
+        labels = ["центр"] + [str(k) for k in range(1, len(beam))]
+    else:                                                            # ПРОБНЫЙ пучок отклонения (эталон + ±x/±y)
+        beam = [(0, 0, 0, 0, 0, 0), (r, 0, 0, 0, 0, 0), (-r, 0, 0, 0, 0, 0),
+                (0, 0, r, 0, 0, 0), (0, 0, -r, 0, 0, 0)]
+        labels = ["опорная", "+x", "−x", "+y", "−y"]
 
     def gp(fr, x, y):                                                 # локальные (x,y) в рамке fr → глоб. XYZ
         p = fr[0] + x * fr[2] + y * fr[3]
         return float(p[0]), float(p[1]), float(p[2])
 
     gap_in = float((ordered[0].fr_in[0] - plane.fr_out[0]) @ plane.fr_out[1])          # плоскость → 1-й элемент
+    if use_config_beam and not closed:                               # ДЕМО: симметричный ЗАВЕРШАЮЩИЙ дрейф (= ведущему);
+        from beam_injection import PlaneMagnet                       # inject ставит финиш на выходе элемента, отодвигаем на gap_in
+        ax = np.asarray(finish.axis, float)
+        finish = PlaneMagnet(np.asarray(finish.fr_in[0], float) + gap_in * ax, ax)
     ord_gaps = [float((ordered[j].fr_in[0] - ordered[j - 1].fr_out[0]) @ ordered[j - 1].fr_out[1])
                 for j in range(1, len(ordered))]
-    gap_out = float((finish.fr_in[0] - ordered[-1].fr_out[0]) @ ordered[-1].fr_out[1]) if closed else 0.0
+    gap_out = float((finish.fr_in[0] - ordered[-1].fr_out[0]) @ ordered[-1].fr_out[1])  # ВСЕГДА (открытый: до финиш-плоскости)
 
     # МЕТАДАННЫЕ по точкам (общие): плоскость инжекции, затем на магнит (вход fr_in, выход fr_out), у
     # замкнутого — финиш=плоскость. СП по длинным прямым между ordered-элементами.
@@ -163,8 +171,9 @@ def deviation_paths(lattice, group, radius=1e-3, source="physical", settings=Non
             cur += 1
         frames += [ordered[j].fr_in, ordered[j].fr_out]
         name += [ordered[j].dev, ordered[j].dev]; idx += [j + 1, j + 1]; sp += [cur, cur]
-    if closed:
-        frames.append(finish.fr_in); name.append("плоскость инжекции (замыкание)"); idx.append(0); sp.append(cur)
+    frames.append(finish.fr_in)                                      # финиш-плоскость: у замкнутого — замыкание, у открытого — конец сегмента
+    name.append("плоскость инжекции (замыкание)" if closed else "финиш-плоскость")
+    idx.append(0 if closed else len(ordered) + 1); sp.append(cur)
     meta = dict(name=name, idx=idx, sp=sp)
     # МЕТАДАННЫЕ МАГНИТОВ (по ordered-порядку) — для ховера/маркеров магнитов в 3D.
     mc = [tuple(float(v) for v in ordered[0].center)]; mn = [ordered[0].dev]; mi = [1]; ms = [1]; c2 = 1
@@ -188,9 +197,8 @@ def deviation_paths(lattice, group, radius=1e-3, source="physical", settings=Non
                 g = gp(frames[1 + 2 * j], st[0], st[2]); dev.append((s, st[0], st[2], *g))
                 st = ordered[j].body(st); s += ordered[j].L
                 g = gp(frames[2 + 2 * j], st[0], st[2]); dev.append((s, st[0], st[2], *g))
-            if closed:                                                       # финиш → плоскость инжекции (замыкание)
-                st = mt.modified_drift(st, ordered[-1], finish); s += gap_out
-                g = gp(frames[-1], st[0], st[2]); dev.append((s, st[0], st[2], *g))
+            st = mt.modified_drift(st, ordered[-1], finish); s += gap_out    # ЗАВЕРШАЮЩИЙ дрейф (открытый: до финиш-плоскости; кольцо: замыкание)
+            g = gp(frames[-1], st[0], st[2]); dev.append((s, st[0], st[2], *g))
         except mt.ParticleLost:
             pass
         out.append(np.asarray(dev, float))

@@ -809,10 +809,29 @@ def design_current(dev, kind, recs):
     return round(design / slope, 4) if abs(slope) > 1e-30 else 0.0
 
 
+def _finalize_demo_config(lat_id, dev, kind, coeffs, Leff):
+    """Записать в демо-конфиг ФИТИРОВАННЫЕ физкоэф (mat_*) + геометрию (eff_length=Leff, kind, edges из
+    lattice-1). build_windings ОБНУЛЯЕТ mat_* (диффур берёт карту), но КИКОВАЯ модель (viz_html) читает
+    mat_* — без этого показывала бы НУЛЕВОЙ кик (прямые линии). Кик = фит ⇒ совпадает с диффуром."""
+    src = LCROW.get(dev, {})
+    matmap = {"B": "mat_B", "G": "mat_G", "S": "mat_S", "O": "mat_O", "Gv": "mat_Gv"}
+    h, rows = _rows("lattice_configs.csv"); ci = {c: i for i, c in enumerate(h)}
+    for r in rows:
+        if not (r and r[ci["lattice_id"]] == str(lat_id) and r[ci["device_type_id"]] == dev):
+            continue
+        for k, mc in matmap.items():
+            if mc in ci: r[ci[mc]] = repr(float(coeffs.get(k, 0.0)))
+        if "eff_length" in ci: r[ci["eff_length"]] = repr(float(Leff))
+        if "kind" in ci: r[ci["kind"]] = kind
+        for c in ("n_slices", "edge1", "edge2"):                     # геометрия изгибов (края) из lattice-1
+            if c in ci and src.get(c) not in (None, ""): r[ci[c]] = src[c]
+    _write("lattice_configs.csv", h, rows)
+
+
 def setup_viz(dev, cur, viz_id, Leff=None):
     """ПОСТОЯННЫЙ конфиг id=viz_id для visualize.py: диффур (trajectories_exp<id>.bin) + кик
     (trajectories_exp<id>_kick.bin) в лаб-XYZ при ТОЧНОМ токе cur ('-' ⇒ PM). Leff — общий L_eff (если None,
-    берётся из свипа). Конфиг НЕ чистится. Возврат dict со сводкой."""
+    берётся из свипа). Конфиг НЕ чистится. mat_* = фит (для viz_html кик-модели). Возврат dict со сводкой."""
     kind = LCROW[dev].get("kind") or "quad"
     bending = kind in ("dipole", "dq"); pm = (cur == "-")
     if Leff is None:
@@ -831,6 +850,7 @@ def setup_viz(dev, cur, viz_id, Leff=None):
         coeffs, mse = _coeff_at_L(dev, kind, geom, PROBES, diff_su, Leff, theta0=2.0 * yaw)
     kick_lab = kick_to_lab(track_set(dev, coeffs, Leff, kind, geom, PROBES), ref_lab)   # кик → лаб XYZ по ч0
     write_bin(os.path.join(RESULTS, f"trajectories_exp{viz_id}_kick.bin"), kick_lab)
+    _finalize_demo_config(viz_id, dev, kind, coeffs, Leff)          # mat_* + геометрия в конфиг → viz_html кик ≠ 0
     rms = math.sqrt(mse) * 1e3; cs = " ".join(f"{k}={v:+.3e}" for k, v in coeffs.items())
     print(f"  id={viz_id} {dev} ({kind}) ток={'PM' if pm else f'{cur_val:+.3f}А'}  L_eff={Leff:.4f}  {cs}  RMS={rms:.4f}мм")
     return dict(id=viz_id, dev=dev, kind=kind, cur=("PM" if pm else cur_val), Leff=Leff, coeffs=coeffs, rms=rms)
@@ -1538,8 +1558,9 @@ def _config_device(eid):
 
 
 def generate_html_reports(ids=None):
-    """HTML-отчёты (viz_html: 3D-магнит + траектории в относит. координатах внизу) для демо-конфигов.
-    ids=None → все id≥VIZ_START из experiments.csv. Лёгкая версия (glyph). Устойчиво к сбоям отдельных."""
+    """HTML-отчёты (viz_html: детальный 3D-магнит + траектории в относит. координатах внизу) для демо-конфигов.
+    ids=None → все id≥VIZ_START из experiments.csv. ПОЛНЫЙ STL (glyph=False — один магнит, показываем в
+    качестве) + РЕАЛЬНЫЙ пучок конфига (config_beam=True — те же 13 частиц, что диффур). Устойчиво к сбоям."""
     os.makedirs(HTML_OUT, exist_ok=True)
     try:
         import viz_html                                            # тяжёлые pyvista/plotly — импорт лениво
@@ -1553,7 +1574,7 @@ def generate_html_reports(ids=None):
         dev = _config_device(eid) or str(eid)
         out = os.path.join(HTML_OUT, f"element_{dev}.html")
         try:
-            viz_html.main(eid, glyph=True, out=out); done.append(out)
+            viz_html.main(eid, glyph=False, out=out, config_beam=True); done.append(out)
             print(f"  HTML id={eid} {dev} → {os.path.relpath(out, ROOT)}")
         except Exception as e:
             print(f"  ! HTML id={eid} {dev}: {type(e).__name__}: {e}")

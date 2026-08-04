@@ -241,9 +241,10 @@ def _edge_lines(mesh, feature_angle=45.0):
 EDGE_AUTO_MAX = 150_000                                       # выше этой оценки отрезков-рёбер авто-режим их ОТКЛЮЧАЕТ (тяжело)
 
 
-def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out, edges=None):
+def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out, edges=None, config_beam=False):
     """Собрать сцену и записать самодостаточный HTML. Возвращает (путь, число_треуг).
-    edges: True/False — рисовать feature-рёбра принудительно; None — АВТО (детальный полный ring — без, иначе — с)."""
+    edges: True/False — рисовать feature-рёбра принудительно; None — АВТО (детальный полный ring — без, иначе — с).
+    config_beam=True — рисовать РЕАЛЬНЫЙ пучок опыта (напр. 13 частиц демо), иначе пробный эталон+±x/±y."""
     stl_cache, grouped = {}, defaultdict(list)               # STL-кэш + группировка инстансов по устройству
     for r in lc:
         dev = r["device_type_id"]; stl = hw.get(dev, {}).get("stl_path", "-")
@@ -274,7 +275,7 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out, edges=None):
     # клик↔3D работает) + метаданные точек (имя/№/СП, глоб. XYZ) и магнитов.
     dev = dlabels = dmeta = dmags = None
     try:
-        dev, dlabels, dmeta, dmags = mte.deviation_paths(int(lat), int(group))
+        dev, dlabels, dmeta, dmags = mte.deviation_paths(int(lat), int(group), use_config_beam=config_beam)
     except Exception as e:
         print(f"[!] пробный пучок не собрался: {type(e).__name__}: {e}")
 
@@ -375,8 +376,8 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out, edges=None):
     print(f"[OK] {out}")
     print(f"     {os.path.getsize(out)/1e6:.1f} МБ ({mode}); {ntri:,} треуг. магнитов"
           f"{f', {nedge:,} рёбер' if nedge else ''}, "
-          f"{len(dev) if dev else 0} частиц (пробный пучок){' + график отклонения' if dev_html else ''}. "
-          f"Самодостаточный — крутить/зумить, передавать файлом.")
+          f"{len(dev) if dev else 0} частиц ({'пучок конфига' if config_beam else 'пробный пучок'})"
+          f"{' + график отклонения' if dev_html else ''}. Самодостаточный — крутить/зумить, передавать файлом.")
     return out, ntri
 
 
@@ -393,7 +394,7 @@ def _resolve_decimate(decimate, glyph, lc, hw):
     return 0.0
 
 
-def main(exp_id, decimate=-1.0, out=None, glyph=False, both=False, edges=None):
+def main(exp_id, decimate=-1.0, out=None, glyph=False, both=False, edges=None, config_beam=False):
     exp = {r["exp_id"]: r for r in _read("experiments.csv")}[str(exp_id)]
     lat = exp["lattice_id"]; group = exp["group_id"]
     hw = {r["device_type_id"]: r for r in _read("hardware_library.csv")}
@@ -403,10 +404,10 @@ def main(exp_id, decimate=-1.0, out=None, glyph=False, both=False, edges=None):
     base = out or os.path.join(HTML_DIR, f"exp{exp_id}_3d.html")
     stem = base[:-5] if base.lower().endswith(".html") else base
     if both:                                                 # обе версии: лёгкая (блоки) + детальная (STL)
-        build(exp_id, lat, group, hw, kind, lc, 0.0, True, stem + "_light.html", edges)
-        build(exp_id, lat, group, hw, kind, lc, _resolve_decimate(decimate, False, lc, hw), False, stem + "_detailed.html", edges)
+        build(exp_id, lat, group, hw, kind, lc, 0.0, True, stem + "_light.html", edges, config_beam)
+        build(exp_id, lat, group, hw, kind, lc, _resolve_decimate(decimate, False, lc, hw), False, stem + "_detailed.html", edges, config_beam)
     else:
-        build(exp_id, lat, group, hw, kind, lc, _resolve_decimate(decimate, glyph, lc, hw), glyph, base, edges)
+        build(exp_id, lat, group, hw, kind, lc, _resolve_decimate(decimate, glyph, lc, hw), glyph, base, edges, config_beam)
 
 
 if __name__ == "__main__":
