@@ -597,10 +597,11 @@ def _matrix_traj_pair(m):
     if m.get("pm"):
         ds, geom, yaw = _diffur_su(devs, "-", bending); lbl = "PM (фикс. поле)"
     else:
-        i_op = float(m["i_op"]); ds, geom, yaw = _diffur_su(devs, i_op, bending)
+        i0 = 0.5 * float(m["imax"])                              # показательный ток = ПОЛОВИНА релевантного диапазона (виден эффект)
+        ds, geom, yaw = _diffur_su(devs, i0, bending)
         dmax = max(max(abs(d[-1, 1]), abs(d[-1, 2])) for d in ds) * 1e3
-        cur = i_op * 6.0 / dmax if dmax > 8.0 else i_op
-        if cur != i_op:
+        cur = i0 * 6.0 / dmax if dmax > 8.0 else i0
+        if cur != i0:
             ds, geom, yaw = _diffur_su(devs, cur, bending)
         lbl = f"{cur:+.2f} А" + (" на обмотку" if len(m["devs"]) > 1 else "")
     L = float(m["L"])
@@ -652,18 +653,42 @@ def _matrix_plots(m, outdir):
     return traj_png, xy_png, lbl, rmse
 
 
+def _cumulative_r2(ts, vals):
+    """R² линейности moment(ток) НАРАСТАЮЩИМ окном по |ток| ≤ |ток строки|. В релевантной области ≈1; при
+    добавлении ПЕРЕГРУЖЕННЫХ токов (параксиальное извлечение ломается / feed-down) падает. Возврат список R²."""
+    out = []
+    for k in range(len(ts)):
+        idx = [j for j in range(len(ts)) if abs(ts[j]) <= abs(ts[k]) + 1e-9 and vals[j] == vals[j]]
+        if len(idx) < 3:
+            out.append(float("nan")); continue
+        x = np.array([ts[j] for j in idx]); y = np.array([vals[j] for j in idx])
+        sl, b = np.polyfit(x, y, 1); sst = ((y - y.mean()) ** 2).sum()
+        out.append(float(1.0 - ((y - (sl * x + b)) ** 2).sum() / sst) if sst > 1e-30 else 1.0)
+    return out
+
+
 def _scan_table_data(m):
-    """Данные таблицы: СИММЕТРИЧНЫЙ скан токов ±R, ~15 шагов, ВСЕ обмотки = скан-току (комбинация). R=±50 А;
-    для quad/dq (перегруз/насыщение) уменьшается до релевантного imax. На каждый ток: моменты = M·ток
-    (предсказание матрицы) + RMSE диффур↔кик (кик = фит-коэф при рабочем токе, масштабирован линейно по току).
-    Возврат (curs, rows) где rows[k] = (moments_tuple, rmse_mm)."""
+    """Данные таблицы: скан магнитуды t от −50 до +50 А (С ПЕРЕГРУЗОМ — виден спад R²), ~15 строк.
+    Многообмоточные: обмотки с РАЗНЫМИ весами w_j (ток обмотки I_j = t·w_j) → каждая строка = УНИКАЛЬНАЯ
+    комбинация токов (не одинаковые). На строку: моменты = M·I, RMSE диффур↔кик, R² = линейности ИЗВЛЕЧЁННОГО
+    доминантного момента (нарастающим окном по |ток|; ≈1 в релевантной области, падает при перегрузе).
+    Возврат (Icols, rows): Icols[k]=(I1,..,In), rows[k]=(moments_tuple, rmse_mm, r2)."""
     kind, devs, L = m["kind"], m["devs"], float(m["L"])
     bending = kind in ("dipole", "dq", "kicker"); keff = "dq" if kind == "kicker" else kind
-    R = min(50.0, float(m["imax"])) if kind in ("quad", "dq") else 50.0
-    curs = np.linspace(-R, R, 15)
-    Msum = np.asarray(m["M"], float).sum(axis=1)                  # момент на единицу общего тока (все обмотки = 1)
-    i_ref = float(m["i_op"])
-    ds0, geom0, yaw0 = _diffur_su(devs, i_ref, bending)           # опорный трек для фита кик-коэф
+    nw = len(devs)
+    w = np.linspace(1.0, 0.5, nw) if nw > 1 else np.array([1.0])  # РАЗНЫЕ веса обмоток → уникальные комбинации
+    ts = np.linspace(-50.0, 50.0, 15)
+    Mw = np.asarray(m["M"], float) @ w                           # момент на единицу t (в направлении w)
+    dom = int(np.argmax(np.abs(Mw))); dom_name = m["outputs"][dom]   # доминантный момент — для R² линейности
+    i_ref = 0.5 * float(m["imax"])
+
+    def combo(t):
+        wnd = [(devs[j], float(t * w[j])) for j in range(nw)]
+        yaw = tune_bend_yaw_windings(wnd) if bending else 0.0
+        trajs, geom = run_diffur_windings(wnd, yaw); ds = diff_local(trajs, geom["xstart"], bending); cleanup()
+        return ds, geom, yaw
+
+    ds0, geom0, yaw0 = combo(i_ref)                              # опорный фит кик-коэф в направлении w
     try:
         if keff == "dq":
             coeffs_ref, _ = _fit_gs_combo(devs[0], geom0, ds0, L, 2.0 * yaw0)
@@ -671,21 +696,30 @@ def _scan_table_data(m):
             coeffs_ref, _ = _coeff_at_L(devs[0], keff, geom0, PROBES, ds0, L, theta0=2.0 * yaw0)
     except Exception:
         coeffs_ref = {}
-    rows = []
-    for cur in curs:
-        moments = tuple(float(cur * Msum[i]) for i in range(len(m["outputs"])))
-        if abs(cur) < 1e-9:
-            rows.append((moments, 0.0)); continue
-        yaw = yaw0 * cur / i_ref if bending else 0.0             # изгиб ∝ ток → масштаб yaw (без пере-тюна)
-        ds, geom, _ = _diffur_su(devs, float(cur), bending, yaw=yaw)
-        coeffs = {k: v * cur / i_ref for k, v in coeffs_ref.items()}
+    Icols = [tuple(float(t * w[j]) for j in range(nw)) for t in ts]
+    raw = []; mom_ext = []
+    for t in ts:
+        moments = tuple(float(t * Mw[i]) for i in range(len(m["outputs"])))
+        try:                                                     # извлечённый доминантный момент (yaw=0) для R² линейности
+            c = extract_coeffs([(devs[j], float(t * w[j])) for j in range(nw)], L)
+            mom_ext.append(float(c[dom_name]))
+        except Exception:
+            mom_ext.append(float("nan"))
+        if abs(t) < 1e-9:
+            raw.append((moments, 0.0)); continue
+        yaw = yaw0 * t / i_ref if bending else 0.0
+        wnd = [(devs[j], float(t * w[j])) for j in range(nw)]
+        trajs, geom = run_diffur_windings(wnd, yaw); ds = diff_local(trajs, geom["xstart"], bending); cleanup()
+        coeffs = {k: v * t / i_ref for k, v in coeffs_ref.items()}
         try:
             ks = track_set(devs[0], coeffs, L, keff, geom, PROBES)
             rmse = math.sqrt(traj_mse(ds, ks)) * 1e3 if all(k is not None for k in ks) else float("nan")
         except Exception:
             rmse = float("nan")
-        rows.append((moments, rmse))
-    return curs, rows
+        raw.append((moments, rmse))
+    r2s = _cumulative_r2(ts, mom_ext)                            # R² линейности доминантного момента нарастающим окном
+    rows = [(raw[k][0], raw[k][1], r2s[k]) for k in range(len(ts))]
+    return Icols, rows
 
 
 def process_element(dev, kind, probes, outdir, bend_yaw=0.0):
@@ -1636,29 +1670,31 @@ def _section_orient(doc, landscape):
 
 
 def _data_table(doc, m):
-    """Таблица данных: столбцы = токи ОБМОТОК (I1, I2, …) + моменты (M·ток) + RMSE(диффур↔кик). Строки —
-    симметричный скан ±R (~15), все обмотки = скан-току. Многообмоточные (широкая) — на альбомной странице.
-    + строка метаданных. Только числа."""
+    """Таблица данных: столбцы = токи ОБМОТОК (I1, I2, …, уникальная комбинация на строку) + моменты (M·I) +
+    RMSE + R² (диффур↔кик). Строки — скан магнитуды ±50 А (с перегрузом → виден спад R²). Многообмоточные
+    (обмоток ≥3, широкая) — на альбомной странице, затем портретная. + строка метаданных. Только числа."""
     from docx.shared import Pt
     labels, outs = m["labels"], m["outputs"]; nw = len(labels)
-    curs, scan = _scan_table_data(m)
+    Icols, scan = _scan_table_data(m)
     wide = nw >= 3
     if wide:
         _section_orient(doc, landscape=True)
-    ncol = nw + len(outs) + 1
+    ncol = nw + len(outs) + 2
     t = doc.add_table(rows=1, cols=ncol); t.style = "Light Grid Accent 1"
     h = t.rows[0].cells
     for j, lb in enumerate(labels): h[j].text = f"{lb}, А"
     for j, mp in enumerate(outs): h[nw + j].text = mp
-    h[ncol - 1].text = "RMSE, мм"
-    for ci in range(len(curs)):
-        moments, rmse = scan[ci]
+    h[nw + len(outs)].text = "RMSE, мм"; h[ncol - 1].text = "R²"
+    for ci in range(len(Icols)):
+        moments, rmse, r2 = scan[ci]
         c = t.add_row().cells
-        for j in range(nw): c[j].text = f"{curs[ci]:.2f}"            # все обмотки = скан-току (комбинация)
+        for j in range(nw): c[j].text = f"{Icols[ci][j]:.2f}"        # ток обмотки j (уникальная комбинация)
         for j in range(len(outs)): c[nw + j].text = f"{moments[j]:+.3e}"
-        c[ncol - 1].text = "—" if (rmse != rmse) else f"{rmse:.4f}"
+        c[nw + len(outs)].text = "—" if (rmse != rmse) else f"{rmse:.4f}"
+        c[ncol - 1].text = "—" if (r2 != r2) else f"{r2:.3f}"
     if wide:
         _section_orient(doc, landscape=False)
+    doc.add_paragraph()                                             # отступ после таблицы (правка: текст не липнет)
     p = doc.add_paragraph(f"L_eff = {float(m['L']):.4f} м;  рабочий ток = {float(m['i_op']):.2f} А;  "
                           f"релевантно |I| ≤ {float(m['imax']):.1f} А (R² ≥ 0.95);  R² = {float(m['r2']):.3f}.")
     p.runs[0].font.size = Pt(9)
@@ -1679,16 +1715,18 @@ def _matrix_section(doc, m, lo):
         c = t.add_row().cells
         for j, mp in enumerate(m["outputs"]): c[j].text = f"{m['fixed'][mp]:+.4e}"
         c[len(m["outputs"])].text = "—" if (rmse0 != rmse0) else f"{rmse0:.4f}"
+        doc.add_paragraph()                                          # отступ после таблицы
     else:                                                            # прямая + обратная матрица + таблица скана
         M = np.asarray(m["M"], float); Minv = np.linalg.pinv(M); nr, nc = M.shape
         square = (nr == nc and abs(np.linalg.det(M)) > 1e-30)
         doc.add_paragraph(f"Прямая (ток→коэф):  ({ov})ᵀ = M · ({iv})ᵀ")
-        p = doc.add_paragraph(); lo.add_formula(p, _matrix_latex(M, "M"))
+        p = doc.add_paragraph(); lo.add_formula(p, _matrix_latex(M, "M")); doc.add_paragraph()   # отступ после формулы
         doc.add_paragraph(f"Обратная (коэф→ток):  ({iv})ᵀ = {'M⁻¹' if square else 'M⁺'} · ({ov})ᵀ")
-        p = doc.add_paragraph(); lo.add_formula(p, _matrix_latex(Minv, "M^{-1}" if square else "M^{+}"))
+        p = doc.add_paragraph(); lo.add_formula(p, _matrix_latex(Minv, "M^{-1}" if square else "M^{+}")); doc.add_paragraph()
         _data_table(doc, m)
     doc.add_picture(traj_png, width=Inches(6.3))
     doc.add_picture(xy_png, width=Inches(5.6))
+    doc.add_paragraph()                                              # отступ после графиков раздела
 
 
 def _ranges_table(doc, mats):
@@ -1721,6 +1759,7 @@ def build_matrix_report(path=None):
     doc.add_heading("SynchrotronSim — матрицы связи ток→физкоэф: расчёт по элементам", level=0)
     for m in mats:
         _matrix_section(doc, m, lo)
+    _section_orient(doc, landscape=True)                            # сводная таблица — на АЛЬБОМНОЙ странице
     doc.add_heading("Сводная таблица диапазонов", level=1)
     _ranges_table(doc, mats)
     try:
