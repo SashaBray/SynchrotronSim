@@ -576,54 +576,65 @@ def plot_xy(dev, kind, recs, probes, outdir):
     return png
 
 
-def _matrix_track(m, cur):
-    """Диффур 13-частичного пучка через ОБМОТКИ элемента при токе cur (на обмотку; '-' → PM фикс. поле) →
-    diff_su список (K,3)=(s,u,v). Единообразно для всех типов (вкл. корректор)."""
-    bending = m["kind"] in ("dipole", "dq")
-    wnd = [(d, cur) for d in m["devs"]]
-    yaw = tune_bend_yaw_windings(wnd) if bending else 0.0
-    trajs, geom = run_diffur_windings(wnd, yaw)
-    diff_su = diff_local(trajs, geom["xstart"], bending); cleanup()
-    return diff_su, bending
+def _matrix_traj_pair(m):
+    """Диффур + КИК траектории 13 частиц через элемент при показательном токе. Кик — фит коэф (в конвенции
+    кик-модели, совпадает с диффуром) через C++ кик-ядро: прямые — _coeff_at_L(designed-момент), изгибающие/
+    корректор — _fit_gs_combo(B,G,S) как dq. Авто-масштаб тока (увод >8мм → ток↓ до ~6мм). Возврат (diff_su,
+    kick_su, метка тока, bending). None в kick_su = потерянная частица."""
+    kind = m["kind"]; bending = kind in ("dipole", "dq", "kicker"); keff = "dq" if kind == "kicker" else kind
 
+    def diffur(cur):
+        wnd = [(m["devs"][0], "-")] if m.get("pm") else [(d, cur) for d in m["devs"]]
+        yaw = tune_bend_yaw_windings(wnd) if bending else 0.0
+        trajs, geom = run_diffur_windings(wnd, yaw)
+        return diff_local(trajs, geom["xstart"], bending), geom, yaw
 
-def _matrix_plot_track(m):
-    """Показательный трек для графиков: рабочий ток i_op; если увод пучка > 8 мм (напр. корректор при 100 А) —
-    ток уменьшается до ~6 мм увода (структура пучка остаётся читаемой). PM — фикс. поле. Возврат (diff_su,
-    метка тока, bending)."""
     if m.get("pm"):
-        ds, bending = _matrix_track(m, "-")
-        return ds, "PM (фикс. поле)", bending
-    i_op = float(m.get("i_op", 1.0)); ds, bending = _matrix_track(m, i_op)
-    dmax = max(max(abs(d[-1, 1]), abs(d[-1, 2])) for d in ds) * 1e3   # макс. увод на выходе, мм
-    cur = i_op
-    if dmax > 8.0:                                                    # слишком большой увод — уменьшить ток
-        cur = i_op * 6.0 / dmax; ds, bending = _matrix_track(m, cur)
-    lbl = f"{cur:+.2f} А" + (" на обмотку" if len(m["devs"]) > 1 else "")
-    return ds, lbl, bending
+        cur = "-"; ds, geom, yaw = diffur(cur); cleanup(); lbl = "PM (фикс. поле)"
+    else:
+        i_op = float(m["i_op"]); ds, geom, yaw = diffur(i_op); cleanup()
+        dmax = max(max(abs(d[-1, 1]), abs(d[-1, 2])) for d in ds) * 1e3
+        cur = i_op * 6.0 / dmax if dmax > 8.0 else i_op
+        if cur != i_op:
+            ds, geom, yaw = diffur(cur); cleanup()
+        lbl = f"{cur:+.2f} А" + (" на обмотку" if len(m["devs"]) > 1 else "")
+    L = float(m["L"])
+    try:                                                             # кик = фит по диффуру (совпадает конвенцией)
+        if keff == "dq":
+            coef, _ = _fit_gs_combo(m["devs"][0], geom, ds, L, 2.0 * yaw)
+        else:
+            coef, _ = _coeff_at_L(m["devs"][0], keff, geom, PROBES, ds, L, theta0=2.0 * yaw)
+        kick_su = track_set(m["devs"][0], coef, L, keff, geom, PROBES)
+    except Exception:
+        kick_su = [None] * len(PROBES)
+    return ds, kick_su, lbl, bending
 
 
 def _matrix_plots(m, outdir):
-    """Два графика элемента из ОДНОГО диффур-трека: (1) траектории x(s),y(s) в двух плоскостях; (2) сечение
-    пучка x-y до/после элемента (13 частиц). Возврат (traj_png, xy_png)."""
-    diff_su, lbl, bending = _matrix_plot_track(m)
-    # (1) траектории в двух плоскостях
+    """Два графика элемента: (1) траектории x(s),y(s) в двух плоскостях — диффур (сплошная синяя) vs кик
+    (пунктир красная); (2) сечение пучка x-y до/после (диффур o, кик ✕). Возврат (traj_png, xy_png)."""
+    diff_su, kick_su, lbl, bending = _matrix_traj_pair(m)
+    # (1) траектории в двух плоскостях: диффур + кик
     fig, (axx, axy) = plt.subplots(1, 2, figsize=(11, 4.2))
-    for d in diff_su:
-        axx.plot(d[:, 0], d[:, 1] * 1e3, color="#2b7bba", lw=1.1)
-        axy.plot(d[:, 0], d[:, 2] * 1e3, color="#2b7bba", lw=1.1)
+    for d, k in zip(diff_su, kick_su):
+        axx.plot(d[:, 0], d[:, 1] * 1e3, color="#2b7bba", lw=1.1); axy.plot(d[:, 0], d[:, 2] * 1e3, color="#2b7bba", lw=1.1)
+        if k is not None:
+            axx.plot(k[:, 0], k[:, 1] * 1e3, color="#d1495b", lw=1.0, ls="--")
+            axy.plot(k[:, 0], k[:, 2] * 1e3, color="#d1495b", lw=1.0, ls="--")
     for ax in (axx, axy): ax.set_xlabel("s, м"); ax.grid(alpha=0.3)
     axx.set_ylabel("x (гориз.), мм"); axy.set_ylabel("y (верт.), мм")
-    axx.set_title("x-плоскость"); axy.set_title("y-плоскость" + (" (откл. от опорной дуги)" if bending else ""))
+    axx.set_title("x-плоскость (— диффур, -- кик)"); axy.set_title("y-плоскость" + (" (откл. от опорной дуги)" if bending else ""))
     fig.suptitle(f"{m['name']} ({m['kind']}) — траектории пучка, ток {lbl}", fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     traj_png = os.path.join(outdir, f"mtraj_{m['name']}.png"); fig.savefig(traj_png, dpi=110); plt.close(fig)
-    # (2) сечение x-y до/после
+    # (2) сечение x-y до/после: диффур o, кик ✕
     fig, (a0, a1) = plt.subplots(1, 2, figsize=(9.5, 4.6))
-    for d in diff_su:
+    for d, k in zip(diff_su, kick_su):
         a0.scatter(d[0, 1] * 1e3, d[0, 2] * 1e3, c="#2b7bba", s=32, marker="o")
-        a1.scatter(d[-1, 1] * 1e3, d[-1, 2] * 1e3, c="#2b7bba", s=32, marker="o")
-    a0.set_title("до элемента (вход)"); a1.set_title(f"после элемента (ток {lbl})")
+        a1.scatter(d[-1, 1] * 1e3, d[-1, 2] * 1e3, c="#2b7bba", s=34, marker="o")
+        if k is not None:
+            a1.scatter(k[-1, 1] * 1e3, k[-1, 2] * 1e3, c="#d1495b", s=44, marker="x")
+    a0.set_title("до элемента (вход)"); a1.set_title(f"после элемента (o диффур, ✕ кик), ток {lbl}")
     for a in (a0, a1):
         a.set_xlabel("x (гориз.), мм"); a.set_ylabel("y (верт.), мм"); a.grid(alpha=0.3); a.set_aspect("equal", "datalim")
     fig.suptitle(f"{m['name']} ({m['kind']}) — сечение пучка x-y", fontsize=11)
