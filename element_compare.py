@@ -8,7 +8,7 @@
 прогнать C++-диффур, прочитать траекторию, вычистить временные строки. Дальше — свип токов, фит кика,
 Word-отчёт. Диффур eff_length НЕ использует (трек по карте поля) ⇒ спека «без диффурных длин» соблюдена.
 """
-import os, csv, math, struct, subprocess, shutil, sys, itertools
+import os, csv, math, struct, subprocess, shutil, sys, itertools, atexit
 import numpy as np
 import matrix_tracker as mt
 import bip_matrix as bm
@@ -17,7 +17,8 @@ from scipy.optimize import minimize, minimize_scalar
 ROOT = os.path.dirname(os.path.abspath(__file__))
 TB = os.path.join(ROOT, "workspace", "tables")
 RESULTS = os.path.join(ROOT, "workspace", "results")
-EXE = os.path.join(ROOT, "build", "SynchrotronTracker.exe")
+EXE = os.path.join(ROOT, "build", "SynchrotronTracker.exe")     # диффур (Boris по картам)
+EXE_MT = os.path.join(ROOT, "build", "MatrixTracker.exe")       # C++ киковое ядро (--serve): трекинг кик-модели
 V_BEAM = 2.967e8            # скорость пучка (particle_groups)
 ME, QE = 9.109e-31, -1.602e-19
 
@@ -164,24 +165,58 @@ def build_matrix_magnet(dev, coeffs, eff_length, kind):
     return mt.Magnet([inst], EFF, PHYS, COUP, TRANS, source="physical")
 
 
-def track_matrix(dev, coeffs, eff_length, kind, geom, probe, M=24):
-    """Трек одной частицы (u,v) через дрейф→элемент(M подэлементов для гладкой траектории)→дрейф.
-    ПРЯМОЙ элемент (ось +x): локальные x=u, y=v ≡ поперечные глоб. Возврат (K,3): (s, u, v)."""
-    u0, v0 = probe
-    st = (u0, 0.0, v0, 0.0, 0.0, DELTA)
-    di = geom["entry"] - eff_length / 2.0; do = geom["exit"] - eff_length / 2.0
-    pts = [(0.0, u0, v0)]; s = 0.0
+class _KickServer:
+    """Персистентный C++ `MatrixTracker --serve` — трекинг КИК-модели (замена Python track_matrix). Один процесс
+    на прогон, без релонча на каждый фит-eval. Запрос — все пробы за раз; ответ — траектории (s,u,v) на пробу.
+    Кик считает C++ киковое ядро; перебор коэф/токов и обработка (MSE, проекции) — на Python (по просьбе)."""
 
-    def drift_rec(st, s, L, n=8):
-        for _ in range(n):
-            st = mt._drift(st, L / n); s += L / n; pts.append((s, st[0], st[2]))
-        return st, s
-    st, s = drift_rec(st, s, di)
-    sub = build_matrix_magnet(dev, coeffs, eff_length / M, kind)
-    for _ in range(M):
-        st = sub.body(st); s += eff_length / M; pts.append((s, st[0], st[2]))
-    st, s = drift_rec(st, s, do)
-    return np.array(pts)
+    def __init__(self):
+        self.p = subprocess.Popen([EXE_MT, "--serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  text=True, cwd=ROOT, bufsize=1)
+
+    def track(self, coeffs, L, kind, geom, probes, M=24):
+        """(K,3)=(s,u,v) на пробу через дрейф di→элемент(M суб-срезов L/M)→дрейф do. edge=0, sr=0 — как
+        build_matrix_magnet (инстанс без edge/СИ); Gv=coeffs['G'] (квирк build_matrix_magnet). None = потеря."""
+        g = lambda k: repr(float(coeffs.get(k, 0.0)))              # repr(np.float64) ломает C++ парсер → float()
+        L = float(L); di = float(geom["entry"]) - L / 2.0; do = float(geom["exit"]) - L / 2.0
+        req = (f"{kind} {L!r} {M} {di!r} {do!r} 5 6000.0 0 {float(DELTA)!r} "
+               f"{g('B')} {g('G')} {g('G')} {g('S')} {g('O')} 0.0 0.0 {len(probes)}")
+        for u, v in probes:
+            req += f" {float(u)!r} {float(v)!r}"
+        self.p.stdin.write(req + "\n"); self.p.stdin.flush()
+        out = []
+        for _ in probes:
+            ln = self.p.stdout.readline().split()
+            if not ln or ln[0] == "LOST":
+                out.append(None); continue
+            n = int(ln[0]); out.append(np.asarray(ln[1:], float).reshape(n, 3))
+        return out
+
+    def close(self):
+        try:
+            if self.p.poll() is None:
+                self.p.stdin.write("QUIT\n"); self.p.stdin.flush(); self.p.wait(timeout=5)
+        except Exception:
+            self.p.kill()
+
+
+_KSRV = None
+
+
+def _kick_server():
+    """Ленивый синглтон C++ кик-сервера (закрывается atexit)."""
+    global _KSRV
+    if _KSRV is None:
+        _KSRV = _KickServer(); atexit.register(_KSRV.close)
+    return _KSRV
+
+
+def track_matrix(dev, coeffs, eff_length, kind, geom, probe, M=24):
+    """Трек одной частицы (u,v) через дрейф→элемент(M суб)→дрейф — C++ киковое ядро. Возврат (K,3): (s,u,v)."""
+    r = _kick_server().track(coeffs, eff_length, kind, geom, [probe], M)[0]
+    if r is None:
+        raise mt.ParticleLost("частица потеряна (C++ кик)")
+    return r
 
 
 def _resample(traj):
@@ -194,7 +229,9 @@ def track_set(dev, coeffs, L, kind, geom, probes):
     на сетке SGRID — тот же смысл, что Френе-проекция диффура от ч0. Иначе опорная уходит от прямой оси на
     θ·L_дрейф (~8.7мм у DP_L), т.к. track_matrix меряет x от прямой оси, а не от изогнутой дуги. Для прямых
     (опорная ≡ 0) — как есть."""
-    mats = [track_matrix(dev, coeffs, L, kind, geom, p) for p in probes]
+    mats = _kick_server().track(coeffs, L, kind, geom, probes)      # C++ кик-ядро: все пробы за один запрос
+    if any(m is None for m in mats):
+        raise mt.ParticleLost("частица потеряна (C++ кик)")
     if kind not in ("dipole", "dq"):
         return mats
     ur, vr = _resample(mats[0])                            # киковая опорная (ч0) на SGRID

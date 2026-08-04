@@ -11,6 +11,7 @@
 //              физический движок (matrix_core.h) уже готов и провалидирован.
 #include <iostream>
 #include <string>
+#include <sstream>
 #include <cstdio>
 #include <vector>
 #include <filesystem>
@@ -71,6 +72,53 @@ static int runElement(int argc, char* argv[]) {
         printState(el.body(st));
     } catch (const mc::ParticleLost&) {
         std::printf("LOST\n");
+    }
+    return 0;
+}
+
+// --serve — ПЕРСИСТЕНТНЫЙ сервер кик-траекторий (замена Python track_matrix): читает запросы из stdin, пишет
+// траектории в stdout. Без релонча на каждый фит-eval. Один запрос = одна строка:
+//   <kind> <Leff> <M> <di> <do> <nsl> <design> <sr> <delta> <B> <G> <Gv> <S> <O> <e1> <e2> <nprobe> <u1 v1 …>
+// Трек на пробу: дрейф di (8 подшагов) → элемент M суб-срезов длины Leff/M → дрейф do (8 подшагов), запись
+// (s,x,y) в каждой точке (как track_matrix: 1 старт + 8 + M + 8). Ответ на пробу: "<npts> s x y s x y …"
+// или "LOST". Строка "QUIT" завершает.
+static int runServe() {
+    std::ios::sync_with_stdio(false);
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line.empty()) continue;
+        if (line == "QUIT" || line == "quit") break;
+        std::istringstream is(line);
+        std::string kind; double Leff, di, doo, design, delta, B, G, Gv, S, O, e1, e2;
+        int M, nsl, srI, nprobe;
+        if (!(is >> kind >> Leff >> M >> di >> doo >> nsl >> design >> srI >> delta
+                 >> B >> G >> Gv >> S >> O >> e1 >> e2 >> nprobe)) {
+            std::printf("ERR parse\n"); std::fflush(stdout); continue;
+        }
+        double sL = Leff / M;                                       // длина суб-среза (как build_matrix_magnet L/M)
+        mc::Element sub = mc::Element::make(kind, sL, B, G, Gv, S, O, e1, e2, nsl, design, srI != 0);
+        std::vector<std::pair<double, double>> probes(nprobe);
+        for (int i = 0; i < nprobe; ++i) is >> probes[i].first >> probes[i].second;
+        const int nsub = 8;                                         // подшаги дрейфа (track_matrix drift_rec n=8)
+        for (int i = 0; i < nprobe; ++i) {
+            mc::State st{ probes[i].first, 0.0, probes[i].second, 0.0, 0.0, delta };
+            std::vector<double> pts; pts.reserve((size_t)3 * (1 + 2 * nsub + M));
+            auto rec = [&](double s) { pts.push_back(s); pts.push_back(st.x); pts.push_back(st.y); };
+            double s = 0.0; bool lost = false;
+            rec(0.0);
+            try {
+                for (int k = 0; k < nsub; ++k) { st = mc::drift(st, di / nsub); s += di / nsub; rec(s); }
+                for (int m = 0; m < M; ++m)    { st = sub.body(st);             s += sL;          rec(s); }
+                for (int k = 0; k < nsub; ++k) { st = mc::drift(st, doo / nsub); s += doo / nsub; rec(s); }
+            } catch (const mc::ParticleLost&) { lost = true; }
+            if (lost) { std::printf("LOST\n"); }
+            else {
+                std::printf("%d", (int)(pts.size() / 3));
+                for (double val : pts) std::printf(" %.17g", val);
+                std::printf("\n");
+            }
+        }
+        std::fflush(stdout);
     }
     return 0;
 }
@@ -231,6 +279,9 @@ int main(int argc, char* argv[]) {
     if (argc >= 2 && std::string(argv[1]) == "--element") {
         return runElement(argc, argv);
     }
+    if (argc >= 2 && std::string(argv[1]) == "--serve") {
+        return runServe();
+    }
     if ((argc >= 4) && (std::string(argv[1]) == "--track" || std::string(argv[1]) == "--full")) {
         std::string ws = findWorkspace(argv[0]);
         double x0 = (argc >= 5) ? std::stod(argv[4]) : 0.0;
@@ -245,6 +296,8 @@ int main(int argc, char* argv[]) {
                  "  --track <exp_id> <turns> [x0_mm y0_mm]\n"
                  "      автономный трек кольца: turn-by-turn у плоскости + ВЧ → .npz (mode=long, затухание)\n"
                  "  --full <exp_id> <turns> [x0_mm y0_mm]\n"
-                 "      полный трек: запись на границах элементов, x(S)/спектр/тюны → .npz (mode=full)\n";
+                 "      полный трек: запись на границах элементов, x(S)/спектр/тюны → .npz (mode=full)\n"
+                 "  --serve   персистентный сервер кик-траекторий (stdin→stdout): дрейф→элемент(M суб)→дрейф\n"
+                 "      на пробу, замена Python track_matrix в element_compare (фит/RMS/демо)\n";
     return (argc < 2) ? 1 : 0;
 }

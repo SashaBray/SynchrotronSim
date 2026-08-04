@@ -102,5 +102,64 @@ class TestMatrixCoreCpp(unittest.TestCase):
         print(f"  [с СИ 6ГэВ] макс. расхождение (диполи DQ/DL): {w:.2e}")
 
 
+class TestKickServe(unittest.TestCase):
+    """C++ `--serve` (кик-траектория дрейф→элемент(M суб-срезов L/M)→дрейф) vs Python-ЭТАЛОН — то, что
+    element_compare.track_matrix теперь считает C++ ядром. Бит-в-бит (перенос дословный)."""
+    M, NSUB, DI, DO, DELTA = 24, 8, 1.35, 1.35, -4.212140059489028e-05
+    PROBES = [(0.0, 0.0), (1e-3, 0.0), (-1e-3, 5e-4), (0.0, -1e-3)]
+
+    @classmethod
+    def setUpClass(cls):
+        import numpy as np
+        cls.np = np
+        if not os.path.exists(EXE):
+            raise unittest.SkipTest(f"C++ ядро не собрано: {EXE}")
+        cls.srv = subprocess.Popen([EXE, "--serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   text=True, bufsize=1)
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            cls.srv.stdin.write("QUIT\n"); cls.srv.stdin.flush(); cls.srv.wait(timeout=5)
+        except Exception:
+            cls.srv.kill()
+
+    def _py(self, kind, L, mats, e1, e2, probe):                    # эталон: дрейф(8)→M×Magnet.body(L/M)→дрейф(8)
+        np = self.np; mB, mG, mGv, mS, mO = mats
+        insts = [dict(x="0", y="0", z="0", yaw="0", pitch="0", roll="0", device_type_id="T", instance_id="1",
+                      eff_length=repr(L / self.M), kind=kind, n_slices=str(NSL), edge1=repr(e1), edge2=repr(e2),
+                      mat_B=repr(mB), mat_G=repr(mG), mat_Gv=repr(mGv), mat_S=repr(mS), mat_O=repr(mO))]
+        sub = mt.Magnet(insts, {}, {}, {}, {}, settings=mt.Settings())
+        u0, v0 = probe; st = (u0, 0.0, v0, 0.0, 0.0, self.DELTA); pts = [(0.0, u0, v0)]; s = 0.0
+        for _ in range(self.NSUB): st = mt._drift(st, self.DI / self.NSUB); s += self.DI / self.NSUB; pts.append((s, st[0], st[2]))
+        for _ in range(self.M):    st = sub.body(st);                       s += L / self.M;           pts.append((s, st[0], st[2]))
+        for _ in range(self.NSUB): st = mt._drift(st, self.DO / self.NSUB); s += self.DO / self.NSUB; pts.append((s, st[0], st[2]))
+        return np.array(pts)
+
+    def _cpp(self, kind, L, mats, e1, e2):
+        np = self.np; mB, mG, mGv, mS, mO = mats
+        req = (f"{kind} {L!r} {self.M} {self.DI!r} {self.DO!r} {NSL} 6000.0 0 {self.DELTA!r} "
+               f"{mB!r} {mG!r} {mGv!r} {mS!r} {mO!r} {e1!r} {e2!r} {len(self.PROBES)}")
+        for u, v in self.PROBES: req += f" {u!r} {v!r}"
+        self.srv.stdin.write(req + "\n"); self.srv.stdin.flush()
+        out = []
+        for _ in self.PROBES:
+            ln = self.srv.stdout.readline().split()
+            out.append(None if ln[0] == "LOST" else np.asarray(ln[1:], float).reshape(int(ln[0]), 3))
+        return out
+
+    def test_serve_vs_python(self):
+        worst = 0.0
+        for name, (kind, Leff, angle, k1, k2, k3, e1, e2) in ELEMENTS.items():
+            mats = (-angle / (QP * Leff) if angle else 0.0, k1 / QP, k1 / QP, k2 / QP, k3 / QP)
+            cpp = self._cpp(kind, Leff, mats, e1, e2)
+            for i, p in enumerate(self.PROBES):
+                py = self._py(kind, Leff, mats, e1, e2, p)
+                self.assertIsNotNone(cpp[i], f"{name} {p}: C++ LOST, Python нет")
+                worst = max(worst, float(self.np.abs(py - cpp[i]).max()))
+        self.assertLess(worst, 1e-10, f"--serve vs Python: Δ={worst:.2e}")
+        print(f"\n  [--serve] макс. расхождение кик-траектории C++ vs Python (6 элем × 4 пробы): {worst:.2e}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
