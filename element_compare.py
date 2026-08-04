@@ -77,7 +77,7 @@ def build_windings(windings, yaw=0.0, lat_id=TMP_LAT, grp_id=TMP_GRP, exp_id=TMP
         row = [""] * len(lat_h)
         row[ci["lattice_id"]] = str(lat_id); row[ci["instance_id"]] = str(k); row[ci["device_type_id"]] = dev
         row[ci["x"]] = repr(CENTER); row[ci["y"]] = "0.0"; row[ci["z"]] = "0.0"
-        row[ci["yaw"]] = repr(yaw); row[ci["pitch"]] = "0.0"; row[ci["roll"]] = "0.0"
+        row[ci["yaw"]] = repr(float(yaw)); row[ci["pitch"]] = "0.0"; row[ci["roll"]] = "0.0"  # float(): np.float64 repr ломает C++ stod
         row[ci["arg_val"]] = cur if cur == "-" else repr(float(cur)); row[ci["correct_coeff"]] = "1.0"  # float(): np.float64 repr ломает C++ stod
         for c in ("mat_B", "mat_G", "mat_S", "mat_O"):
             if c in ci: row[ci[c]] = "0"
@@ -576,27 +576,32 @@ def plot_xy(dev, kind, recs, probes, outdir):
     return png
 
 
+def _diffur_su(devs, cur, bending, yaw=None):
+    """Диффур пучка через обмотки (все при токе cur; '-' → PM) → (diff_su, geom, yaw). yaw=None → тюн симметрии
+    изгиба (изгибающие), иначе задан. Чистит временный конфиг."""
+    wnd = [(d, cur) for d in devs]
+    if yaw is None:
+        yaw = tune_bend_yaw_windings(wnd) if bending else 0.0
+    trajs, geom = run_diffur_windings(wnd, yaw)
+    ds = diff_local(trajs, geom["xstart"], bending); cleanup()
+    return ds, geom, yaw
+
+
 def _matrix_traj_pair(m):
     """Диффур + КИК траектории 13 частиц через элемент при показательном токе. Кик — фит коэф (в конвенции
     кик-модели, совпадает с диффуром) через C++ кик-ядро: прямые — _coeff_at_L(designed-момент), изгибающие/
     корректор — _fit_gs_combo(B,G,S) как dq. Авто-масштаб тока (увод >8мм → ток↓ до ~6мм). Возврат (diff_su,
     kick_su, метка тока, bending). None в kick_su = потерянная частица."""
     kind = m["kind"]; bending = kind in ("dipole", "dq", "kicker"); keff = "dq" if kind == "kicker" else kind
-
-    def diffur(cur):
-        wnd = [(m["devs"][0], "-")] if m.get("pm") else [(d, cur) for d in m["devs"]]
-        yaw = tune_bend_yaw_windings(wnd) if bending else 0.0
-        trajs, geom = run_diffur_windings(wnd, yaw)
-        return diff_local(trajs, geom["xstart"], bending), geom, yaw
-
+    devs = [m["devs"][0]] if m.get("pm") else m["devs"]
     if m.get("pm"):
-        cur = "-"; ds, geom, yaw = diffur(cur); cleanup(); lbl = "PM (фикс. поле)"
+        ds, geom, yaw = _diffur_su(devs, "-", bending); lbl = "PM (фикс. поле)"
     else:
-        i_op = float(m["i_op"]); ds, geom, yaw = diffur(i_op); cleanup()
+        i_op = float(m["i_op"]); ds, geom, yaw = _diffur_su(devs, i_op, bending)
         dmax = max(max(abs(d[-1, 1]), abs(d[-1, 2])) for d in ds) * 1e3
         cur = i_op * 6.0 / dmax if dmax > 8.0 else i_op
         if cur != i_op:
-            ds, geom, yaw = diffur(cur); cleanup()
+            ds, geom, yaw = _diffur_su(devs, cur, bending)
         lbl = f"{cur:+.2f} А" + (" на обмотку" if len(m["devs"]) > 1 else "")
     L = float(m["L"])
     try:                                                             # кик = фит по диффуру (совпадает конвенцией)
@@ -640,7 +645,47 @@ def _matrix_plots(m, outdir):
     fig.suptitle(f"{m['name']} ({m['kind']}) — сечение пучка x-y", fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     xy_png = os.path.join(outdir, f"mxy_{m['name']}.png"); fig.savefig(xy_png, dpi=110); plt.close(fig)
-    return traj_png, xy_png
+    try:
+        rmse = math.sqrt(traj_mse(diff_su, kick_su)) * 1e3 if all(k is not None for k in kick_su) else float("nan")
+    except Exception:
+        rmse = float("nan")
+    return traj_png, xy_png, lbl, rmse
+
+
+def _scan_table_data(m):
+    """Данные таблицы: СИММЕТРИЧНЫЙ скан токов ±R, ~15 шагов, ВСЕ обмотки = скан-току (комбинация). R=±50 А;
+    для quad/dq (перегруз/насыщение) уменьшается до релевантного imax. На каждый ток: моменты = M·ток
+    (предсказание матрицы) + RMSE диффур↔кик (кик = фит-коэф при рабочем токе, масштабирован линейно по току).
+    Возврат (curs, rows) где rows[k] = (moments_tuple, rmse_mm)."""
+    kind, devs, L = m["kind"], m["devs"], float(m["L"])
+    bending = kind in ("dipole", "dq", "kicker"); keff = "dq" if kind == "kicker" else kind
+    R = min(50.0, float(m["imax"])) if kind in ("quad", "dq") else 50.0
+    curs = np.linspace(-R, R, 15)
+    Msum = np.asarray(m["M"], float).sum(axis=1)                  # момент на единицу общего тока (все обмотки = 1)
+    i_ref = float(m["i_op"])
+    ds0, geom0, yaw0 = _diffur_su(devs, i_ref, bending)           # опорный трек для фита кик-коэф
+    try:
+        if keff == "dq":
+            coeffs_ref, _ = _fit_gs_combo(devs[0], geom0, ds0, L, 2.0 * yaw0)
+        else:
+            coeffs_ref, _ = _coeff_at_L(devs[0], keff, geom0, PROBES, ds0, L, theta0=2.0 * yaw0)
+    except Exception:
+        coeffs_ref = {}
+    rows = []
+    for cur in curs:
+        moments = tuple(float(cur * Msum[i]) for i in range(len(m["outputs"])))
+        if abs(cur) < 1e-9:
+            rows.append((moments, 0.0)); continue
+        yaw = yaw0 * cur / i_ref if bending else 0.0             # изгиб ∝ ток → масштаб yaw (без пере-тюна)
+        ds, geom, _ = _diffur_su(devs, float(cur), bending, yaw=yaw)
+        coeffs = {k: v * cur / i_ref for k, v in coeffs_ref.items()}
+        try:
+            ks = track_set(devs[0], coeffs, L, keff, geom, PROBES)
+            rmse = math.sqrt(traj_mse(ds, ks)) * 1e3 if all(k is not None for k in ks) else float("nan")
+        except Exception:
+            rmse = float("nan")
+        rows.append((moments, rmse))
+    return curs, rows
 
 
 def process_element(dev, kind, probes, outdir, bend_yaw=0.0):
@@ -1578,35 +1623,42 @@ def write_coupling_table(mats):
     return path
 
 
-def _sweep_table(doc, m):
-    """Таблица данных, из которых построена матрица (только числа): прямой элемент — свип лестницы токов →
-    извлечённые designed-моменты по обмоткам; DQ — выборка комбо-датасета (I1,I2,I3 → моменты). + строка
-    метаданных (L_eff, рабочий ток, релевантный диапазон, R²)."""
+def _section_orient(doc, landscape):
+    """Новая секция (с новой страницы) с ориентацией landscape/portrait — для широких таблиц многообмоточных."""
+    from docx.enum.section import WD_ORIENT, WD_SECTION
+    s = doc.add_section(WD_SECTION.NEW_PAGE)
+    w, h = s.page_width, s.page_height
+    if landscape:
+        s.orientation = WD_ORIENT.LANDSCAPE; s.page_width, s.page_height = max(w, h), min(w, h)
+    else:
+        s.orientation = WD_ORIENT.PORTRAIT; s.page_width, s.page_height = min(w, h), max(w, h)
+    return s
+
+
+def _data_table(doc, m):
+    """Таблица данных: столбцы = токи ОБМОТОК (I1, I2, …) + моменты (M·ток) + RMSE(диффур↔кик). Строки —
+    симметричный скан ±R (~15), все обмотки = скан-току. Многообмоточные (широкая) — на альбомной странице.
+    + строка метаданных. Только числа."""
     from docx.shared import Pt
-    outs = m["outputs"]
-    if "curs" in m:                                                  # прямой элемент: лестница i_op·fracs
-        curs, Vals, rows, labels = m["curs"], m["Vals"], m["rows"], m["labels"]
-        t = doc.add_table(rows=1, cols=2 + len(outs)); t.style = "Light Grid Accent 1"
-        h = t.rows[0].cells; h[0].text = "обмотка"; h[1].text = "ток, А"
-        for j, mp in enumerate(outs): h[2 + j].text = mp
-        for wj, lbl in enumerate(labels):
-            for ti, cur in enumerate(curs):
-                c = t.add_row().cells; c[0].text = lbl; c[1].text = f"{curs[ti]:.2f}"
-                for j, i in enumerate(rows): c[2 + j].text = f"{Vals[i, wj, ti]:+.4e}"
-    else:                                                            # DQ: выборка комбо-датасета
-        try:
-            X, Y, syms = _load_combo(m["ltag"])
-            t = doc.add_table(rows=1, cols=3 + len(syms)); t.style = "Light Grid Accent 1"
-            h = t.rows[0].cells
-            for j, nm in enumerate(("I1, А", "I2, А", "I3, А")): h[j].text = nm
-            for j, sy in enumerate(syms): h[3 + j].text = sy
-            step = max(1, len(X) // 8)
-            for k in range(0, len(X), step):
-                c = t.add_row().cells
-                for j in range(3): c[j].text = f"{X[k, j]:.2f}"
-                for j in range(len(syms)): c[3 + j].text = f"{Y[k, j]:+.4e}"
-        except Exception:
-            pass
+    labels, outs = m["labels"], m["outputs"]; nw = len(labels)
+    curs, scan = _scan_table_data(m)
+    wide = nw >= 3
+    if wide:
+        _section_orient(doc, landscape=True)
+    ncol = nw + len(outs) + 1
+    t = doc.add_table(rows=1, cols=ncol); t.style = "Light Grid Accent 1"
+    h = t.rows[0].cells
+    for j, lb in enumerate(labels): h[j].text = f"{lb}, А"
+    for j, mp in enumerate(outs): h[nw + j].text = mp
+    h[ncol - 1].text = "RMSE, мм"
+    for ci in range(len(curs)):
+        moments, rmse = scan[ci]
+        c = t.add_row().cells
+        for j in range(nw): c[j].text = f"{curs[ci]:.2f}"            # все обмотки = скан-току (комбинация)
+        for j in range(len(outs)): c[nw + j].text = f"{moments[j]:+.3e}"
+        c[ncol - 1].text = "—" if (rmse != rmse) else f"{rmse:.4f}"
+    if wide:
+        _section_orient(doc, landscape=False)
     p = doc.add_paragraph(f"L_eff = {float(m['L']):.4f} м;  рабочий ток = {float(m['i_op']):.2f} А;  "
                           f"релевантно |I| ≤ {float(m['imax']):.1f} А (R² ≥ 0.95);  R² = {float(m['r2']):.3f}.")
     p.runs[0].font.size = Pt(9)
@@ -1618,21 +1670,23 @@ def _matrix_section(doc, m, lo):
     from docx.shared import Inches
     doc.add_heading(f"{m['name']}  ({m['kind']}, обмоток: {len(m['labels'])})", level=1)
     ov = ", ".join(m["outputs"]); iv = ", ".join(_curname(l) for l in m["labels"])
-    if m.get("pm"):                                                  # PM — фикс. состав таблицей (свипа нет)
-        doc.add_paragraph(f"PM-диполь, фиксированное поле.  Мультипольный состав ({ov}):")
-        t = doc.add_table(rows=1, cols=len(m["outputs"])); t.style = "Light Grid Accent 1"
+    traj_png, xy_png, lbl, rmse0 = _matrix_plots(m, OUTDIR)          # графики + RMSE при показательном токе
+    if m.get("pm"):                                                  # PM — фикс. состав + RMSE (свипа нет)
+        doc.add_paragraph(f"PM-диполь, фиксированное поле.  Мультипольный состав ({ov}) и RMSE диффур↔кик:")
+        t = doc.add_table(rows=1, cols=len(m["outputs"]) + 1); t.style = "Light Grid Accent 1"
         for j, mp in enumerate(m["outputs"]): t.rows[0].cells[j].text = mp
+        t.rows[0].cells[len(m["outputs"])].text = "RMSE, мм"
         c = t.add_row().cells
         for j, mp in enumerate(m["outputs"]): c[j].text = f"{m['fixed'][mp]:+.4e}"
-    else:                                                            # прямая + обратная матрица + свип
+        c[len(m["outputs"])].text = "—" if (rmse0 != rmse0) else f"{rmse0:.4f}"
+    else:                                                            # прямая + обратная матрица + таблица скана
         M = np.asarray(m["M"], float); Minv = np.linalg.pinv(M); nr, nc = M.shape
         square = (nr == nc and abs(np.linalg.det(M)) > 1e-30)
         doc.add_paragraph(f"Прямая (ток→коэф):  ({ov})ᵀ = M · ({iv})ᵀ")
         p = doc.add_paragraph(); lo.add_formula(p, _matrix_latex(M, "M"))
         doc.add_paragraph(f"Обратная (коэф→ток):  ({iv})ᵀ = {'M⁻¹' if square else 'M⁺'} · ({ov})ᵀ")
         p = doc.add_paragraph(); lo.add_formula(p, _matrix_latex(Minv, "M^{-1}" if square else "M^{+}"))
-        _sweep_table(doc, m)
-    traj_png, xy_png = _matrix_plots(m, OUTDIR)
+        _data_table(doc, m)
     doc.add_picture(traj_png, width=Inches(6.3))
     doc.add_picture(xy_png, width=Inches(5.6))
 
