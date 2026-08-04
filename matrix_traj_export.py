@@ -15,6 +15,7 @@ import matrix_tracker as mt
 import matrix_optimizer as mo
 
 RESULTS = os.path.join("workspace", "results")
+EXE_MT = os.path.join("build", "MatrixTracker.exe")            # C++ киковое ядро (--full) для демо-траекторий
 TB = mt.TB
 
 
@@ -125,6 +126,18 @@ class Thinner:
         return np.asarray(self.pay, dtype=np.float64) if (self.pay and self.pay[0] is not None) else None
 
 
+def _cpp_full_dev(exp):
+    """C++ `MatrixTracker --full <exp> 1` → траектории (s,x,y,X,Y,Z) на частицу пучка конфига (кик-модель на
+    C++, демо-сегмент: ведущий дрейф → элемент → завершающий дрейф). Замена Python-трекинга в deviation_paths
+    для демо (по просьбе: программа расчёта траекторий = киковое C++ ядро). Порядок частиц = particle_groups."""
+    import subprocess
+    r = subprocess.run([EXE_MT, "--full", str(int(exp)), "1"], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"MatrixTracker --full упал: {r.stderr[-400:]}")
+    d = read_local_npz(os.path.join(RESULTS, f"trajectories_local_exp{int(exp)}.npz"))
+    return [np.column_stack([p["S"], p["x"], p["y"], p["X"], p["Y"], p["Z"]]) for p in d["parts"]]
+
+
 def deviation_paths(lattice, group, radius=1e-3, source="physical", settings=None, use_config_beam=False):
     """Отклонение ПРОБНОГО пучка от ОПОРНОЙ орбиты — 3D-траектория (глоб.) + 2D-графики x(s), y(s).
 
@@ -182,6 +195,9 @@ def deviation_paths(lattice, group, radius=1e-3, source="physical", settings=Non
             c2 += 1
         mc.append(tuple(float(v) for v in ordered[j].center)); mn.append(ordered[j].dev); mi.append(j + 1); ms.append(c2)
     mags_meta = dict(center=mc, name=mn, idx=mi, sp=ms)
+
+    if use_config_beam:                                              # ДЕМО: трекинг кик-модели на C++ (--full), а не Python
+        return _cpp_full_dev(lattice), labels, meta, mags_meta      # геометрия/мета — Python; траектории — C++ киковое ядро
 
     out = []
     for st0 in beam:                                                  # на точку: (s, x, y, X, Y, Z) — локал.+глоб.

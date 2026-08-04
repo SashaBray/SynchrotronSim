@@ -392,6 +392,12 @@ inline FullResult trackFull(const Injection& inj, const State& st0, int n_turns,
             if (inj.closed) {                                           // финиш = плоскость (замыкание)
                 st = modified_drift(st, O.back().fr_out, inj.finish.fr_in, inj.finish.same_plane_as_prev);
                 rec(base + inj.ring_len, st, 0, inj.finish.fr_in);
+            } else {                                                    // ОТКРЫТЫЙ (демо): симметричный ЗАВЕРШАЮЩИЙ дрейф = ведущему ea[0]
+                double trail = ea[0];                                   // inject ставит финиш на выходе элемента; отодвигаем на ea[0] (=gap_out при ENTRY=EXIT)
+                Frame ftr = inj.finish.fr_in;                           // финиш-плоскость по BOX-оси (как Python bi.inject), НЕ tilted fr_out
+                ftr.p = ftr.p + ftr.axis * trail;
+                st = modified_drift(st, O.back().fr_out, ftr, false);
+                rec(base + inj.ring_len + trail, st, (int64_t)(O.size() + 1), ftr);
             }
             r.surv_turns = turn + 1;
         }
