@@ -587,6 +587,16 @@ def _diffur_su(devs, cur, bending, yaw=None):
     return ds, geom, yaw
 
 
+def _dq_fit(m, geom, ds, L, theta0):
+    """Фит кик-коэф изгибающего (DQ/корректор): с СЕКСТУПОЛЕМ (B,G,S, Nelder-Mead) если 'S' среди выходов
+    элемента, иначе только диполь+квадруполь (B,G, 1D-скан). Так база DQ ↔ вариант «+секступольный кик»
+    сравниваются честно (тот же диффур, разное ядро кика)."""
+    main = m["devs"][0]
+    if "S" in m["outputs"]:
+        return _fit_gs_combo(main, geom, ds, L, theta0)
+    return _coeff_at_L(main, "dq", geom, PROBES, ds, L, theta0=theta0)
+
+
 def _matrix_traj_at(m, cur):
     """Диффур + КИК траектории 13 частиц при токе cur (все обмотки; '-' → PM фикс. поле). Кик — фит коэф по
     диффуру (совпадает конвенцией) через C++ кик-ядро. Возврат (diff_su, kick_su, bending). None = потеря."""
@@ -596,7 +606,7 @@ def _matrix_traj_at(m, cur):
     L = float(m["L"])
     try:
         if keff == "dq":
-            coef, _ = _fit_gs_combo(m["devs"][0], geom, ds, L, 2.0 * yaw)
+            coef, _ = _dq_fit(m, geom, ds, L, 2.0 * yaw)
         else:
             coef, _ = _coeff_at_L(m["devs"][0], keff, geom, PROBES, ds, L, theta0=2.0 * yaw)
         kick_su = track_set(m["devs"][0], coef, L, keff, geom, PROBES)
@@ -713,7 +723,7 @@ def _scan_table_data(m):
     ds0, geom0, yaw0 = combo(i_ref)                              # опорный фит кик-коэф в направлении w
     try:
         if keff == "dq":
-            coeffs_ref, _ = _fit_gs_combo(devs[0], geom0, ds0, L, 2.0 * yaw0)
+            coeffs_ref, _ = _dq_fit(m, geom0, ds0, L, 2.0 * yaw0)   # база DQ → B,G;  sext-вариант → B,G,S
         else:
             coeffs_ref, _ = _coeff_at_L(devs[0], keff, geom0, PROBES, ds0, L, theta0=2.0 * yaw0)
     except Exception:
@@ -907,13 +917,13 @@ def _fit_gs_combo(main, geom, diff_su, L, theta0):
     return {"B": B, "G": float(res.x[0]), "S": float(res.x[1])}, float(res.fun)
 
 
-def save_combo_dataset(base, Leff, recs, outdir):
+def save_combo_dataset(base, Leff, recs, outdir, suffix=""):
     """CSV комбо: I1;I2;I3;B;G[;S];RMS (запятая-десятичная для Excel, ; поле). Столбец S — только если фит
-    его давал (sext=True). L_eff общий в шапке."""
+    его давал (sext=True). L_eff общий в шапке. suffix='_sext' → отдельный файл варианта с секступолем."""
     os.makedirs(outdir, exist_ok=True)
     has_s = bool(recs) and "S" in recs[0]["coeffs"]
     keys = ["B", "G", "S"] if has_s else ["B", "G"]
-    path = os.path.join(outdir, f"combo_dataset_{base}.csv")
+    path = os.path.join(outdir, f"combo_dataset_{base}{suffix}.csv")
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";")
         w.writerow(["L_eff_общий_м", str(Leff).replace(".", ",")]); w.writerow([])
@@ -967,7 +977,7 @@ def run_dq_combo(base="L400", ngrid=4, sext=False):
                 shutil.copy2(b, os.path.join(TB, f))
     rmss = [r["rms_mm"] for r in recs]
     print(f"\nГОТОВО комбо {base}: {len(recs)}/{N3}, RMS {min(rmss):.4f}..{max(rmss):.4f}мм")
-    save_combo_dataset(base, Leff, recs, OUTDIR)
+    save_combo_dataset(base, Leff, recs, OUTDIR, suffix="_sext" if sext else "")
     return recs
 
 
@@ -1319,10 +1329,11 @@ def compute_element_matrices(elements=None):
     return res
 
 
-def _load_combo(base):
-    """Возврат (X:токи Nx3, Y:выходы NxK, syms:имена выходов). Выходы — по ЗАГОЛОВКУ (B,G или B,G,S)."""
+def _load_combo(base, suffix=""):
+    """Возврат (X:токи Nx3, Y:выходы NxK, syms:имена выходов). Выходы — по ЗАГОЛОВКУ (B,G или B,G,S).
+    suffix='_sext' → вариант с секступольным киком."""
     fv = lambda s: float(s.replace(",", "."))
-    rows = list(csv.reader(open(os.path.join(OUTDIR, f"combo_dataset_{base}.csv"), encoding="utf-8-sig"), delimiter=";"))
+    rows = list(csv.reader(open(os.path.join(OUTDIR, f"combo_dataset_{base}{suffix}.csv"), encoding="utf-8-sig"), delimiter=";"))
     hdr = next(r for r in rows if r and r[0] == "I1_А")
     syms = [c for c in hdr[3:] if c in ("B", "G", "S", "O")]           # выходные коэф. (без RMS)
     d = [r for r in rows if len(r) >= 4 + len(syms) and r[0] and r[0][0] in "+-0123456789" and "," in r[0]]
@@ -1347,12 +1358,13 @@ def compute_coupling():
     (K=число выходов в датасете). Одиночные: coef = k·I (скаляр). Возврат dict(dq=[…], single=[…])."""
     out = {"dq": [], "single": []}
     for base in ("L400", "L1000"):
-        if not os.path.exists(os.path.join(OUTDIR, f"combo_dataset_{base}.csv")):
-            continue
-        X, Y, syms = _load_combo(base)
-        MT = np.linalg.lstsq(X, Y, rcond=None)[0]                    # Y = X·MTᵀ, MT: 3×K
-        R2 = [_r2(Y[:, k], X @ MT[:, k]) for k in range(Y.shape[1])]
-        out["dq"].append(dict(base=base, M=MT.T, R2=R2, syms=syms, Imax=float(np.abs(X).max())))
+        for suffix, sk in (("", False), ("_sext", True)):           # база (B,G) + вариант с секступольным киком (B,G,S)
+            if not os.path.exists(os.path.join(OUTDIR, f"combo_dataset_{base}{suffix}.csv")):
+                continue
+            X, Y, syms = _load_combo(base, suffix)
+            MT = np.linalg.lstsq(X, Y, rcond=None)[0]                # Y = X·MTᵀ, MT: 3×K
+            R2 = [_r2(Y[:, k], X @ MT[:, k]) for k in range(Y.shape[1])]
+            out["dq"].append(dict(base=base, sext=sk, M=MT.T, R2=R2, syms=syms, Imax=float(np.abs(X).max())))
     dom = {"quad": "G", "sext": "S", "oct": "O"}
     for dev, kind in candidates(("quad", "sext", "oct")):
         if not os.path.exists(os.path.join(OUTDIR, f"dataset_{dev}.csv")):
@@ -1623,10 +1635,11 @@ def build_all_mats(elements=None, dq_bases=None):
     data = compute_coupling()                                        # DQ (combo-датасеты, дёшево)
     for dq in data["dq"]:
         if dq_bases is not None and dq["base"] not in dq_bases: continue
-        r2 = dq["R2"]; sm = dq["syms"]; base = dq["base"]
+        r2 = dq["R2"]; sm = dq["syms"]; base = dq["base"]; sk = dq.get("sext", False)
         L = LCROW.get(f"DQ_I1_1A_{base}", {}).get("eff_length", "")
         devs = [f"DQ_{w}_1A_{base}" for w in ("I1", "I2", "I3")]
-        mats.append(dict(name=f"DQ_I1_1A_{base}", kind="dq", ltag=base, pm=False, L=L, devs=devs,
+        nm = f"DQ_I1_1A_{base}" + ("_sext" if sk else "")            # sext-вариант — отдельное имя/раздел
+        mats.append(dict(name=nm, kind="dq", ltag=base, pm=False, L=L, devs=devs, sext_kick=sk,
                          outputs=sm, labels=["I1", "I2", "I3"], M=dq["M"], imax=dq["Imax"], i_op=dq["Imax"],
                          r2=float(min(r2)), combo=None, note=""))
     return mats
@@ -1698,22 +1711,29 @@ def _data_table(doc, m):
     from docx.shared import Pt
     labels, outs = m["labels"], m["outputs"]; nw = len(labels)
     Icols, scan = _scan_table_data(m)
+    has_b = "B" in outs; bi = outs.index("B") if has_b else -1        # изгибающий → колонка радиуса ρ=1/(B·QP)
     wide = nw >= 3
     if wide:
         _section_orient(doc, landscape=True)
-    ncol = nw + len(outs) + 2
+    ncol = nw + len(outs) + (1 if has_b else 0) + 2
     t = doc.add_table(rows=1, cols=ncol); t.style = "Light Grid Accent 1"
     h = t.rows[0].cells
     for j, lb in enumerate(labels): h[j].text = f"{lb}, А"
     for j, mp in enumerate(outs): h[nw + j].text = mp
-    h[nw + len(outs)].text = "RMSE, мм"; h[ncol - 1].text = "R²"
+    col = nw + len(outs)
+    if has_b: h[col].text = "ρ (при B), м"; col += 1
+    h[col].text = "RMSE, мм"; h[col + 1].text = "R²"
     for ci in range(len(Icols)):
         moments, rmse, r2 = scan[ci]
         c = t.add_row().cells
         for j in range(nw): c[j].text = f"{Icols[ci][j]:.2f}"        # ток обмотки j (уникальная комбинация)
         for j in range(len(outs)): c[nw + j].text = f"{moments[j]:+.3e}"
-        c[nw + len(outs)].text = "—" if (rmse != rmse) else f"{rmse:.4f}"
-        c[ncol - 1].text = "—" if (r2 != r2) else f"{r2:.3f}"
+        col = nw + len(outs)
+        if has_b:                                                    # радиус поворота от изгибающего момента B строки
+            Bv = moments[bi]; rho = abs(1.0 / (Bv * mt.QP)) if abs(Bv) > 1e-30 else float("inf")
+            c[col].text = "—" if (rho > 1e5) else f"{rho:.2f}"; col += 1
+        c[col].text = "—" if (rmse != rmse) else f"{rmse:.4f}"
+        c[col + 1].text = "—" if (r2 != r2) else f"{r2:.3f}"
     if wide:
         _section_orient(doc, landscape=False)
     doc.add_paragraph()                                             # отступ после таблицы (правка: текст не липнет)
@@ -1728,15 +1748,27 @@ def _matrix_section(doc, m, lo):
     from docx.shared import Inches
     doc.add_heading(f"{m['name']}  ({m['kind']}, обмоток: {len(m['labels'])})", level=1)
     ov = ", ".join(m["outputs"]); iv = ", ".join(_curname(l) for l in m["labels"])
+    if m["kind"] == "dq":                                             # факт-подпись ядра кика (база vs +секступоль)
+        core = "диполь + квадруполь + секступоль" if m.get("sext_kick") else "диполь + квадруполь"
+        doc.add_paragraph(f"Ядро кика: {core} (моменты {ov}).")
     traj_pngs, xy_pngs, rmse0 = _matrix_plots(m, OUTDIR)           # траектории + сечения x-y на КАЖДЫЙ ток + RMSE
-    if m.get("pm"):                                                  # PM — фикс. состав + RMSE (свипа нет)
-        doc.add_paragraph(f"PM-диполь, фиксированное поле.  Мультипольный состав ({ov}) и RMSE диффур↔кик:")
-        t = doc.add_table(rows=1, cols=len(m["outputs"]) + 1); t.style = "Light Grid Accent 1"
-        for j, mp in enumerate(m["outputs"]): t.rows[0].cells[j].text = mp
-        t.rows[0].cells[len(m["outputs"])].text = "RMSE, мм"
+    if m.get("pm"):                                                  # PM — фикс. состав + радиус изгиба + RMSE (свипа нет)
+        nmo = len(m["outputs"]); has_b = "B" in m["outputs"]
+        extra = ["θ (изгиб), мрад", "ρ (при B), м"] if has_b else []
+        doc.add_paragraph(f"PM-диполь, фиксированное поле.  Мультипольный состав ({ov}), "
+                          f"радиус поворота при проектном B и RMSE диффур↔кик:")
+        ncol = nmo + len(extra) + 1
+        t = doc.add_table(rows=1, cols=ncol); t.style = "Light Grid Accent 1"; hd = t.rows[0].cells
+        for j, mp in enumerate(m["outputs"]): hd[j].text = mp
+        for j, e in enumerate(extra): hd[nmo + j].text = e
+        hd[ncol - 1].text = "RMSE, мм"
         c = t.add_row().cells
         for j, mp in enumerate(m["outputs"]): c[j].text = f"{m['fixed'][mp]:+.4e}"
-        c[len(m["outputs"])].text = "—" if (rmse0 != rmse0) else f"{rmse0:.4f}"
+        if has_b:                                                     # θ = B·QP·L_eff;  ρ = L/θ = 1/(B·QP)
+            B = float(m["fixed"]["B"]); theta = B * mt.QP * float(m["L"])
+            c[nmo].text = f"{theta * 1e3:+.4f}"
+            c[nmo + 1].text = "∞" if abs(B) < 1e-30 else f"{abs(1.0 / (B * mt.QP)):.3f}"
+        c[ncol - 1].text = "—" if (rmse0 != rmse0) else f"{rmse0:.4f}"
         doc.add_paragraph()                                          # отступ после таблицы
     else:                                                            # прямая + обратная матрица + таблица скана
         M = np.asarray(m["M"], float); Minv = np.linalg.pinv(M); nr, nc = M.shape
@@ -1956,7 +1988,8 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "combo":
         base = sys.argv[2] if len(sys.argv) > 2 else "L400"
         ng = int(sys.argv[3]) if len(sys.argv) > 3 else 4
-        run_dq_combo(base, ng); sys.exit(0)
+        sext = "sext" in sys.argv[4:]                              # combo <base> <ng> [sext] → вариант B,G,S
+        run_dq_combo(base, ng, sext=sext); sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "all":
         kinds = tuple(sys.argv[2].split(",")) if len(sys.argv) > 2 else ("quad", "sext", "oct")
         run_all(kinds); sys.exit(0)
