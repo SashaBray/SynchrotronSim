@@ -576,6 +576,62 @@ def plot_xy(dev, kind, recs, probes, outdir):
     return png
 
 
+def _matrix_track(m, cur):
+    """Диффур 13-частичного пучка через ОБМОТКИ элемента при токе cur (на обмотку; '-' → PM фикс. поле) →
+    diff_su список (K,3)=(s,u,v). Единообразно для всех типов (вкл. корректор)."""
+    bending = m["kind"] in ("dipole", "dq")
+    wnd = [(d, cur) for d in m["devs"]]
+    yaw = tune_bend_yaw_windings(wnd) if bending else 0.0
+    trajs, geom = run_diffur_windings(wnd, yaw)
+    diff_su = diff_local(trajs, geom["xstart"], bending); cleanup()
+    return diff_su, bending
+
+
+def _matrix_plot_track(m):
+    """Показательный трек для графиков: рабочий ток i_op; если увод пучка > 8 мм (напр. корректор при 100 А) —
+    ток уменьшается до ~6 мм увода (структура пучка остаётся читаемой). PM — фикс. поле. Возврат (diff_su,
+    метка тока, bending)."""
+    if m.get("pm"):
+        ds, bending = _matrix_track(m, "-")
+        return ds, "PM (фикс. поле)", bending
+    i_op = float(m.get("i_op", 1.0)); ds, bending = _matrix_track(m, i_op)
+    dmax = max(max(abs(d[-1, 1]), abs(d[-1, 2])) for d in ds) * 1e3   # макс. увод на выходе, мм
+    cur = i_op
+    if dmax > 8.0:                                                    # слишком большой увод — уменьшить ток
+        cur = i_op * 6.0 / dmax; ds, bending = _matrix_track(m, cur)
+    lbl = f"{cur:+.2f} А" + (" на обмотку" if len(m["devs"]) > 1 else "")
+    return ds, lbl, bending
+
+
+def _matrix_plots(m, outdir):
+    """Два графика элемента из ОДНОГО диффур-трека: (1) траектории x(s),y(s) в двух плоскостях; (2) сечение
+    пучка x-y до/после элемента (13 частиц). Возврат (traj_png, xy_png)."""
+    diff_su, lbl, bending = _matrix_plot_track(m)
+    # (1) траектории в двух плоскостях
+    fig, (axx, axy) = plt.subplots(1, 2, figsize=(11, 4.2))
+    for d in diff_su:
+        axx.plot(d[:, 0], d[:, 1] * 1e3, color="#2b7bba", lw=1.1)
+        axy.plot(d[:, 0], d[:, 2] * 1e3, color="#2b7bba", lw=1.1)
+    for ax in (axx, axy): ax.set_xlabel("s, м"); ax.grid(alpha=0.3)
+    axx.set_ylabel("x (гориз.), мм"); axy.set_ylabel("y (верт.), мм")
+    axx.set_title("x-плоскость"); axy.set_title("y-плоскость" + (" (откл. от опорной дуги)" if bending else ""))
+    fig.suptitle(f"{m['name']} ({m['kind']}) — траектории пучка, ток {lbl}", fontsize=11)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    traj_png = os.path.join(outdir, f"mtraj_{m['name']}.png"); fig.savefig(traj_png, dpi=110); plt.close(fig)
+    # (2) сечение x-y до/после
+    fig, (a0, a1) = plt.subplots(1, 2, figsize=(9.5, 4.6))
+    for d in diff_su:
+        a0.scatter(d[0, 1] * 1e3, d[0, 2] * 1e3, c="#2b7bba", s=32, marker="o")
+        a1.scatter(d[-1, 1] * 1e3, d[-1, 2] * 1e3, c="#2b7bba", s=32, marker="o")
+    a0.set_title("до элемента (вход)"); a1.set_title(f"после элемента (ток {lbl})")
+    for a in (a0, a1):
+        a.set_xlabel("x (гориз.), мм"); a.set_ylabel("y (верт.), мм"); a.grid(alpha=0.3); a.set_aspect("equal", "datalim")
+    fig.suptitle(f"{m['name']} ({m['kind']}) — сечение пучка x-y", fontsize=11)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    xy_png = os.path.join(outdir, f"mxy_{m['name']}.png"); fig.savefig(xy_png, dpi=110); plt.close(fig)
+    return traj_png, xy_png
+
+
 def process_element(dev, kind, probes, outdir, bend_yaw=0.0):
     """Полный опыт по одному элементу: свип+фит → датасет + графики. Возврат dict для отчёта."""
     print(f"\n=== элемент {dev} ({kind}) ===")
@@ -1129,7 +1185,7 @@ def compute_element_matrices(elements=None):
         if is_pm(devs[0]):                                           # PM: фикс. поле, без свипа → ФИКС. состав
             c = extract_coeffs([(devs[0], "-")], L)
             rows = [MULTIPOLES.index(mp) for mp in DESIGNED_MOMENT.get(kind, ["B", "G"])]
-            res.append(dict(base=base, kind=kind, labels=labels, L=L, pm=True, rows=rows,
+            res.append(dict(base=base, kind=kind, labels=labels, devs=devs, L=L, pm=True, rows=rows,
                             fixed={MULTIPOLES[i]: float(c[MULTIPOLES[i]]) for i in rows}))
             continue
         i_op = element_operating_current(kind, devs, L)              # масштаб лестницы = рабочая точка / номинал
@@ -1146,8 +1202,8 @@ def compute_element_matrices(elements=None):
             pairs = [(int(kij[:, j].argmax()), j) for j in range(len(labels))]
         imax, r2 = _relevant_imax(curs, [Vals[i, j] for i, j in pairs])
         combo = combo_verify(base, devs, L, M, rows, imax) if len(devs) > 1 else None   # суперпозиция многообмоточных
-        res.append(dict(base=base, kind=kind, labels=labels, M=M, rows=rows, L=L, r2=r2,
-                        imax=imax, i_op=i_op, combo=combo, pm=False))
+        res.append(dict(base=base, kind=kind, labels=labels, devs=devs, M=M, rows=rows, L=L, r2=r2,
+                        imax=imax, i_op=i_op, curs=curs, Vals=Vals, combo=combo, pm=False))
     return res
 
 
@@ -1444,24 +1500,23 @@ def build_all_mats(elements=None, dq_bases=None):
     for el in data_el:
         if el.get("pm"):
             mats.append(dict(name=el["base"], kind=el["kind"], ltag=_ltag(el["base"]), pm=True, L=el["L"],
-                             outputs=[MULTIPOLES[i] for i in el["rows"]], labels=el["labels"],
-                             fixed=el["fixed"], note="PM: фикс. поле (свипа тока нет); состав из карты."))
+                             outputs=[MULTIPOLES[i] for i in el["rows"]], labels=el["labels"], devs=el["devs"],
+                             fixed=el["fixed"], note=""))
         else:
             rows = el["rows"]
             mats.append(dict(name=el["base"], kind=el["kind"], ltag=_ltag(el["base"]), pm=False, L=el["L"],
-                             outputs=[MULTIPOLES[i] for i in rows], labels=el["labels"],
-                             M=el["M"][rows], imax=el["imax"], i_op=el["i_op"], r2=el["r2"],
-                             combo=el.get("combo"), note=""))
+                             outputs=[MULTIPOLES[i] for i in rows], labels=el["labels"], devs=el["devs"],
+                             M=el["M"][rows], rows=rows, curs=el["curs"], Vals=el["Vals"],
+                             imax=el["imax"], i_op=el["i_op"], r2=el["r2"], combo=el.get("combo"), note=""))
     data = compute_coupling()                                        # DQ (combo-датасеты, дёшево)
     for dq in data["dq"]:
         if dq_bases is not None and dq["base"] not in dq_bases: continue
-        r2 = dq["R2"]; sm = dq["syms"]
-        L = LCROW.get(f"DQ_I1_1A_{dq['base']}", {}).get("eff_length", "")
-        mats.append(dict(name=f"DQ_I1_1A_{dq['base']}", kind="dq", ltag=dq["base"], pm=False, L=L,
+        r2 = dq["R2"]; sm = dq["syms"]; base = dq["base"]
+        L = LCROW.get(f"DQ_I1_1A_{base}", {}).get("eff_length", "")
+        devs = [f"DQ_{w}_1A_{base}" for w in ("I1", "I2", "I3")]
+        mats.append(dict(name=f"DQ_I1_1A_{base}", kind="dq", ltag=base, pm=False, L=L, devs=devs,
                          outputs=sm, labels=["I1", "I2", "I3"], M=dq["M"], imax=dq["Imax"], i_op=dq["Imax"],
-                         r2=float(min(r2)), combo=None,
-                         note="R²: " + ", ".join(f"{sm[k]}={r2[k]:.3f}" for k in range(len(sm))) +
-                              f" (рабочий ток ~{dq['Imax']:.1f}А)."))
+                         r2=float(min(r2)), combo=None, note=""))
     return mats
 
 
@@ -1509,6 +1564,106 @@ def write_coupling_table(mats):
     """Записать/обновить таблицу БД coupling_matrices из списка mats (прямые+обратные / fixed для PM)."""
     path, nupd, ntot = upsert_coupling_table({m["name"]: _matrix_table_rows(m) for m in mats})
     print(f"  таблица БД: обновлено элементов {nupd}, всего строк {ntot} → workspace/tables/{COUPLING_TABLE}")
+    return path
+
+
+def _sweep_table(doc, m):
+    """Таблица данных, из которых построена матрица (только числа): прямой элемент — свип лестницы токов →
+    извлечённые designed-моменты по обмоткам; DQ — выборка комбо-датасета (I1,I2,I3 → моменты). + строка
+    метаданных (L_eff, рабочий ток, релевантный диапазон, R²)."""
+    from docx.shared import Pt
+    outs = m["outputs"]
+    if "curs" in m:                                                  # прямой элемент: лестница i_op·fracs
+        curs, Vals, rows, labels = m["curs"], m["Vals"], m["rows"], m["labels"]
+        t = doc.add_table(rows=1, cols=2 + len(outs)); t.style = "Light Grid Accent 1"
+        h = t.rows[0].cells; h[0].text = "обмотка"; h[1].text = "ток, А"
+        for j, mp in enumerate(outs): h[2 + j].text = mp
+        for wj, lbl in enumerate(labels):
+            for ti, cur in enumerate(curs):
+                c = t.add_row().cells; c[0].text = lbl; c[1].text = f"{curs[ti]:.2f}"
+                for j, i in enumerate(rows): c[2 + j].text = f"{Vals[i, wj, ti]:+.4e}"
+    else:                                                            # DQ: выборка комбо-датасета
+        try:
+            X, Y, syms = _load_combo(m["ltag"])
+            t = doc.add_table(rows=1, cols=3 + len(syms)); t.style = "Light Grid Accent 1"
+            h = t.rows[0].cells
+            for j, nm in enumerate(("I1, А", "I2, А", "I3, А")): h[j].text = nm
+            for j, sy in enumerate(syms): h[3 + j].text = sy
+            step = max(1, len(X) // 8)
+            for k in range(0, len(X), step):
+                c = t.add_row().cells
+                for j in range(3): c[j].text = f"{X[k, j]:.2f}"
+                for j in range(len(syms)): c[3 + j].text = f"{Y[k, j]:+.4e}"
+        except Exception:
+            pass
+    p = doc.add_paragraph(f"L_eff = {float(m['L']):.4f} м;  рабочий ток = {float(m['i_op']):.2f} А;  "
+                          f"релевантно |I| ≤ {float(m['imax']):.1f} А (R² ≥ 0.95);  R² = {float(m['r2']):.3f}.")
+    p.runs[0].font.size = Pt(9)
+
+
+def _matrix_section(doc, m, lo):
+    """ОДНОРОДНЫЙ раздел элемента: заголовок → прямая+обратная матрица (формулы) → таблица данных → графики
+    (траектории x/y в двух плоскостях + сечение пучка x-y до/после). Только скриптовые данные."""
+    from docx.shared import Inches
+    doc.add_heading(f"{m['name']}  ({m['kind']}, обмоток: {len(m['labels'])})", level=1)
+    ov = ", ".join(m["outputs"]); iv = ", ".join(_curname(l) for l in m["labels"])
+    if m.get("pm"):                                                  # PM — фикс. состав таблицей (свипа нет)
+        doc.add_paragraph(f"PM-диполь, фиксированное поле.  Мультипольный состав ({ov}):")
+        t = doc.add_table(rows=1, cols=len(m["outputs"])); t.style = "Light Grid Accent 1"
+        for j, mp in enumerate(m["outputs"]): t.rows[0].cells[j].text = mp
+        c = t.add_row().cells
+        for j, mp in enumerate(m["outputs"]): c[j].text = f"{m['fixed'][mp]:+.4e}"
+    else:                                                            # прямая + обратная матрица + свип
+        M = np.asarray(m["M"], float); Minv = np.linalg.pinv(M); nr, nc = M.shape
+        square = (nr == nc and abs(np.linalg.det(M)) > 1e-30)
+        doc.add_paragraph(f"Прямая (ток→коэф):  ({ov})ᵀ = M · ({iv})ᵀ")
+        p = doc.add_paragraph(); lo.add_formula(p, _matrix_latex(M, "M"))
+        doc.add_paragraph(f"Обратная (коэф→ток):  ({iv})ᵀ = {'M⁻¹' if square else 'M⁺'} · ({ov})ᵀ")
+        p = doc.add_paragraph(); lo.add_formula(p, _matrix_latex(Minv, "M^{-1}" if square else "M^{+}"))
+        _sweep_table(doc, m)
+    traj_png, xy_png = _matrix_plots(m, OUTDIR)
+    doc.add_picture(traj_png, width=Inches(6.3))
+    doc.add_picture(xy_png, width=Inches(5.6))
+
+
+def _ranges_table(doc, mats):
+    """Сводная таблица диапазонов (без прозы): элемент, обмотки, моменты, релевантный ток (R²≥0.95), R², диапазон."""
+    t = doc.add_table(rows=1, cols=6); t.style = "Light Grid Accent 1"
+    for j, h in enumerate(("элемент", "обмотки", "моменты", "релевантный |I|, А (R²≥0.95)", "R²", "диапазон |коэф|")):
+        t.rows[0].cells[j].text = h
+    for m in mats:
+        c = t.add_row().cells; c[0].text = m["name"]; c[2].text = ", ".join(m["outputs"])
+        if m.get("pm"):
+            c[1].text = "— (PM)"; c[3].text = "фикс. поле"; c[4].text = "—"
+            c[5].text = ";  ".join(f"{k}={v:+.1e}" for k, v in m["fixed"].items()); continue
+        imax = float(m.get("imax", 0.0)); r2 = m.get("r2", 1.0)
+        c[1].text = ", ".join(m["labels"])
+        c[3].text = f"|I| ≤ {imax:.1f}" + ("" if r2 >= 0.95 else "  (R²<0.95)")
+        c[4].text = f"{r2:.3f}"
+        c[5].text = ";  ".join(f"|{m['outputs'][i]}| ≤ {np.abs(m['M'][i]).sum() * imax:.1e}" for i in range(len(m["outputs"])))
+
+
+def build_matrix_report(path=None):
+    """ФОРМАЛЬНЫЙ автоотчёт расчёта матриц связи ВСЕХ элементов: однородный раздел на элемент (прямая+обратная
+    матрица, таблица данных свипа, графики траекторий x/y в двух плоскостях + сечение пучка x-y до/после) +
+    сводная таблица диапазонов. Только скриптовые данные, БЕЗ пояснений/примечаний. Свежий .docx каждый раз."""
+    from docx import Document
+    import latex2omml as lo
+    path = path or os.path.join(OUTDIR, "element_compare_report.docx")
+    os.makedirs(OUTDIR, exist_ok=True)
+    mats = build_all_mats()
+    doc = Document()
+    doc.add_heading("SynchrotronSim — матрицы связи ток→физкоэф: расчёт по элементам", level=0)
+    for m in mats:
+        _matrix_section(doc, m, lo)
+    doc.add_heading("Сводная таблица диапазонов", level=1)
+    _ranges_table(doc, mats)
+    try:
+        doc.save(path)
+    except PermissionError:
+        path = os.path.splitext(path)[0] + "_new.docx"; doc.save(path)
+        print(f"  (отчёт заблокирован Word — записан {os.path.basename(path)})")
+    print(f"формальный отчёт матриц связи ({len(mats)} элементов) → {path}")
     return path
 
 
@@ -1632,8 +1787,8 @@ def build_library(single=None, do_report=None, do_demo=None, do_html=None):
     write_coupling_table(mats)                                    # таблица БД (upsert)
     if not allmode:
         print_matrices(mats)
-    if do_report:                                                # Word — всегда полный охват (общий артефакт)
-        build_coupling_report(mats=(mats if allmode else build_all_mats()))
+    if do_report:                                                # формальный отчёт матриц — всегда полный охват
+        build_matrix_report()
     ids = None
     if do_demo:                                                  # демо-конфиги (setup_viz_all — весь набор)
         try:
@@ -1655,7 +1810,7 @@ if __name__ == "__main__":
             if f"--no-{name}" in flags: kw[key] = False
         build_library(pos[0] if pos else None, **kw); sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "matrices":
-        build_coupling_report(); sys.exit(0)
+        build_matrix_report(); sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "viz-all":
         setup_viz_all(); sys.exit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "viz":
