@@ -624,10 +624,29 @@ def _plot_one_traj(m, cur, clbl, outdir, tag):
     return png, ds, ks
 
 
+def _plot_one_xy(m, clbl, outdir, tag, ds, ks):
+    """ОДИН график сечения пучка x-y до/после элемента при токе clbl (диффур o, кик ✕). Ток — в заголовке.
+    Использует уже посчитанные ds/ks (без пересчёта). Возврат png."""
+    fig, (a0, a1) = plt.subplots(1, 2, figsize=(9.5, 4.6))
+    for d, k in zip(ds, ks):
+        a0.scatter(d[0, 1] * 1e3, d[0, 2] * 1e3, c="#2b7bba", s=32, marker="o")
+        a1.scatter(d[-1, 1] * 1e3, d[-1, 2] * 1e3, c="#2b7bba", s=34, marker="o", label="диффур")
+        if k is not None:
+            a1.scatter(k[-1, 1] * 1e3, k[-1, 2] * 1e3, c="#d1495b", s=44, marker="x", label="кик")
+    a0.set_title("до элемента (вход)"); a1.set_title("после элемента (o диффур, ✕ кик)")
+    for a in (a0, a1):
+        a.set_xlabel("x (гориз.), мм"); a.set_ylabel("y (верт.), мм"); a.grid(alpha=0.3); a.set_aspect("equal", "datalim")
+    fig.suptitle(f"{m['name']} ({m['kind']}) — сечение пучка x-y, ток {clbl}", fontsize=11)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    png = os.path.join(outdir, f"mxy_{m['name']}_{tag}.png"); fig.savefig(png, dpi=110); plt.close(fig)
+    return png
+
+
 def _matrix_plots(m, outdir):
-    """НЕСКОЛЬКО отдельных графиков траекторий (каждый в текущем формате x/y, диффур+кик) при разных токах:
-    мой imax/2 (авто-масштаб для читаемости) + фиксированные +25, +50, −25 А (перегруз — виден эффект);
-    у PM — только фикс. поле. + один график сечения пучка x-y до/после. Возврат (traj_pngs, xy_png, rmse0)."""
+    """НЕСКОЛЬКО отдельных графиков (каждый в текущем формате, диффур+кик) при разных токах: мой imax/2
+    (авто-масштаб для читаемости) + фиксированные +25, +50, −25 А (перегруз — виден эффект); у PM — только
+    фикс. поле. На КАЖДЫЙ ток: график траекторий x/y И сечение пучка x-y до/после. Возврат
+    (traj_pngs, xy_pngs, rmse0) — списки парны по токам; rmse0 при первом (моём/PM) токе."""
     per = " на обмотку" if (not m.get("pm") and len(m["devs"]) > 1) else ""
     if m.get("pm"):
         curlist = [("-", "PM (фикс. поле)", "pm")]
@@ -639,31 +658,21 @@ def _matrix_plots(m, outdir):
         if dmax > 8.0: i0 = i0 * 6.0 / dmax
         curlist = [(i0, f"{i0:+.2f} А{per}", "i0"), (25.0, f"+25 А{per}", "p25"),
                    (50.0, f"+50 А{per}", "p50"), (-25.0, f"−25 А{per}", "m25")]
-    traj_pngs = []; ds_ref = ks_ref = None
+    traj_pngs = []; xy_pngs = []; rmse0 = float("nan"); first = True
     for cur, clbl, tag in curlist:
         try:
-            png, ds, ks = _plot_one_traj(m, cur, clbl, outdir, tag); traj_pngs.append(png)
-            if ds_ref is None: ds_ref, ks_ref = ds, ks          # первый (мой/PM) ток — для сечения и RMSE
+            tpng, ds, ks = _plot_one_traj(m, cur, clbl, outdir, tag)   # траектории x/y при токе clbl
+            xpng = _plot_one_xy(m, clbl, outdir, tag, ds, ks)          # сечение x-y при том же токе
+            traj_pngs.append(tpng); xy_pngs.append(xpng)
+            if first:                                                  # RMSE — при первом (моём/PM) токе
+                first = False
+                try:
+                    rmse0 = math.sqrt(traj_mse(ds, ks)) * 1e3 if all(k is not None for k in ks) else float("nan")
+                except Exception:
+                    rmse0 = float("nan")
         except Exception as e:
             print(f"  ! график {m['name']} ток {clbl}: {type(e).__name__}: {e}")
-    # сечение x-y до/после (при первом токе)
-    fig, (a0, a1) = plt.subplots(1, 2, figsize=(9.5, 4.6))
-    for d, k in zip(ds_ref, ks_ref):
-        a0.scatter(d[0, 1] * 1e3, d[0, 2] * 1e3, c="#2b7bba", s=32, marker="o")
-        a1.scatter(d[-1, 1] * 1e3, d[-1, 2] * 1e3, c="#2b7bba", s=34, marker="o")
-        if k is not None:
-            a1.scatter(k[-1, 1] * 1e3, k[-1, 2] * 1e3, c="#d1495b", s=44, marker="x")
-    a0.set_title("до элемента (вход)"); a1.set_title("после элемента (o диффур, ✕ кик)")
-    for a in (a0, a1):
-        a.set_xlabel("x (гориз.), мм"); a.set_ylabel("y (верт.), мм"); a.grid(alpha=0.3); a.set_aspect("equal", "datalim")
-    fig.suptitle(f"{m['name']} ({m['kind']}) — сечение пучка x-y", fontsize=11)
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
-    xy_png = os.path.join(outdir, f"mxy_{m['name']}.png"); fig.savefig(xy_png, dpi=110); plt.close(fig)
-    try:
-        rmse = math.sqrt(traj_mse(ds_ref, ks_ref)) * 1e3 if all(k is not None for k in ks_ref) else float("nan")
-    except Exception:
-        rmse = float("nan")
-    return traj_pngs, xy_png, rmse
+    return traj_pngs, xy_pngs, rmse0
 
 
 def _cumulative_r2(ts, vals):
@@ -1719,7 +1728,7 @@ def _matrix_section(doc, m, lo):
     from docx.shared import Inches
     doc.add_heading(f"{m['name']}  ({m['kind']}, обмоток: {len(m['labels'])})", level=1)
     ov = ", ".join(m["outputs"]); iv = ", ".join(_curname(l) for l in m["labels"])
-    traj_pngs, xy_png, rmse0 = _matrix_plots(m, OUTDIR)             # НЕСКОЛЬКО графиков траекторий (разные токи) + RMSE
+    traj_pngs, xy_pngs, rmse0 = _matrix_plots(m, OUTDIR)           # траектории + сечения x-y на КАЖДЫЙ ток + RMSE
     if m.get("pm"):                                                  # PM — фикс. состав + RMSE (свипа нет)
         doc.add_paragraph(f"PM-диполь, фиксированное поле.  Мультипольный состав ({ov}) и RMSE диффур↔кик:")
         t = doc.add_table(rows=1, cols=len(m["outputs"]) + 1); t.style = "Light Grid Accent 1"
@@ -1737,9 +1746,9 @@ def _matrix_section(doc, m, lo):
         doc.add_paragraph(f"Обратная (коэф→ток):  ({iv})ᵀ = {'M⁻¹' if square else 'M⁺'} · ({ov})ᵀ")
         p = doc.add_paragraph(); lo.add_formula(p, _matrix_latex(Minv, "M^{-1}" if square else "M^{+}")); doc.add_paragraph()
         _data_table(doc, m)
-    for png in traj_pngs:                                           # несколько графиков траекторий при разных токах
-        doc.add_picture(png, width=Inches(6.3))
-    doc.add_picture(xy_png, width=Inches(5.6))
+    for tpng, xpng in zip(traj_pngs, xy_pngs):                      # на каждый ток: траектории x/y + сечение x-y до/после
+        doc.add_picture(tpng, width=Inches(6.3))
+        doc.add_picture(xpng, width=Inches(5.6))
     doc.add_paragraph()                                              # отступ после графиков раздела
 
 
