@@ -1724,8 +1724,7 @@ def _data_table(doc, m):
     wide = nw >= 3
     if wide:
         _section_orient(doc, landscape=True)
-    _tcap(doc, f"{m['name']}: свип комбинаций токов обмоток → мультипольные моменты" +
-               (", радиус поворота" if has_b else "") + ", RMSE и R² (диффур ↔ кик).")
+    _tcap(doc, m["name"])
     ncol = nw + len(outs) + (1 if has_b else 0) + 2
     t = doc.add_table(rows=1, cols=ncol); t.style = "Light Grid Accent 1"
     h = t.rows[0].cells
@@ -1766,8 +1765,7 @@ def _matrix_section(doc, m, lo):
     if m.get("pm"):                                                  # PM — фикс. состав + радиус изгиба + RMSE (свипа нет)
         nmo = len(m["outputs"]); has_b = "B" in m["outputs"]
         extra = ["θ (изгиб), мрад", "ρ (при B), м"] if has_b else []
-        _tcap(doc, f"{m['name']} (PM-диполь, фиксированное поле): мультипольный состав ({ov}), "
-                   f"радиус поворота при проектном B и RMSE диффур ↔ кик.")
+        _tcap(doc, m["name"])
         ncol = nmo + len(extra) + 1
         t = doc.add_table(rows=1, cols=ncol); t.style = "Light Grid Accent 1"; hd = t.rows[0].cells
         for j, mp in enumerate(m["outputs"]): hd[j].text = mp
@@ -1797,7 +1795,7 @@ def _matrix_section(doc, m, lo):
 
 def _ranges_table(doc, mats):
     """Сводная таблица диапазонов (без прозы): элемент, обмотки, моменты, релевантный ток (R²≥0.95), R², диапазон."""
-    _tcap(doc, "Сводка по всем элементам: обмотки, моменты, релевантный ток (R² ≥ 0.95), R², диапазон коэффициентов.")
+    _tcap(doc, "Сводка по всем элементам")
     t = doc.add_table(rows=1, cols=6); t.style = "Light Grid Accent 1"
     for j, h in enumerate(("элемент", "обмотки", "моменты", "релевантный |I|, А (R²≥0.95)", "R²", "диапазон |коэф|")):
         t.rows[0].cells[j].text = h
