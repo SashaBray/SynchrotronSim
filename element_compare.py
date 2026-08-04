@@ -587,25 +587,14 @@ def _diffur_su(devs, cur, bending, yaw=None):
     return ds, geom, yaw
 
 
-def _matrix_traj_pair(m):
-    """Диффур + КИК траектории 13 частиц через элемент при показательном токе. Кик — фит коэф (в конвенции
-    кик-модели, совпадает с диффуром) через C++ кик-ядро: прямые — _coeff_at_L(designed-момент), изгибающие/
-    корректор — _fit_gs_combo(B,G,S) как dq. Авто-масштаб тока (увод >8мм → ток↓ до ~6мм). Возврат (diff_su,
-    kick_su, метка тока, bending). None в kick_su = потерянная частица."""
+def _matrix_traj_at(m, cur):
+    """Диффур + КИК траектории 13 частиц при токе cur (все обмотки; '-' → PM фикс. поле). Кик — фит коэф по
+    диффуру (совпадает конвенцией) через C++ кик-ядро. Возврат (diff_su, kick_su, bending). None = потеря."""
     kind = m["kind"]; bending = kind in ("dipole", "dq", "kicker"); keff = "dq" if kind == "kicker" else kind
     devs = [m["devs"][0]] if m.get("pm") else m["devs"]
-    if m.get("pm"):
-        ds, geom, yaw = _diffur_su(devs, "-", bending); lbl = "PM (фикс. поле)"
-    else:
-        i0 = 0.5 * float(m["imax"])                              # показательный ток = ПОЛОВИНА релевантного диапазона (виден эффект)
-        ds, geom, yaw = _diffur_su(devs, i0, bending)
-        dmax = max(max(abs(d[-1, 1]), abs(d[-1, 2])) for d in ds) * 1e3
-        cur = i0 * 6.0 / dmax if dmax > 8.0 else i0
-        if cur != i0:
-            ds, geom, yaw = _diffur_su(devs, cur, bending)
-        lbl = f"{cur:+.2f} А" + (" на обмотку" if len(m["devs"]) > 1 else "")
+    ds, geom, yaw = _diffur_su(devs, cur, bending)
     L = float(m["L"])
-    try:                                                             # кик = фит по диффуру (совпадает конвенцией)
+    try:
         if keff == "dq":
             coef, _ = _fit_gs_combo(m["devs"][0], geom, ds, L, 2.0 * yaw)
         else:
@@ -613,16 +602,15 @@ def _matrix_traj_pair(m):
         kick_su = track_set(m["devs"][0], coef, L, keff, geom, PROBES)
     except Exception:
         kick_su = [None] * len(PROBES)
-    return ds, kick_su, lbl, bending
+    return ds, kick_su, bending
 
 
-def _matrix_plots(m, outdir):
-    """Два графика элемента: (1) траектории x(s),y(s) в двух плоскостях — диффур (сплошная синяя) vs кик
-    (пунктир красная); (2) сечение пучка x-y до/после (диффур o, кик ✕). Возврат (traj_png, xy_png)."""
-    diff_su, kick_su, lbl, bending = _matrix_traj_pair(m)
-    # (1) траектории в двух плоскостях: диффур + кик
+def _plot_one_traj(m, cur, clbl, outdir, tag):
+    """ОДИН график траекторий x(s),y(s) в двух плоскостях при токе cur — диффур (сплошн. синяя) vs кик (пунктир
+    красная). Текущий формат. Возврат (png, diff_su, kick_su)."""
+    ds, ks, bending = _matrix_traj_at(m, cur)
     fig, (axx, axy) = plt.subplots(1, 2, figsize=(11, 4.2))
-    for d, k in zip(diff_su, kick_su):
+    for d, k in zip(ds, ks):
         axx.plot(d[:, 0], d[:, 1] * 1e3, color="#2b7bba", lw=1.1); axy.plot(d[:, 0], d[:, 2] * 1e3, color="#2b7bba", lw=1.1)
         if k is not None:
             axx.plot(k[:, 0], k[:, 1] * 1e3, color="#d1495b", lw=1.0, ls="--")
@@ -630,27 +618,52 @@ def _matrix_plots(m, outdir):
     for ax in (axx, axy): ax.set_xlabel("s, м"); ax.grid(alpha=0.3)
     axx.set_ylabel("x (гориз.), мм"); axy.set_ylabel("y (верт.), мм")
     axx.set_title("x-плоскость (— диффур, -- кик)"); axy.set_title("y-плоскость" + (" (откл. от опорной дуги)" if bending else ""))
-    fig.suptitle(f"{m['name']} ({m['kind']}) — траектории пучка, ток {lbl}", fontsize=11)
+    fig.suptitle(f"{m['name']} ({m['kind']}) — траектории пучка, ток {clbl}", fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
-    traj_png = os.path.join(outdir, f"mtraj_{m['name']}.png"); fig.savefig(traj_png, dpi=110); plt.close(fig)
-    # (2) сечение x-y до/после: диффур o, кик ✕
+    png = os.path.join(outdir, f"mtraj_{m['name']}_{tag}.png"); fig.savefig(png, dpi=110); plt.close(fig)
+    return png, ds, ks
+
+
+def _matrix_plots(m, outdir):
+    """НЕСКОЛЬКО отдельных графиков траекторий (каждый в текущем формате x/y, диффур+кик) при разных токах:
+    мой imax/2 (авто-масштаб для читаемости) + фиксированные +25, +50, −25 А (перегруз — виден эффект);
+    у PM — только фикс. поле. + один график сечения пучка x-y до/после. Возврат (traj_pngs, xy_png, rmse0)."""
+    per = " на обмотку" if (not m.get("pm") and len(m["devs"]) > 1) else ""
+    if m.get("pm"):
+        curlist = [("-", "PM (фикс. поле)", "pm")]
+    else:
+        i0 = 0.5 * float(m["imax"])                              # мой ток — половина релевантного диапазона (авто-масштаб)
+        bending = m["kind"] in ("dipole", "dq", "kicker")
+        ds0, _, _ = _diffur_su(m["devs"], i0, bending)
+        dmax = max(max(abs(d[-1, 1]), abs(d[-1, 2])) for d in ds0) * 1e3
+        if dmax > 8.0: i0 = i0 * 6.0 / dmax
+        curlist = [(i0, f"{i0:+.2f} А{per}", "i0"), (25.0, f"+25 А{per}", "p25"),
+                   (50.0, f"+50 А{per}", "p50"), (-25.0, f"−25 А{per}", "m25")]
+    traj_pngs = []; ds_ref = ks_ref = None
+    for cur, clbl, tag in curlist:
+        try:
+            png, ds, ks = _plot_one_traj(m, cur, clbl, outdir, tag); traj_pngs.append(png)
+            if ds_ref is None: ds_ref, ks_ref = ds, ks          # первый (мой/PM) ток — для сечения и RMSE
+        except Exception as e:
+            print(f"  ! график {m['name']} ток {clbl}: {type(e).__name__}: {e}")
+    # сечение x-y до/после (при первом токе)
     fig, (a0, a1) = plt.subplots(1, 2, figsize=(9.5, 4.6))
-    for d, k in zip(diff_su, kick_su):
+    for d, k in zip(ds_ref, ks_ref):
         a0.scatter(d[0, 1] * 1e3, d[0, 2] * 1e3, c="#2b7bba", s=32, marker="o")
         a1.scatter(d[-1, 1] * 1e3, d[-1, 2] * 1e3, c="#2b7bba", s=34, marker="o")
         if k is not None:
             a1.scatter(k[-1, 1] * 1e3, k[-1, 2] * 1e3, c="#d1495b", s=44, marker="x")
-    a0.set_title("до элемента (вход)"); a1.set_title(f"после элемента (o диффур, ✕ кик), ток {lbl}")
+    a0.set_title("до элемента (вход)"); a1.set_title("после элемента (o диффур, ✕ кик)")
     for a in (a0, a1):
         a.set_xlabel("x (гориз.), мм"); a.set_ylabel("y (верт.), мм"); a.grid(alpha=0.3); a.set_aspect("equal", "datalim")
     fig.suptitle(f"{m['name']} ({m['kind']}) — сечение пучка x-y", fontsize=11)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     xy_png = os.path.join(outdir, f"mxy_{m['name']}.png"); fig.savefig(xy_png, dpi=110); plt.close(fig)
     try:
-        rmse = math.sqrt(traj_mse(diff_su, kick_su)) * 1e3 if all(k is not None for k in kick_su) else float("nan")
+        rmse = math.sqrt(traj_mse(ds_ref, ks_ref)) * 1e3 if all(k is not None for k in ks_ref) else float("nan")
     except Exception:
         rmse = float("nan")
-    return traj_png, xy_png, lbl, rmse
+    return traj_pngs, xy_png, rmse
 
 
 def _cumulative_r2(ts, vals):
@@ -1706,7 +1719,7 @@ def _matrix_section(doc, m, lo):
     from docx.shared import Inches
     doc.add_heading(f"{m['name']}  ({m['kind']}, обмоток: {len(m['labels'])})", level=1)
     ov = ", ".join(m["outputs"]); iv = ", ".join(_curname(l) for l in m["labels"])
-    traj_png, xy_png, lbl, rmse0 = _matrix_plots(m, OUTDIR)          # графики + RMSE при показательном токе
+    traj_pngs, xy_png, rmse0 = _matrix_plots(m, OUTDIR)             # НЕСКОЛЬКО графиков траекторий (разные токи) + RMSE
     if m.get("pm"):                                                  # PM — фикс. состав + RMSE (свипа нет)
         doc.add_paragraph(f"PM-диполь, фиксированное поле.  Мультипольный состав ({ov}) и RMSE диффур↔кик:")
         t = doc.add_table(rows=1, cols=len(m["outputs"]) + 1); t.style = "Light Grid Accent 1"
@@ -1724,7 +1737,8 @@ def _matrix_section(doc, m, lo):
         doc.add_paragraph(f"Обратная (коэф→ток):  ({iv})ᵀ = {'M⁻¹' if square else 'M⁺'} · ({ov})ᵀ")
         p = doc.add_paragraph(); lo.add_formula(p, _matrix_latex(Minv, "M^{-1}" if square else "M^{+}")); doc.add_paragraph()
         _data_table(doc, m)
-    doc.add_picture(traj_png, width=Inches(6.3))
+    for png in traj_pngs:                                           # несколько графиков траекторий при разных токах
+        doc.add_picture(png, width=Inches(6.3))
     doc.add_picture(xy_png, width=Inches(5.6))
     doc.add_paragraph()                                              # отступ после графиков раздела
 
