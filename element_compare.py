@@ -1704,6 +1704,15 @@ def _section_orient(doc, landscape):
     return s
 
 
+def _tcap(doc, text):
+    """Подпись-заголовок таблицы «Таблица N. <text>» (жирная, сквозная нумерация в пределах отчёта)."""
+    from docx.shared import Pt
+    _tcap.n = getattr(_tcap, "n", 0) + 1
+    p = doc.add_paragraph(); r = p.add_run(f"Таблица {_tcap.n}. {text}")
+    r.bold = True; r.font.size = Pt(10)
+    return p
+
+
 def _data_table(doc, m):
     """Таблица данных: столбцы = токи ОБМОТОК (I1, I2, …, уникальная комбинация на строку) + моменты (M·I) +
     RMSE + R² (диффур↔кик). Строки — скан магнитуды ±50 А (с перегрузом → виден спад R²). Многообмоточные
@@ -1715,6 +1724,8 @@ def _data_table(doc, m):
     wide = nw >= 3
     if wide:
         _section_orient(doc, landscape=True)
+    _tcap(doc, f"{m['name']}: свип комбинаций токов обмоток → мультипольные моменты" +
+               (", радиус поворота" if has_b else "") + ", RMSE и R² (диффур ↔ кик).")
     ncol = nw + len(outs) + (1 if has_b else 0) + 2
     t = doc.add_table(rows=1, cols=ncol); t.style = "Light Grid Accent 1"
     h = t.rows[0].cells
@@ -1755,8 +1766,8 @@ def _matrix_section(doc, m, lo):
     if m.get("pm"):                                                  # PM — фикс. состав + радиус изгиба + RMSE (свипа нет)
         nmo = len(m["outputs"]); has_b = "B" in m["outputs"]
         extra = ["θ (изгиб), мрад", "ρ (при B), м"] if has_b else []
-        doc.add_paragraph(f"PM-диполь, фиксированное поле.  Мультипольный состав ({ov}), "
-                          f"радиус поворота при проектном B и RMSE диффур↔кик:")
+        _tcap(doc, f"{m['name']} (PM-диполь, фиксированное поле): мультипольный состав ({ov}), "
+                   f"радиус поворота при проектном B и RMSE диффур ↔ кик.")
         ncol = nmo + len(extra) + 1
         t = doc.add_table(rows=1, cols=ncol); t.style = "Light Grid Accent 1"; hd = t.rows[0].cells
         for j, mp in enumerate(m["outputs"]): hd[j].text = mp
@@ -1786,6 +1797,7 @@ def _matrix_section(doc, m, lo):
 
 def _ranges_table(doc, mats):
     """Сводная таблица диапазонов (без прозы): элемент, обмотки, моменты, релевантный ток (R²≥0.95), R², диапазон."""
+    _tcap(doc, "Сводка по всем элементам: обмотки, моменты, релевантный ток (R² ≥ 0.95), R², диапазон коэффициентов.")
     t = doc.add_table(rows=1, cols=6); t.style = "Light Grid Accent 1"
     for j, h in enumerate(("элемент", "обмотки", "моменты", "релевантный |I|, А (R²≥0.95)", "R²", "диапазон |коэф|")):
         t.rows[0].cells[j].text = h
@@ -1810,6 +1822,7 @@ def build_matrix_report(path=None):
     path = path or os.path.join(OUTDIR, "element_compare_report.docx")
     os.makedirs(OUTDIR, exist_ok=True)
     mats = build_all_mats()
+    _tcap.n = 0                                                      # сброс сквозной нумерации таблиц
     doc = Document()
     doc.add_heading("SynchrotronSim — матрицы связи ток→физкоэф: расчёт по элементам", level=0)
     for m in mats:
