@@ -599,11 +599,11 @@ def _dq_fit(m, geom, ds, L, theta0):
 
 def _matrix_traj_at(m, cur):
     """Диффур + КИК траектории 13 частиц при токе cur (все обмотки; '-' → PM фикс. поле). Кик — фит коэф по
-    диффуру (совпадает конвенцией) через C++ кик-ядро. Возврат (diff_su, kick_su, bending). None = потеря."""
+    диффуру (совпадает конвенцией) через C++ кик-ядро. Возврат (diff_su, kick_su, bending, coef). None = потеря."""
     kind = m["kind"]; bending = kind in ("dipole", "dq", "kicker"); keff = "dq" if kind == "kicker" else kind
     devs = [m["devs"][0]] if m.get("pm") else m["devs"]
     ds, geom, yaw = _diffur_su(devs, cur, bending)
-    L = float(m["L"])
+    L = float(m["L"]); coef = {}
     try:
         if keff == "dq":
             coef, _ = _dq_fit(m, geom, ds, L, 2.0 * yaw)
@@ -612,14 +612,25 @@ def _matrix_traj_at(m, cur):
         kick_su = track_set(m["devs"][0], coef, L, keff, geom, PROBES)
     except Exception:
         kick_su = [None] * len(PROBES)
-    return ds, kick_su, bending
+    return ds, kick_su, bending, coef
+
+
+def _traj_subtitle(m, cur, coef):
+    """Подпись под заголовком графика: ток по КАЖДОЙ обмотке (I1=…, I2=… — в графиках все при одном cur) и
+    получившиеся физкоэф (B=…, G=…). PM — «фикс. поле». Единое правило для всех графиков."""
+    if m.get("pm") or cur == "-":
+        cpart = "PM (фикс. поле)"
+    else:
+        cpart = ", ".join(f"{_curname(l)}={cur:+.2f}" for l in m["labels"]) + " А"
+    kpart = ", ".join(f"{k}={coef[k]:+.3e}" for k in coef) if coef else "—"
+    return f"{cpart}   →   {kpart}"
 
 
 def _plot_one_traj(m, cur, clbl, outdir, tag):
     """ОДИН график траекторий x(s),y(s) в двух плоскостях при токе cur — диффур (сплошн. синяя) vs кик (пунктир
-    красная). Текущий формат. Возврат (png, diff_su, kick_su)."""
-    ds, ks, bending = _matrix_traj_at(m, cur)
-    fig, (axx, axy) = plt.subplots(1, 2, figsize=(11, 4.2))
+    красная). Шапка: токи по обмоткам → физкоэф. Возврат (png, diff_su, kick_su, coef)."""
+    ds, ks, bending, coef = _matrix_traj_at(m, cur)
+    fig, (axx, axy) = plt.subplots(1, 2, figsize=(11, 4.4))
     for d, k in zip(ds, ks):
         axx.plot(d[:, 0], d[:, 1] * 1e3, color="#2b7bba", lw=1.1); axy.plot(d[:, 0], d[:, 2] * 1e3, color="#2b7bba", lw=1.1)
         if k is not None:
@@ -628,16 +639,17 @@ def _plot_one_traj(m, cur, clbl, outdir, tag):
     for ax in (axx, axy): ax.set_xlabel("s, м"); ax.grid(alpha=0.3)
     axx.set_ylabel("x (гориз.), мм"); axy.set_ylabel("y (верт.), мм")
     axx.set_title("x-плоскость (— диффур, -- кик)"); axy.set_title("y-плоскость" + (" (откл. от опорной дуги)" if bending else ""))
-    fig.suptitle(f"{m['name']} ({m['kind']}) — траектории пучка, ток {clbl}", fontsize=11)
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    fig.suptitle(f"{m['name']} ({m['kind']}) — траектории пучка", fontsize=11)
+    fig.text(0.5, 0.905, _traj_subtitle(m, cur, coef), ha="center", fontsize=9)   # токи обмоток → физкоэф
+    fig.tight_layout(rect=[0, 0, 1, 0.9])
     png = os.path.join(outdir, f"mtraj_{m['name']}_{tag}.png"); fig.savefig(png, dpi=110); plt.close(fig)
-    return png, ds, ks
+    return png, ds, ks, coef
 
 
-def _plot_one_xy(m, clbl, outdir, tag, ds, ks):
-    """ОДИН график сечения пучка x-y до/после элемента при токе clbl (диффур o, кик ✕). Ток — в заголовке.
-    Использует уже посчитанные ds/ks (без пересчёта). Возврат png."""
-    fig, (a0, a1) = plt.subplots(1, 2, figsize=(9.5, 4.6))
+def _plot_one_xy(m, cur, clbl, outdir, tag, ds, ks, coef):
+    """ОДИН график сечения пучка x-y до/после элемента (диффур o, кик ✕). Шапка: токи по обмоткам → физкоэф.
+    Использует уже посчитанные ds/ks/coef (без пересчёта). Возврат png."""
+    fig, (a0, a1) = plt.subplots(1, 2, figsize=(9.5, 4.8))
     for d, k in zip(ds, ks):
         a0.scatter(d[0, 1] * 1e3, d[0, 2] * 1e3, c="#2b7bba", s=32, marker="o")
         a1.scatter(d[-1, 1] * 1e3, d[-1, 2] * 1e3, c="#2b7bba", s=34, marker="o", label="диффур")
@@ -646,8 +658,9 @@ def _plot_one_xy(m, clbl, outdir, tag, ds, ks):
     a0.set_title("до элемента (вход)"); a1.set_title("после элемента (o диффур, ✕ кик)")
     for a in (a0, a1):
         a.set_xlabel("x (гориз.), мм"); a.set_ylabel("y (верт.), мм"); a.grid(alpha=0.3); a.set_aspect("equal", "datalim")
-    fig.suptitle(f"{m['name']} ({m['kind']}) — сечение пучка x-y, ток {clbl}", fontsize=11)
-    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    fig.suptitle(f"{m['name']} ({m['kind']}) — сечение пучка x-y", fontsize=11)
+    fig.text(0.5, 0.9, _traj_subtitle(m, cur, coef), ha="center", fontsize=9)      # токи обмоток → физкоэф
+    fig.tight_layout(rect=[0, 0, 1, 0.89])
     png = os.path.join(outdir, f"mxy_{m['name']}_{tag}.png"); fig.savefig(png, dpi=110); plt.close(fig)
     return png
 
@@ -671,8 +684,8 @@ def _matrix_plots(m, outdir):
     traj_pngs = []; xy_pngs = []; rmse0 = float("nan"); first = True
     for cur, clbl, tag in curlist:
         try:
-            tpng, ds, ks = _plot_one_traj(m, cur, clbl, outdir, tag)   # траектории x/y при токе clbl
-            xpng = _plot_one_xy(m, clbl, outdir, tag, ds, ks)          # сечение x-y при том же токе
+            tpng, ds, ks, coef = _plot_one_traj(m, cur, clbl, outdir, tag)   # траектории x/y при токе clbl
+            xpng = _plot_one_xy(m, cur, clbl, outdir, tag, ds, ks, coef)      # сечение x-y при том же токе
             traj_pngs.append(tpng); xy_pngs.append(xpng)
             if first:                                                  # RMSE — при первом (моём/PM) токе
                 first = False
