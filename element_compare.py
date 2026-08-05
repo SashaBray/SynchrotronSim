@@ -1720,12 +1720,15 @@ def write_coupling_table(mats):
 
 
 def _section_orient(doc, landscape):
-    """Новая секция (с новой страницы) с ориентацией landscape/portrait — для широких таблиц многообмоточных."""
+    """Новая секция (с новой страницы) с ориентацией landscape/portrait — для широких таблиц многообмоточных.
+    На альбомной уменьшаем правый отступ до 1.5 см → таблицы немного шире."""
     from docx.enum.section import WD_ORIENT, WD_SECTION
+    from docx.shared import Cm
     s = doc.add_section(WD_SECTION.NEW_PAGE)
     w, h = s.page_width, s.page_height
     if landscape:
         s.orientation = WD_ORIENT.LANDSCAPE; s.page_width, s.page_height = max(w, h), min(w, h)
+        s.right_margin = Cm(1.5)                                  # меньше правый отступ → таблицы немного шире
     else:
         s.orientation = WD_ORIENT.PORTRAIT; s.page_width, s.page_height = min(w, h), max(w, h)
     return s
@@ -1738,6 +1741,17 @@ def _tcap(doc, text):
     p = doc.add_paragraph(); r = p.add_run(f"Таблица {_tcap.n}. {text}")
     r.bold = True; r.font.size = Pt(10)
     return p
+
+
+def _shrink_table_font(t, pt=9):
+    """Уменьшить шрифт текста ячеек таблицы до pt (для широких таблиц на альбомной странице — на 2 пт меньше
+    портретных ~11 пт)."""
+    from docx.shared import Pt
+    for row in t.rows:
+        for cell in row.cells:
+            for p in cell.paragraphs:
+                for r in p.runs:
+                    r.font.size = Pt(pt)
 
 
 def _data_table(doc, m):
@@ -1772,6 +1786,7 @@ def _data_table(doc, m):
         c[col].text = "—" if (rmse != rmse) else f"{rmse:.4f}"
         c[col + 1].text = "—" if (r2 != r2) else f"{r2:.3f}"
     if wide:
+        _shrink_table_font(t)                                       # альбомная широкая таблица → шрифт на 2 пт меньше
         _section_orient(doc, landscape=False)
     doc.add_paragraph()                                             # отступ после таблицы (правка: текст не липнет)
     p = doc.add_paragraph(f"L_eff = {float(m['L']):.4f} м;  рабочий ток = {float(m['i_op']):.2f} А;  "
@@ -1855,34 +1870,46 @@ def _ranges_table(doc, mats):
         c[3].text = f"|I| ≤ {imax:.1f}" + ("" if r2 >= 0.95 else "  (R²<0.95)")
         c[4].text = f"{r2:.3f}"
         c[5].text = ";  ".join(f"|{m['outputs'][i]}| ≤ {np.abs(m['M'][i]).sum() * imax:.1e}" for i in range(len(m["outputs"])))
+    _shrink_table_font(t)                                           # сводная — на альбомной странице, шрифт на 2 пт меньше
 
 
 def _intro_section(doc):
     """Вводный методический раздел (кратко): как получены матрицы связи — сопоставление траекторий диффур↔кик,
     лосс-функция, фиксированная L_eff и её источник, симметричная установка изгибающих."""
-    doc.add_heading("Как получены матрицы связи", level=1)
+    doc.add_heading("Вводная информация по расчетам", level=1)
     doc.add_paragraph(
         "Матрицы связи ток→физкоэффициенты получены сопоставлением траекторий пучка двух моделей. Первая — "
-        "дифференциальное ядро SynchrotronSim: интегрирование силы Лоренца (метод Бориса) по трёхмерным картам "
-        "магнитного поля, снятым для каждой обмотки; это эталон. Вторая — киковая модель: симплектический "
-        "drift-kick-drift, где действие элемента задано набором мультипольных моментов (B, G, S, …). Для набора "
-        "токов обмоток дифференциальное ядро даёт эталонную траекторию, а моменты кика подбираются так, чтобы "
-        "киковая траектория её воспроизвела. Зависимость подобранных моментов от токов по свипу и образует матрицу.")
+        "дифференциальное ядро SynchrotronSim: интегрирование силы Лоренца по трёхмерным картам магнитного поля, "
+        "снятым для каждой обмотки. Вторая — киковая модель: симплектический drift-kick-drift, где действие "
+        "элемента задано набором мультипольных моментов (B, G, S, …). Для набора токов обмоток дифференциальное "
+        "ядро даёт траекторию, а моменты кика подбираются так, чтобы киковая траектория её воспроизвела. "
+        "Зависимость подобранных моментов от токов по свипу и образует матрицу.")
     doc.add_paragraph(
-        "Критерий подбора (лосс-функция) — среднеквадратичное отклонение (RMS) положений частиц между киковой и "
-        "эталонной траекториями; минимизация ведётся по моментам. Эффективная длина L_eff при подборе "
-        "ФИКСИРОВАНА и берётся из проектных данных элемента (.lte), поскольку траектория чувствительна лишь к "
-        "произведению момент·L_eff — саму длину по траектории отдельно не выделить (по смыслу L_eff ≈ ∫B·dl / B_макс).")
+        "Критерий подбора (лосс-функция) — среднеквадратичное отклонение (RMS) положений частиц в траекториях, "
+        "полученными в рамках киковой и дифференциальной моделью; минимизация ведётся по моментам. Эффективная "
+        "длина L_eff при подборе фиксирована и берётся из проектных данных элемента (.lte).")
     doc.add_paragraph(
         "Изгибающие элементы — диполи и диполи-квадруполи — в расчёте устанавливаются симметрично: угол входа "
         "равен углу выхода (пучок пересекает торцы под θ/2, как симметричная дуга). Это согласует локальную "
         "систему отсчёта с киковым сектором и уравнивает краевые эффекты входа и выхода.")
 
 
+def _apply_body_formatting(doc):
+    """Красная строка (отступ первой строки 1.25 см) + выравнивание ПО ШИРИНЕ всем текстовым абзацам тела.
+    Заголовки, формулы (OMML без текста) и пустые отступы — не трогаем; ячейки таблиц не входят в doc.paragraphs."""
+    from docx.shared import Cm
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    for p in doc.paragraphs:
+        if not p.text.strip() or p.style.name.startswith("Heading") or p.style.name == "Title":
+            continue
+        p.paragraph_format.first_line_indent = Cm(1.25)
+        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+
+
 def build_matrix_report(path=None):
     """ФОРМАЛЬНЫЙ автоотчёт расчёта матриц связи ВСЕХ элементов: вводный раздел (метод) + однородный раздел на
     элемент (прямая+обратная матрица, расшифровка моментов, таблица данных свипа, графики траекторий x/y +
-    сечение пучка x-y) + сводная таблица диапазонов. Только скриптовые данные. Свежий .docx каждый раз."""
+    сечение пучка x-y) + сводная таблица диапазонов. Красная строка + выравнивание по ширине. Свежий .docx."""
     from docx import Document
     import latex2omml as lo
     path = path or os.path.join(OUTDIR, "element_compare_report.docx")
@@ -1897,6 +1924,7 @@ def build_matrix_report(path=None):
     _section_orient(doc, landscape=True)                            # сводная таблица — на АЛЬБОМНОЙ странице
     doc.add_heading("Сводная таблица диапазонов", level=1)
     _ranges_table(doc, mats)
+    _apply_body_formatting(doc)                                     # красная строка + по ширине для всех абзацев тела
     try:
         doc.save(path)
     except PermissionError:
