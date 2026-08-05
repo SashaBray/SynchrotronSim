@@ -639,7 +639,7 @@ def _plot_one_traj(m, cur, clbl, outdir, tag):
     for ax in (axx, axy): ax.set_xlabel("s, м"); ax.grid(alpha=0.3)
     axx.set_ylabel("x (гориз.), мм"); axy.set_ylabel("y (верт.), мм")
     axx.set_title("x-плоскость (— диффур, -- кик)"); axy.set_title("y-плоскость" + (" (откл. от опорной дуги)" if bending else ""))
-    fig.suptitle(f"{m['name']} ({m['kind']}) — траектории пучка", fontsize=11)
+    fig.suptitle(f"{m['name']} ({m['kind']}) — траектории пучка ({clbl})", fontsize=11)
     fig.text(0.5, 0.905, _traj_subtitle(m, cur, coef), ha="center", fontsize=9)   # токи обмоток → физкоэф
     fig.tight_layout(rect=[0, 0, 1, 0.9])
     png = os.path.join(outdir, f"mtraj_{m['name']}_{tag}.png"); fig.savefig(png, dpi=110); plt.close(fig)
@@ -658,7 +658,7 @@ def _plot_one_xy(m, cur, clbl, outdir, tag, ds, ks, coef):
     a0.set_title("до элемента (вход)"); a1.set_title("после элемента (o диффур, ✕ кик)")
     for a in (a0, a1):
         a.set_xlabel("x (гориз.), мм"); a.set_ylabel("y (верт.), мм"); a.grid(alpha=0.3); a.set_aspect("equal", "datalim")
-    fig.suptitle(f"{m['name']} ({m['kind']}) — сечение пучка x-y", fontsize=11)
+    fig.suptitle(f"{m['name']} ({m['kind']}) — сечение пучка x-y ({clbl})", fontsize=11)
     fig.text(0.5, 0.9, _traj_subtitle(m, cur, coef), ha="center", fontsize=9)      # токи обмоток → физкоэф
     fig.tight_layout(rect=[0, 0, 1, 0.89])
     png = os.path.join(outdir, f"mxy_{m['name']}_{tag}.png"); fig.savefig(png, dpi=110); plt.close(fig)
@@ -666,21 +666,17 @@ def _plot_one_xy(m, cur, clbl, outdir, tag, ds, ks, coef):
 
 
 def _matrix_plots(m, outdir):
-    """НЕСКОЛЬКО отдельных графиков (каждый в текущем формате, диффур+кик) при разных токах: мой imax/2
-    (авто-масштаб для читаемости) + фиксированные +25, +50, −25 А (перегруз — виден эффект); у PM — только
-    фикс. поле. На КАЖДЫЙ ток: график траекторий x/y И сечение пучка x-y до/после. Возврат
-    (traj_pngs, xy_pngs, rmse0) — списки парны по токам; rmse0 при первом (моём/PM) токе."""
-    per = " на обмотку" if (not m.get("pm") and len(m["devs"]) > 1) else ""
+    """НЕСКОЛЬКО отдельных графиков (диффур+кик) при АДАПТИВНЫХ токах, привязанных к релевантному диапазону
+    элемента: граница релевантности imax (R²≥0.95) + ½ релевантного (±imax/2). Так нет графиков с чрезмерным
+    перегрузом (DQ при своих ~3А, не ±50). У PM — только фикс. поле. На КАЖДЫЙ ток: график траекторий x/y И
+    сечение пучка x-y. Возврат (traj_pngs, xy_pngs, rmse0) — списки парны по токам; rmse0 при первом токе."""
     if m.get("pm"):
-        curlist = [("-", "PM (фикс. поле)", "pm")]
-    else:
-        i0 = 0.5 * float(m["imax"])                              # мой ток — половина релевантного диапазона (авто-масштаб)
-        bending = m["kind"] in ("dipole", "dq", "kicker")
-        ds0, _, _ = _diffur_su(m["devs"], i0, bending)
-        dmax = max(max(abs(d[-1, 1]), abs(d[-1, 2])) for d in ds0) * 1e3
-        if dmax > 8.0: i0 = i0 * 6.0 / dmax
-        curlist = [(i0, f"{i0:+.2f} А{per}", "i0"), (25.0, f"+25 А{per}", "p25"),
-                   (50.0, f"+50 А{per}", "p50"), (-25.0, f"−25 А{per}", "m25")]
+        curlist = [("-", "фикс. поле", "pm")]
+    else:                                                       # АДАПТИВНЫЙ ток: привязан к релевантному диапазону
+        im = float(m["imax"])                                   # граница релевантности (R²≥0.95) — не перегруз
+        curlist = [(im, "граница релевантного диапазона", "imax"),
+                   (0.5 * im, "½ релевантного диапазона", "halfp"),
+                   (-0.5 * im, "−½ релевантного диапазона", "halfm")]
     traj_pngs = []; xy_pngs = []; rmse0 = float("nan"); first = True
     for cur, clbl, tag in curlist:
         try:
