@@ -1779,9 +1779,27 @@ def _data_table(doc, m):
     p.runs[0].font.size = Pt(9)
 
 
+MOMENT_DESC = {                                                     # физический смысл киковых мультипольных моментов
+    "B":  "нормальный диполь (горизонтальный изгиб)",
+    "Bv": "скью диполь (вертикальный изгиб)",
+    "G":  "нормальный квадруполь (градиент, фокусировка)",
+    "Gv": "скью квадруполь (связь плоскостей x–y)",
+    "S":  "нормальный секступоль",
+    "O":  "нормальный октуполь",
+}
+
+
+def _moment_legend(doc, outputs):
+    """Пояснение к вектору киковых моментов: символ → физический смысл (только присутствующие в outputs)."""
+    from docx.shared import Pt
+    parts = [f"{mp} — {MOMENT_DESC.get(mp, mp)}" for mp in outputs]
+    p = doc.add_paragraph("Киковые моменты:  " + ";  ".join(parts) + ".")
+    p.runs[0].font.size = Pt(9)
+
+
 def _matrix_section(doc, m, lo):
-    """ОДНОРОДНЫЙ раздел элемента: заголовок → прямая+обратная матрица (формулы) → таблица данных → графики
-    (траектории x/y в двух плоскостях + сечение пучка x-y до/после). Только скриптовые данные."""
+    """ОДНОРОДНЫЙ раздел элемента: заголовок → прямая+обратная матрица (формулы) + расшифровка моментов →
+    таблица данных → графики (траектории x/y в двух плоскостях + сечение пучка x-y до/после). Только скриптовые данные."""
     from docx.shared import Inches
     doc.add_heading(f"{m['name']}  ({m['kind']}, обмоток: {len(m['labels'])})", level=1)
     ov = ", ".join(m["outputs"]); iv = ", ".join(_curname(l) for l in m["labels"])
@@ -1805,11 +1823,13 @@ def _matrix_section(doc, m, lo):
             c[nmo + 1].text = "∞" if abs(B) < 1e-30 else f"{abs(1.0 / (B * mt.QP)):.3f}"
         c[ncol - 1].text = "—" if (rmse0 != rmse0) else f"{rmse0:.4f}"
         doc.add_paragraph()                                          # отступ после таблицы
+        _moment_legend(doc, m["outputs"])                            # расшифровка вектора моментов (B, G)
     else:                                                            # прямая + обратная матрица + таблица скана
         M = np.asarray(m["M"], float); Minv = np.linalg.pinv(M); nr, nc = M.shape
         square = (nr == nc and abs(np.linalg.det(M)) > 1e-30)
         doc.add_paragraph(f"Прямая (ток→коэф):  ({ov})ᵀ = M · ({iv})ᵀ")
         p = doc.add_paragraph(); lo.add_formula(p, _matrix_latex(M, "M")); doc.add_paragraph()   # отступ после формулы
+        _moment_legend(doc, m["outputs"])                            # расшифровка вектора моментов (после выражения связи)
         doc.add_paragraph(f"Обратная (коэф→ток):  ({iv})ᵀ = {'M⁻¹' if square else 'M⁺'} · ({ov})ᵀ")
         p = doc.add_paragraph(); lo.add_formula(p, _matrix_latex(Minv, "M^{-1}" if square else "M^{+}")); doc.add_paragraph()
         _data_table(doc, m)
