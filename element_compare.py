@@ -1225,6 +1225,29 @@ def _relevant_imax(curs, vals_rows, thr=0.95):
     return float(curs[best - 1]), float(r2)
 
 
+def _relevant_imax_ext(devs, L, pairs, curs, Vals, cap=50.0, thr=0.95):
+    """Релевантный диапазон линейности R²≥thr. Сначала операционная лестница (curs). Если линейность держится
+    до её ВЕРХА (онсет не найден) — ПРОДОЛЖАЕМ пробовать более высокие токи до cap А, пока R² не упадёт. Иначе
+    потолок лестницы (у октуполя 6·Iраб=4.8А) выдаётся за границу диапазона, хотя связь линейна много дальше
+    (в таблице ±50А R²=1). Останавливаемся, как только R² падает. Возврат (Imax, R²)."""
+    imax, r2 = _relevant_imax(curs, [Vals[i, j] for i, j in pairs])
+    if imax < curs[-1] - 1e-9 or curs[-1] >= cap - 1e-9:
+        return imax, r2                                       # онсет внутри лестницы / лестница уже ≥ cap
+    wjs = {j for _, j in pairs}
+    ecurs = list(curs); evals = {(i, j): list(Vals[i, j]) for (i, j) in pairs}
+    for c in np.linspace(float(curs[-1]), cap, 8)[1:]:        # доп. токи выше лестницы, до cap
+        try:
+            cc = {j: extract_coeffs([(devs[j], float(c))], L) for j in wjs}
+        except Exception:
+            break                                             # извлечение сломалось → предел здесь
+        ecurs.append(float(c))
+        for (i, j) in pairs: evals[(i, j)].append(float(cc[j][MULTIPOLES[i]]))
+        im, rr = _relevant_imax(np.array(ecurs), [np.array(evals[(i, j)]) for (i, j) in pairs])
+        if im < c - 1e-9:                                     # R² упал на этом токе — истинный предел найден
+            return im, rr
+    return _relevant_imax(np.array(ecurs), [np.array(evals[(i, j)]) for (i, j) in pairs])
+
+
 def _combo_grid(nw, lvl):
     """Узлы комбо-сетки токов обмоток в кубе [−lvl,lvl]^nw (без нулевого узла). Малая размерность (3^nw≤30) —
     полная 3-уровневая сетка; средняя (2^nw≤40) — углы куба; большая — случайная выборка (фикс. seed)."""
@@ -1335,7 +1358,7 @@ def compute_element_matrices(elements=None):
             rows = [i for i in range(len(MULTIPOLES)) if kick[i] > 1e-4 * kmax and i != 5] or [int(kick.argmax())]
             kij = np.abs(M) * (abs(mt.QP * L) * scale)[:, None]      # линейность по ДОМИНАНТНОМУ (по кику) выходу обмотки
             pairs = [(int(kij[:, j].argmax()), j) for j in range(len(labels))]
-        imax, r2 = _relevant_imax(curs, [Vals[i, j] for i, j in pairs])
+        imax, r2 = _relevant_imax_ext(devs, L, pairs, curs, Vals)    # + проба выше лестницы, если линейно до её верха
         combo = combo_verify(base, devs, L, M, rows, imax) if len(devs) > 1 else None   # суперпозиция многообмоточных
         res.append(dict(base=base, kind=kind, labels=labels, devs=devs, M=M, rows=rows, L=L, r2=r2,
                         imax=imax, i_op=i_op, curs=curs, Vals=Vals, combo=combo, pm=False))
