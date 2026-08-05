@@ -1050,32 +1050,44 @@ def _finalize_demo_config(lat_id, dev, kind, coeffs, Leff):
     _write("lattice_configs.csv", h, rows)
 
 
+def _full_exit_angle(ref_lab):
+    """Полный угол выхода опорной частицы ч0 (лаб XYZ, вход вдоль +x, изгиб в плоскости X-Y): θ=atan2(ΔY,ΔX)
+    по хвостовой доле траектории. Для НЕ повёрнутого изгибающего (yaw=0) это и есть полный изгиб."""
+    n = len(ref_lab); k = int(n * 0.8)
+    return math.atan2(ref_lab[-1, 1] - ref_lab[k, 1], ref_lab[-1, 0] - ref_lab[k, 0])
+
+
 def setup_viz(dev, cur, viz_id, Leff=None):
-    """ПОСТОЯННЫЙ конфиг id=viz_id для visualize.py: диффур (trajectories_exp<id>.bin) + кик
-    (trajectories_exp<id>_kick.bin) в лаб-XYZ при ТОЧНОМ токе cur ('-' ⇒ PM). Leff — общий L_eff (если None,
-    берётся из свипа). Конфиг НЕ чистится. mat_* = фит (для viz_html кик-модели). Возврат dict со сводкой."""
+    """ПОСТОЯННЫЙ конфиг id=viz_id для visualize.py/viz_html: диффур (trajectories_exp<id>.bin) + кик при ТОЧНОМ
+    токе cur ('-' ⇒ PM). Leff — общий L_eff (если None — из свипа). mat_* = фит (viz_html кик-модель через C++).
+    КОРРЕКТОР (kind=kicker): кик через СЕКТОР (конфиг kind='dq', mat_B), но БЕЗ поворота (yaw=0, θ=полный угол
+    выхода) — как просил пользователь. Возврат dict со сводкой."""
     kind = LCROW[dev].get("kind") or "quad"
-    bending = kind in ("dipole", "dq"); pm = (cur == "-")
+    corrector = (kind == "kicker")                                   # корректор: сектор-кик БЕЗ поворота
+    viz_kind = "dq" if corrector else kind                           # kind, который читает C++ (dq ⇒ секторный изгиб)
+    bending = viz_kind in ("dipole", "dq"); pm = (cur == "-")
     if Leff is None:
-        rc = sweep_currents(dev, kind, PROBES); Leff = rc[0]["Leff_common"]
+        rc = sweep_currents(dev, viz_kind, PROBES); Leff = rc[0]["Leff_common"]
     cur_val = 0.0 if pm else float(cur)
-    yaw = tune_bend_yaw(dev, cur_val) if bending else 0.0
+    yaw = 0.0 if corrector else (tune_bend_yaw(dev, cur_val) if bending else 0.0)   # корректор НЕ поворачиваем
     geom = build_windings([(dev, "-" if pm else cur_val)], yaw, lat_id=viz_id, grp_id=viz_id, exp_id=viz_id)
     rr = subprocess.run([EXE, str(viz_id)], capture_output=True, text=True, cwd=ROOT)   # диффур → .bin
     if rr.returncode != 0:
         raise RuntimeError(f"диффур упал: {rr.stderr[-400:]}")
     trajs = read_bin(viz_id); ref_lab = trajs[0]
     diff_su = diff_local(trajs, geom["xstart"], bending)             # фит коэф при ТОЧНОМ токе (общий L_eff)
-    if kind == "dq":
-        coeffs, mse = _fit_gs_combo(dev, geom, diff_su, Leff, 2.0 * yaw)
+    theta0 = _full_exit_angle(ref_lab) if corrector else 2.0 * yaw   # корректор yaw=0 ⇒ θ=полный угол; симм. ⇒ 2·yaw
+    if viz_kind == "dq":
+        coeffs, mse = _fit_gs_combo(dev, geom, diff_su, Leff, theta0)
     else:
-        coeffs, mse = _coeff_at_L(dev, kind, geom, PROBES, diff_su, Leff, theta0=2.0 * yaw)
-    kick_lab = kick_to_lab(track_set(dev, coeffs, Leff, kind, geom, PROBES), ref_lab)   # кик → лаб XYZ по ч0
+        coeffs, mse = _coeff_at_L(dev, viz_kind, geom, PROBES, diff_su, Leff, theta0=theta0)
+    kick_lab = kick_to_lab(track_set(dev, coeffs, Leff, viz_kind, geom, PROBES), ref_lab)   # кик → лаб XYZ по ч0
     write_bin(os.path.join(RESULTS, f"trajectories_exp{viz_id}_kick.bin"), kick_lab)
-    _finalize_demo_config(viz_id, dev, kind, coeffs, Leff)          # mat_* + геометрия в конфиг → viz_html кик ≠ 0
+    _finalize_demo_config(viz_id, dev, viz_kind, coeffs, Leff)      # mat_*+геометрия+kind → viz_html кик через C++
     rms = math.sqrt(mse) * 1e3; cs = " ".join(f"{k}={v:+.3e}" for k, v in coeffs.items())
-    print(f"  id={viz_id} {dev} ({kind}) ток={'PM' if pm else f'{cur_val:+.3f}А'}  L_eff={Leff:.4f}  {cs}  RMS={rms:.4f}мм")
-    return dict(id=viz_id, dev=dev, kind=kind, cur=("PM" if pm else cur_val), Leff=Leff, coeffs=coeffs, rms=rms)
+    lbl = f"{kind}→{viz_kind}" if corrector else kind
+    print(f"  id={viz_id} {dev} ({lbl}) ток={'PM' if pm else f'{cur_val:+.3f}А'}  L_eff={Leff:.4f}  {cs}  RMS={rms:.4f}мм")
+    return dict(id=viz_id, dev=dev, kind=viz_kind, cur=("PM" if pm else cur_val), Leff=Leff, coeffs=coeffs, rms=rms)
 
 
 def _drop_config(*ids):
@@ -1088,11 +1100,26 @@ def _drop_config(*ids):
             if os.path.exists(p): os.remove(p)
 
 
+def _corrector_main():
+    """Главная обмотка корректора с картой поля → (dev_main, base_имя_элемента) или None. Для визуализации
+    корректор представляем ГЛАВНОЙ обмоткой (как DQ — обмоткой I1)."""
+    for d in sorted(LCROW):
+        if (LCROW[d].get("kind") == "kicker" and "_main_" in d
+                and (HW.get(d, {}).get("map_bin_path") or "").strip()):
+            return d, d.replace("_main_", "_")                       # corrector_main_100A_L100 → corrector_100A_L100
+    return None
+
+
 def setup_viz_all(start_id=VIZ_START):
-    """Постоянные конфиги визуализации для ВСЕХ элементов, id подряд с start_id. Ток каждого = ПРОЕКТНЫЙ
-    (design_current: фит.коэф = mat_* из .lte СИЛЫ). Диполи — PM. Печатает таблицу id↔элемент↔ток."""
+    """Постоянные конфиги визуализации для ВСЕХ элементов, id подряд с start_id. Ток каждого = РЕЛЕВАНТНЫЙ
+    (граница imax из матрицы; знак — проектной полярности). Корректор — ГЛАВНОЙ обмоткой, НЕ повёрнут (yaw=0).
+    Диполи — PM. Печатает таблицу id↔элемент↔ток."""
+    imax_by = {d: float(m.get("imax") or 0.0)                        # релевантный ток по КАЖДОМУ устройству обмотки
+               for m in build_all_mats() for d in m.get("devs", [])} # (имя элемента ≠ имя обмотки у SP/DQ/корректора)
     cands = candidates(("quad", "sext", "oct")) + candidates_bending()
-    print(f"=== визуализация ВСЕХ элементов ({len(cands)}), id с {start_id}, токи по ПРОЕКТНЫМ коэф ===")
+    corr = _corrector_main()
+    if corr: cands = cands + [(corr[0], "kicker")]                   # + корректор (главная обмотка)
+    print(f"=== визуализация ВСЕХ элементов ({len(cands)}), id с {start_id}, токи РЕЛЕВАНТНЫЕ (граница imax) ===")
     _drop_config(950, *range(start_id, start_id + len(cands) + 5))   # снять старый 950 и прежние viz-конфиги
     summary = []
     try:
@@ -1101,9 +1128,14 @@ def setup_viz_all(start_id=VIZ_START):
             try:
                 if is_pm(dev):
                     summary.append(setup_viz(dev, "-", vid, Leff=None))
+                elif kind == "kicker":                               # корректор: imax элемента, Leff из БД, БЕЗ поворота
+                    L = float(LCROW[dev].get("eff_length") or 0.1)
+                    summary.append(setup_viz(dev, imax_by.get(dev) or 100.0, vid, Leff=L))
                 else:
                     recs = sweep_currents(dev, kind, PROBES)
-                    summary.append(setup_viz(dev, design_current(dev, kind, recs), vid, Leff=recs[0]["Leff_common"]))
+                    dc = design_current(dev, kind, recs); im = imax_by.get(dev)
+                    cur = math.copysign(im, dc) if (im and dc not in (0, "-")) else dc   # релевантная магнитуда, проектный знак
+                    summary.append(setup_viz(dev, cur, vid, Leff=recs[0]["Leff_common"]))
             except Exception as e:
                 print(f"  ! id={vid} {dev}: {type(e).__name__}: {e}"); cleanup()
     finally:
