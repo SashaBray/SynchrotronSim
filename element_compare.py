@@ -1927,13 +1927,13 @@ def _working_point_table(doc, m):
     ctrl = [mp for mp in m["outputs"] if abs(design.get(mp, 0.0)) > 1e-30]   # управляемые моменты (есть проект .lte)
 
     if not ctrl:                                                    # корректор: проектных mat_* нет → токи не заданы
-        doc.add_paragraph("Проектные коэффициенты по .lte не заданы (корректор — untuned); рабочие токи "
-                          "задаются оперативно (номинальные токи по КД ожидаются).")
+        doc.add_paragraph("Проектные коэффициенты по .lte не заданы (корректор — untuned); "
+                          "рабочие токи задаются оперативно.")
         _tcap(doc, f"{m['name']} — рабочие токи обмоток")
         tc = doc.add_table(rows=1, cols=2); tc.style = "Light Grid Accent 1"
         tc.rows[0].cells[0].text = "обмотка"; tc.rows[0].cells[1].text = "рабочий ток, А"
         for lb in labels:
-            c = tc.add_row().cells; c[0].text = lb; c[1].text = "— (ждём КД)"
+            c = tc.add_row().cells; c[0].text = lb; c[1].text = "—"
         doc.add_paragraph(); return
 
     cols = list(range(min(len(ctrl), nI)))                          # первые N обмоток под N управляемых моментов
