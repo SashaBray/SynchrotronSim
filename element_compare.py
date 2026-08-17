@@ -8,7 +8,7 @@
 прогнать C++-диффур, прочитать траекторию, вычистить временные строки. Дальше — свип токов, фит кика,
 Word-отчёт. Диффур eff_length НЕ использует (трек по карте поля) ⇒ спека «без диффурных длин» соблюдена.
 """
-import os, csv, math, struct, subprocess, shutil, sys, itertools, atexit
+import os, csv, math, struct, subprocess, shutil, sys, itertools, atexit, time
 import numpy as np
 import matrix_tracker as mt
 import bip_matrix as bm
@@ -32,9 +32,16 @@ CSV4 = ["lattice_configs.csv", "element_connectivity.csv", "particle_groups.csv"
 
 def _rows(name):
     p = os.path.join(TB, name)
-    with open(p, encoding="utf-8") as f:
-        r = list(csv.reader(f, delimiter=";"))
-    return r[0], r[1:]
+    last = None
+    for attempt in range(5):                        # ретрай: транзиентный сбой ФС Windows (Errno 22 при чтении)
+        try:
+            with open(p, encoding="utf-8") as f:
+                r = list(csv.reader(f, delimiter=";"))
+            return r[0], r[1:]
+        except OSError as e:
+            last = e
+            time.sleep(0.1 * (attempt + 1))
+    raise last
 
 
 def _write(name, header, rows):
@@ -1847,30 +1854,60 @@ def _moment_legend(doc, outputs):
     p.runs[0].font.size = Pt(9)
 
 
+_DEV2VID_CACHE = None
+
+
+def _dev2vid():
+    """Карта device_type_id → id демо-конфига (lattice_id ≥ VIZ_START) для поиска сцены элемента. Ленивый кэш."""
+    global _DEV2VID_CACHE
+    if _DEV2VID_CACHE is None:
+        import pandas as pd
+        lat = pd.read_csv(os.path.join(TB, "lattice_configs.csv"), sep=";", skipinitialspace=True)
+        mp = {}
+        for _, r in lat.iterrows():
+            try: lid = int(r["lattice_id"])
+            except Exception: continue
+            if lid >= VIZ_START:
+                mp.setdefault(str(r["device_type_id"]).strip(), lid)
+        _DEV2VID_CACHE = mp
+    return _DEV2VID_CACHE
+
+
 def _element_shot(m, outdir):
-    """Off-screen PyVista-скрин 3D-глифа магнита (STL элемента, iso-вид, непрозрачный silver) для шапки
-    раздела. Возврат png или None (нет STL / PyVista недоступен — раздел строится без скрина)."""
+    """Скрин 3D-сцены элемента для шапки раздела — ТЕМ ЖЕ рендером, что и visualize.py (магниты+пучок+оси+
+    полная легенда+виджет ориентации), off-screen, iso-ракурс. Берётся из демо-конфига элемента (exp=id).
+    Возврат png или None (нет демо-конфига / PyVista недоступен)."""
+    d2v = _dev2vid()
+    vid = next((d2v[d] for d in m["devs"] if d in d2v), None)
+    if vid is None:
+        return None
     try:
         import pyvista as pv
         pv.OFF_SCREEN = True
+        import visualize as V
     except Exception:
         return None
-    stl = next(((HW.get(d, {}).get("stl_path") or "").strip() for d in m["devs"]
-                if (HW.get(d, {}).get("stl_path") or "").strip() not in ("", "-", "nan")), "")
-    p = os.path.join(ROOT, "workspace", "geometry", stl)
-    if not stl or not os.path.exists(p):
-        return None
     try:
-        mesh = pv.read(p); mesh.scale(0.001, inplace=True)
-        pl = pv.Plotter(off_screen=True, window_size=[760, 560]); pl.set_background("white")
-        pl.add_mesh(mesh, color="#c8ccd0", smooth_shading=True, specular=0.3, specular_power=15)
-        pl.camera_position = "iso"; pl.reset_camera(); pl.camera.zoom(1.3)
         png = os.path.join(outdir, f"shot_{m['name']}.png")
-        pl.screenshot(png); pl.close()
-        return png
-    except Exception as e:
-        print(f"  ! скрин {m['name']}: {type(e).__name__}: {e}")
+        V.visualize(vid, screenshot=png, view="iso", elevation=13, zoom=1.25)   # камера чуть выше уровня пучка
+        if os.path.exists(png):
+            _crop_right(png, 0.05)                                               # срезать 5% пустого справа
+            return png
         return None
+    except Exception as e:
+        print(f"  ! сцена {m['name']}: {type(e).__name__}: {e}")
+        return None
+
+
+def _crop_right(png, frac):
+    """Обрезать долю frac ширины справа (убрать пустой дрейф; легенда левее края — не задевается)."""
+    try:
+        from PIL import Image
+        im = Image.open(png)
+        w, h = im.size
+        im.crop((0, 0, int(round(w * (1.0 - frac))), h)).save(png)
+    except Exception as e:
+        print(f"  ! кроп {os.path.basename(png)}: {type(e).__name__}: {e}")
 
 
 def _matrix_section(doc, m, lo):
@@ -1879,9 +1916,9 @@ def _matrix_section(doc, m, lo):
     from docx.shared import Inches
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     doc.add_heading(f"{m['name']}  ({m['kind']}, обмоток: {len(m['labels'])})", level=1)
-    shot = None if m["name"].endswith("_sext") else _element_shot(m, OUTDIR)   # 3D-глиф (у sext-главы тот же магнит — не дублируем)
+    shot = None if m["name"].endswith("_sext") else _element_shot(m, OUTDIR)   # PyVista-сцена (у sext-главы тот же магнит — не дублируем)
     if shot:
-        doc.add_picture(shot, width=Inches(3.1)); doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+        doc.add_picture(shot, width=Inches(6.2)); doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
     ov = ", ".join(m["outputs"]); iv = ", ".join(_curname(l) for l in m["labels"])
     if m["kind"] == "dq":                                             # база (B,G) vs sext-глава (B,G,S)
         doc.add_paragraph(f"Ядро кика: диполь + квадруполь + секступоль (моменты {ov})." if "S" in m["outputs"]
@@ -1996,7 +2033,7 @@ def build_matrix_report(path=None):
     except PermissionError:
         path = os.path.splitext(path)[0] + "_new.docx"; doc.save(path)
         print(f"  (отчёт заблокирован Word — записан {os.path.basename(path)})")
-    print(f"формальный отчёт матриц связи ({len(mats)} элементов) → {path}")
+    print(f"формальный отчёт матриц связи ({len(mats)} элементов) -> {path}")
     return path
 
 

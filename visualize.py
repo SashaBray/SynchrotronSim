@@ -150,12 +150,17 @@ def build_combined_mesh(base, transforms_np):
     return pv.PolyData(flat_pts, flat_faces)
 
 
-def visualize(target_exp_id):
+def visualize(target_exp_id, screenshot=None, view="iso", zoom=1.0, elevation=0.0, azimuth=0.0,
+              window_size=(1400, 950)):
+    """Интерактивная 3D-сцена опыта. screenshot=<путь> → OFF-SCREEN рендер тем же конвейером (магниты+пучок+
+    оси+легенда) с ракурсом view ('iso' по умолч.), доворотами elevation/azimuth (град.) и зумом zoom → PNG
+    вместо окна (для вставки в отчёты). elevation<0 опускает камеру к уровню пучка."""
     t_start = time.time()
     ws = os.path.join(SCRIPT_DIR, "workspace") + os.sep
     print(f"\n{'=' * 50}\nVISUALIZING EXPERIMENT ID: {target_exp_id}\n{'=' * 50}")
 
-    plotter = pv.Plotter(title=f"Synchrotron Tracker - Exp {target_exp_id}")
+    plotter = pv.Plotter(title=f"Synchrotron Tracker - Exp {target_exp_id}",
+                         off_screen=bool(screenshot), window_size=list(window_size))
     plotter.set_background(VIZ_CFG.get("background", "white"))
 
     # 1. CSV -----------------------------------------------------------------
@@ -366,6 +371,28 @@ def visualize(target_exp_id):
         plotter.camera.view_angle = va                    # ПЕРСПЕКТИВА (parallel projection НЕ включаем)
 
     print(f"\nTotal scene preparation: {time.time() - t_start:.2f}s")
+    if screenshot:                                             # OFF-SCREEN: ракурс view + угол камеры + зум + скриншот
+        plotter.camera_position = view
+        plotter.reset_camera()
+        if elevation:                                          # elevation = АБСОЛЮТНЫЙ угол над горизонтом (град.);
+            fp = np.array(plotter.camera.focal_point, float)   # малый угол ⇒ камера чуть выше уровня пучка
+            pos = np.array(plotter.camera.position, float)
+            dist = float(np.linalg.norm(pos - fp))
+            hor = np.array([pos[0] - fp[0], pos[1] - fp[1], 0.0])
+            if np.linalg.norm(hor) < 1e-9:
+                hor = np.array([1.0, 1.0, 0.0])
+            hor /= np.linalg.norm(hor)
+            th = np.radians(float(elevation) + float(azimuth) * 0.0)   # azimuth пока не используется
+            nd = dist * (np.cos(th) * hor + np.sin(th) * np.array([0.0, 0.0, 1.0]))
+            plotter.camera.position = tuple(fp + nd)
+            plotter.camera.focal_point = tuple(fp)
+            plotter.camera.up = (0.0, 0.0, 1.0)
+        if zoom and zoom != 1.0:
+            plotter.camera.zoom(zoom)
+        plotter.screenshot(screenshot)
+        plotter.close()
+        print(f"--- screenshot ({view}) -> {screenshot} ---")
+        return
     print("--- Opening 3D window ---")
     plotter.show()
 
