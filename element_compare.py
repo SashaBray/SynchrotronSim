@@ -597,6 +597,23 @@ def _dq_fit(m, geom, ds, L, theta0):
     return _coeff_at_L(main, "dq", geom, PROBES, ds, L, theta0=theta0)
 
 
+def _fit_quad_gs(dev, geom, diff_su, L):
+    """Совместный фит (G, S) прямого квадруполя с СЕКСТУПОЛЬНЫМ киком по MSE траекторий: G — старт из 1D-скана,
+    затем Nelder-Mead по (G, S). Для варианта «квадруполь + секступоль» — проверка вклада паразитного S."""
+    c0, _ = _coeff_at_L(dev, "quad", geom, PROBES, diff_su, L)
+    x0 = np.array([c0["G"], 0.0]); simplex = np.array([x0, x0 + [0.02, 0.0], x0 + [0.0, 20.0]])   # масштабы G, S
+
+    def obj(x):
+        try:
+            return traj_mse(diff_su, track_set(dev, {"G": float(x[0]), "S": float(x[1])}, L, "quad", geom, PROBES))
+        except mt.ParticleLost:
+            return 1e3
+
+    res = minimize(obj, x0, method="Nelder-Mead",
+                   options=dict(initial_simplex=simplex, xatol=1e-7, fatol=1e-18, maxiter=3000, maxfev=3000))
+    return {"G": float(res.x[0]), "S": float(res.x[1])}, float(res.fun)
+
+
 def _matrix_traj_at(m, cur):
     """Диффур + КИК траектории 13 частиц при токе cur (все обмотки; '-' → PM фикс. поле). Кик — фит коэф по
     диффуру (совпадает конвенцией) через C++ кик-ядро. Возврат (diff_su, kick_su, bending, coef). None = потеря."""
@@ -607,6 +624,8 @@ def _matrix_traj_at(m, cur):
     try:
         if keff == "dq":
             coef, _ = _dq_fit(m, geom, ds, L, 2.0 * yaw)
+        elif m.get("sext_kick"):                                     # вариант квадруполь + секступоль (G+S)
+            coef, _ = _fit_quad_gs(m["devs"][0], geom, ds, L)
         else:
             coef, _ = _coeff_at_L(m["devs"][0], keff, geom, PROBES, ds, L, theta0=2.0 * yaw)
         kick_su = track_set(m["devs"][0], coef, L, keff, geom, PROBES)
@@ -730,7 +749,9 @@ def _scan_table_data(m):
     ds0, geom0, yaw0 = combo(i_ref)                              # опорный фит кик-коэф в направлении w
     try:
         if keff == "dq":
-            coeffs_ref, _ = _dq_fit(m, geom0, ds0, L, 2.0 * yaw0)   # база DQ → B,G;  sext-вариант → B,G,S
+            coeffs_ref, _ = _dq_fit(m, geom0, ds0, L, 2.0 * yaw0)   # база DQ → B,G;  корректор → B,G,S
+        elif m.get("sext_kick"):                                    # вариант квадруполь + секступоль → G,S
+            coeffs_ref, _ = _fit_quad_gs(devs[0], geom0, ds0, L)
         else:
             coeffs_ref, _ = _coeff_at_L(devs[0], keff, geom0, PROBES, ds0, L, theta0=2.0 * yaw0)
     except Exception:
@@ -1692,6 +1713,12 @@ def build_all_mats(elements=None, dq_bases=None):
                              outputs=[MULTIPOLES[i] for i in rows], labels=el["labels"], devs=el["devs"],
                              M=el["M"][rows], rows=rows, curs=el["curs"], Vals=el["Vals"],
                              imax=el["imax"], i_op=el["i_op"], r2=el["r2"], combo=el.get("combo"), note=""))
+            if el["kind"] == "quad":                                 # + вариант с СЕКСТУПОЛЬНЫМ киком (G+S) рядом
+                Si = MULTIPOLES.index("S"); vrows = list(rows) + [Si]   # для сравнения: паразитный секступоль
+                mats.append(dict(name=el["base"] + "_sext", kind="quad", ltag=_ltag(el["base"]), pm=False, L=el["L"],
+                                 outputs=[MULTIPOLES[i] for i in vrows], labels=el["labels"], devs=el["devs"],
+                                 M=el["M"][vrows], rows=vrows, curs=el["curs"], Vals=el["Vals"],
+                                 imax=el["imax"], i_op=el["i_op"], r2=el["r2"], combo=None, sext_kick=True, note=""))
     data = compute_coupling()                                        # DQ (combo-датасеты, дёшево)
     for dq in data["dq"]:
         if dq_bases is not None and dq["base"] not in dq_bases: continue
@@ -1844,14 +1871,47 @@ def _moment_legend(doc, outputs):
     p.runs[0].font.size = Pt(9)
 
 
+def _element_shot(m, outdir):
+    """Off-screen PyVista-скрин 3D-глифа магнита (STL элемента, iso-вид, непрозрачный silver) для шапки
+    раздела. Возврат png или None (нет STL / PyVista недоступен — раздел строится без скрина)."""
+    try:
+        import pyvista as pv
+        pv.OFF_SCREEN = True
+    except Exception:
+        return None
+    stl = next(((HW.get(d, {}).get("stl_path") or "").strip() for d in m["devs"]
+                if (HW.get(d, {}).get("stl_path") or "").strip() not in ("", "-", "nan")), "")
+    p = os.path.join(ROOT, "workspace", "geometry", stl)
+    if not stl or not os.path.exists(p):
+        return None
+    try:
+        mesh = pv.read(p); mesh.scale(0.001, inplace=True)
+        pl = pv.Plotter(off_screen=True, window_size=[760, 560]); pl.set_background("white")
+        pl.add_mesh(mesh, color="#c8ccd0", smooth_shading=True, specular=0.3, specular_power=15)
+        pl.camera_position = "iso"; pl.reset_camera(); pl.camera.zoom(1.3)
+        png = os.path.join(outdir, f"shot_{m['name']}.png")
+        pl.screenshot(png); pl.close()
+        return png
+    except Exception as e:
+        print(f"  ! скрин {m['name']}: {type(e).__name__}: {e}")
+        return None
+
+
 def _matrix_section(doc, m, lo):
-    """ОДНОРОДНЫЙ раздел элемента: заголовок → прямая+обратная матрица (формулы) + расшифровка моментов →
-    таблица данных → графики (траектории x/y в двух плоскостях + сечение пучка x-y до/после). Только скриптовые данные."""
+    """ОДНОРОДНЫЙ раздел элемента: заголовок → 3D-скрин магнита → прямая+обратная матрица (формулы) +
+    расшифровка моментов → таблица данных → графики (траектории x/y + сечение пучка x-y). Только скриптовые данные."""
     from docx.shared import Inches
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
     doc.add_heading(f"{m['name']}  ({m['kind']}, обмоток: {len(m['labels'])})", level=1)
+    shot = None if m.get("sext_kick") else _element_shot(m, OUTDIR)  # 3D-глиф (у sext-варианта тот же магнит — не дублируем)
+    if shot:
+        doc.add_picture(shot, width=Inches(3.1)); doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
     ov = ", ".join(m["outputs"]); iv = ", ".join(_curname(l) for l in m["labels"])
     if m["kind"] == "dq":                                             # факт-подпись ядра кика
         doc.add_paragraph(f"Ядро кика: диполь + квадруполь (моменты {ov}).")
+    elif m["kind"] == "quad":                                         # база (G) vs вариант с секступолем (G+S)
+        doc.add_paragraph(f"Ядро кика: квадруполь + секступоль (моменты {ov})." if m.get("sext_kick")
+                          else f"Ядро кика: квадруполь (момент {ov}).")
     traj_pngs, xy_pngs, rmse0 = _matrix_plots(m, OUTDIR)           # траектории + сечения x-y на КАЖДЫЙ ток + RMSE
     if m.get("pm"):                                                  # PM — фикс. состав + радиус изгиба + RMSE (свипа нет)
         nmo = len(m["outputs"]); has_b = "B" in m["outputs"]
