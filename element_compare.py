@@ -1910,9 +1910,73 @@ def _crop_right(png, frac):
         print(f"  ! кроп {os.path.basename(png)}: {type(e).__name__}: {e}")
 
 
+def _working_point_table(doc, m):
+    """Рабочая точка элемента: проектные mat_* (.lte, решётка 1) → подобранные рабочие токи обмоток → ФАКТ.
+    коэффициенты при этих токах через матрицу связи M.
+    • Чистый элемент (quad/sext/oct): одна обмотка по доминантному моменту (I = mat_dom / наклон).
+    • DQ (комбинированная функция): токи I1, I2 подбираются РЕШЕНИЕМ 2×2, чтобы ОДНОВРЕМЕННО попасть в
+      проектные B и G (I1 даёт −G, I2 даёт +G ⇒ управляемы); I3 (корректирующая) = 0. Строка S (у DQ_sext) —
+      паразитный секступоль при этих токах.
+    • Корректор (mat_* = 0, untuned) → строка-примечание. • PM (тока нет) → пропуск."""
+    if m.get("pm"):
+        return
+    matcol = {"B": "mat_B", "Bv": "mat_Bv", "G": "mat_G", "Gv": "mat_Gv", "S": "mat_S", "O": "mat_O"}
+    dev0 = m["devs"][0]; row0 = LCROW.get(dev0, {})
+    design = {mp: float(row0.get(matcol.get(mp, ""), 0.0) or 0.0) for mp in m["outputs"]}
+    M = np.asarray(m["M"], float); nI = M.shape[1]; imax = float(m.get("imax") or 0.0)
+
+    if m["kind"] == "dq":                                            # комбинированная функция: I1,I2 под B и G (I3=0)
+        ctrl = [mp for mp in ("B", "G") if mp in m["outputs"] and abs(design.get(mp, 0.0)) > 1e-30]
+        cols = list(range(min(len(ctrl), nI)))                       # обмотки I1..I(len ctrl) — по числу управляемых
+        ci = [m["outputs"].index(mp) for mp in ctrl]
+        M2 = M[np.ix_(ci, cols)]; tgt = np.array([design[mp] for mp in ctrl])
+        try:
+            sol = np.linalg.solve(M2, tgt) if M2.shape[0] == M2.shape[1] else np.linalg.lstsq(M2, tgt, rcond=None)[0]
+        except np.linalg.LinAlgError:
+            sol = np.linalg.lstsq(M2, tgt, rcond=None)[0]
+        Ivec = np.zeros(nI)
+        for k, j in enumerate(cols): Ivec[j] = sol[k]
+        cur_txt = ", ".join(f"{m['labels'][j]} = {Ivec[j]:+.3f} А" for j in cols)
+        off = [m["labels"][j] for j in range(nI) if j not in cols]
+        offtxt = f" ({', '.join(off)} = 0, корректирующая)" if off else ""
+        zref = max((abs(Ivec[j]) for j in cols), default=0.0)
+        lead = f"Рабочие токи подобраны под проектные {' и '.join(ctrl)}: {cur_txt}{offtxt}."
+    else:                                                            # чистый элемент: одна обмотка по dom-моменту
+        dom = {"quad": "G", "sext": "S", "oct": "O"}.get(m["kind"])
+        if dom is None or dom not in m["outputs"] or abs(design.get(dom, 0.0)) < 1e-30:
+            doc.add_paragraph("Рабочая точка: проектные коэффициенты по .lte не заданы (корректор — untuned); "
+                              "рабочий ток определяется номинальными токами по КД (ожидаются).")
+            return
+        di = m["outputs"].index(dom); slope = float(M[di][0])
+        if abs(slope) < 1e-30:
+            return
+        I_op = design[dom] / slope
+        Ivec = np.zeros(nI); Ivec[0] = I_op; zref = abs(I_op)
+        lead = f"Рабочий ток обмотки {m['labels'][0]} = {I_op:+.3f} А (по проектному моменту {dom})."
+    act = M @ Ivec                                                   # факт. коэф. по матрице связи при подобранных токах
+    zap = (imax / zref) if zref > 1e-30 else float("inf")
+    if m["kind"] == "dq":                                           # у DQ imax — размах калибровки комбо, не граница R²
+        tail = f"Токи в пределах калибровки комбо-датасета (±{imax:.1f} А); R² линейности = {float(m.get('r2', 1.0)):.3f}."
+    else:
+        tail = f"Запас до границы линейности: imax/|I| = {zap:.1f} (imax = {imax:.1f} А, R² ≥ 0.95)."
+    doc.add_paragraph(lead + " Столбец «факт» — коэффициенты, которые дают эти токи. " + tail)
+    _tcap(doc, f"{m['name']} — проектные (.lte) и фактические коэффициенты при рабочих токах")
+    t = doc.add_table(rows=1, cols=4); t.style = "Light Grid Accent 1"
+    for j, h in enumerate(("момент", "проектный (.lte)", "факт при рабочих токах", "Δ, %")):
+        t.rows[0].cells[j].text = h
+    for i, mp in enumerate(m["outputs"]):
+        c = t.add_row().cells; d = design.get(mp, 0.0); a = float(act[i])
+        c[0].text = mp
+        c[1].text = f"{d:+.4e}" if abs(d) > 1e-30 else "— (нет в .lte)"
+        c[2].text = f"{a:+.4e}"
+        c[3].text = "—" if abs(d) < 1e-30 else f"{100.0 * (a - d) / abs(d):+.1f}"
+    doc.add_paragraph()
+
+
 def _matrix_section(doc, m, lo):
     """ОДНОРОДНЫЙ раздел элемента: заголовок → 3D-скрин магнита → прямая+обратная матрица (формулы) +
-    расшифровка моментов → таблица данных → графики (траектории x/y + сечение пучка x-y). Только скриптовые данные."""
+    расшифровка моментов → таблица данных → графики (траектории x/y + сечение пучка x-y) → рабочая точка
+    (проект vs факт). Только скриптовые данные."""
     from docx.shared import Inches
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     doc.add_heading(f"{m['name']}  ({m['kind']}, обмоток: {len(m['labels'])})", level=1)
@@ -1955,6 +2019,7 @@ def _matrix_section(doc, m, lo):
         doc.add_picture(tpng, width=Inches(6.3))
         doc.add_picture(xpng, width=Inches(5.6))
     doc.add_paragraph()                                              # отступ после графиков раздела
+    _working_point_table(doc, m)                                    # рабочая точка: проект (.lte) → ток → факт
 
 
 def _ranges_table(doc, mats):
