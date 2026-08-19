@@ -20,7 +20,7 @@ RESULTS = os.path.join(ROOT, "workspace", "results")
 EXE = os.path.join(ROOT, "build", "SynchrotronTracker.exe")     # диффур (Boris по картам)
 EXE_MT = os.path.join(ROOT, "build", "MatrixTracker.exe")       # C++ киковое ядро (--serve): трекинг кик-модели
 V_BEAM = 2.967e8            # скорость пучка (particle_groups)
-ME, QE = 9.109e-31, -1.602e-19
+ME, QE = 9.1093837e-31, -1.602176634e-19    # точные константы (как bip_matrix/matrix_core.h) — без усечёнки
 
 # временные id (не пересекаются с реальными 1/2/3); всё под ними чистится
 TMP_LAT, TMP_GRP, TMP_EXP = 900, 900, 900
@@ -152,7 +152,7 @@ os.environ.setdefault("SS_SECTOR", "1")                # секторный/ки
 EFF, PHYS, COUP, TRANS = mt.load_db()
 HW = {r["device_type_id"]: r for r in mt._read("hardware_library.csv")}
 LCROW = {r["device_type_id"]: r for r in mt._read("lattice_configs.csv") if r.get("lattice_id") == "1"}
-DELTA = (bm.GAMMA * 9.109e-31 * V_BEAM - bm.P_MOM) / bm.P_MOM   # δ пучка (усечённая масса, как диффур)
+DELTA = (bm.GAMMA * ME * V_BEAM - bm.P_MOM) / bm.P_MOM   # δ от рассинхронизации масс диффур/кик (=0 при точных)
 
 
 def is_pm(dev):
