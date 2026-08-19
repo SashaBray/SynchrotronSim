@@ -21,6 +21,11 @@ EXE = os.path.join(ROOT, "build", "SynchrotronTracker.exe")     # диффур (
 EXE_MT = os.path.join(ROOT, "build", "MatrixTracker.exe")       # C++ киковое ядро (--serve): трекинг кик-модели
 V_BEAM = 2.967e8            # скорость пучка (particle_groups)
 ME, QE = 9.1093837e-31, -1.602176634e-19    # точные константы (как bip_matrix/matrix_core.h) — без усечёнки
+# Энергетический множитель Bρ(проект 6 ГэВ)/Bρ(суррогат γ≈7): трекинг идёт на суррогатной энергии, реальный
+# ток питания = (arg_val суррогата) × этот множитель / (витки в ОДНОЙ катушке). Bρ ∝ γβ.
+_MC2_MEV = 0.51099895069
+_G6 = 6000.0 / _MC2_MEV; _B6 = math.sqrt(1.0 - 1.0 / (_G6 * _G6))
+ENERGY_FACTOR = (_G6 * _B6) / (bm.GAMMA * bm.BETA)
 
 # временные id (не пересекаются с реальными 1/2/3); всё под ними чистится
 TMP_LAT, TMP_GRP, TMP_EXP = 900, 900, 900
@@ -1911,11 +1916,9 @@ def _crop_right(png, frac):
 
 
 def _working_point_table(doc, m):
-    """Рабочая точка элемента (для ВСЕХ элементов): проектные mat_* (.lte, решётка 1) → рабочие токи обмоток
-    (ТАБЛИЦА) → фактические коэффициенты при этих токах через матрицу связи M (ТАБЛИЦА). Токи подбираются,
-    чтобы одновременно попасть в проектные моменты: N моментов с проектным mat_* ⇒ первые N обмоток (I1..IN)
-    решением N×N; остальные обмотки (корректирующие) = 0. quad/oct — I; sext — I1 (I2 = 0); DQ — I1, I2 под
-    B и G (I3 = 0). Корректор (mat_* = 0, untuned) — токи не заданы (ждём номиналы КД). PM — обмоток/токов нет."""
+    """Рабочая точка элемента: проектные mat_* (.lte, решётка 1) → рабочие токи обмоток решением под проектные
+    моменты (N моментов ⇒ первые N обмоток) → РЕАЛЬНЫЙ ток питания = arg_val × ENERGY_FACTOR / (витки-на-катушку)
+    и % номинала (витки/номинал из hardware_library). + таблица проект vs факт по матрице связи. PM — токов нет."""
     matcol = {"B": "mat_B", "Bv": "mat_Bv", "G": "mat_G", "Gv": "mat_Gv", "S": "mat_S", "O": "mat_O"}
     if m.get("pm"):
         doc.add_paragraph("Постоянный магнит — обмоток и токов нет; состав поля приведён в таблице выше.")
@@ -1923,57 +1926,54 @@ def _working_point_table(doc, m):
     labels = m["labels"]; nI = len(labels)
     dev0 = m["devs"][0]; row0 = LCROW.get(dev0, {})
     design = {mp: float(row0.get(matcol.get(mp, ""), 0.0) or 0.0) for mp in m["outputs"]}
-    M = np.asarray(m["M"], float); imax = float(m.get("imax") or 0.0)
+    M = np.asarray(m["M"], float)
     ctrl = [mp for mp in m["outputs"] if abs(design.get(mp, 0.0)) > 1e-30]   # управляемые моменты (есть проект .lte)
 
-    if not ctrl:                                                    # корректор: проектных mat_* нет → токи не заданы
-        doc.add_paragraph("Проектные коэффициенты по .lte не заданы (корректор — untuned); "
-                          "рабочие токи задаются оперативно.")
-        _tcap(doc, f"{m['name']} — рабочие токи обмоток")
-        tc = doc.add_table(rows=1, cols=2); tc.style = "Light Grid Accent 1"
-        tc.rows[0].cells[0].text = "обмотка"; tc.rows[0].cells[1].text = "рабочий ток, А"
-        for lb in labels:
-            c = tc.add_row().cells; c[0].text = lb; c[1].text = "—"
-        doc.add_paragraph(); return
+    Ivec = np.zeros(nI)                                             # arg_val обмоток (суррогат); нет проекта ⇒ 0
+    if ctrl:
+        cols = list(range(min(len(ctrl), nI)))                      # первые N обмоток под N управляемых моментов
+        ci = [m["outputs"].index(mp) for mp in ctrl]
+        M2 = M[np.ix_(ci, cols)]; tgt = np.array([design[mp] for mp in ctrl])
+        try:
+            sol = np.linalg.solve(M2, tgt) if M2.shape[0] == M2.shape[1] else np.linalg.lstsq(M2, tgt, rcond=None)[0]
+        except np.linalg.LinAlgError:
+            sol = np.linalg.lstsq(M2, tgt, rcond=None)[0]
+        for k, j in enumerate(cols): Ivec[j] = sol[k]
+    act = M @ Ivec
 
-    cols = list(range(min(len(ctrl), nI)))                          # первые N обмоток под N управляемых моментов
-    ci = [m["outputs"].index(mp) for mp in ctrl]
-    M2 = M[np.ix_(ci, cols)]; tgt = np.array([design[mp] for mp in ctrl])
-    try:
-        sol = np.linalg.solve(M2, tgt) if M2.shape[0] == M2.shape[1] else np.linalg.lstsq(M2, tgt, rcond=None)[0]
-    except np.linalg.LinAlgError:
-        sol = np.linalg.lstsq(M2, tgt, rcond=None)[0]
-    Ivec = np.zeros(nI)
-    for k, j in enumerate(cols): Ivec[j] = sol[k]
-    act = M @ Ivec                                                  # факт. коэф. по матрице связи при подобранных токах
-    corr = set(range(nI)) - set(cols)                              # корректирующие обмотки = 0
-    zref = max((abs(Ivec[j]) for j in cols), default=0.0)
-    zap = (imax / zref) if zref > 1e-30 else float("inf")
-    if m["kind"] == "dq":                                          # у DQ imax — размах калибровки комбо, не граница R²
-        tail = f"Токи в пределах калибровки комбо-датасета (±{imax:.1f} А); R² линейности = {float(m.get('r2', 1.0)):.3f}."
-    else:
-        tail = f"Запас до границы линейности: imax/max|I| = {zap:.1f} (imax = {imax:.1f} А, R² ≥ 0.95)."
-    doc.add_paragraph(f"Рабочие токи подобраны под проектные моменты {', '.join(ctrl)}. " + tail)
-
-    _tcap(doc, f"{m['name']} — рабочие токи обмоток")             # ТАБЛИЦА ТОКОВ
-    tc = doc.add_table(rows=1, cols=2); tc.style = "Light Grid Accent 1"
-    tc.rows[0].cells[0].text = "обмотка"; tc.rows[0].cells[1].text = "рабочий ток, А"
+    _tcap(doc, f"{m['name']} — рабочие токи обмоток")             # ТАБЛИЦА ТОКОВ: витки + реальный ток + % номинала
+    hdr = ("обмотка", "витк./катушку", "число катушек", "всего витков", "рабочий ток, А", "% номинала")
+    tc = doc.add_table(rows=1, cols=len(hdr)); tc.style = "Light Grid Accent 1"
+    for k, h in enumerate(hdr): tc.rows[0].cells[k].text = h
     for j, lb in enumerate(labels):
-        c = tc.add_row().cells; c[0].text = lb
-        c[1].text = f"{Ivec[j]:+.3f}" + (" (корректирующая)" if j in corr else "")
+        hw = HW.get(m["devs"][j], {})
+        tpc_s = (hw.get("turns_per_coil") or "").strip(); tpc = int(tpc_s) if tpc_s else 0
+        nom_s = (hw.get("nominal_current_a") or "").strip(); nom = float(nom_s) if nom_s else 0.0
+        c = tc.add_row().cells
+        c[0].text = lb
+        c[1].text = tpc_s or "—"
+        c[2].text = (hw.get("num_coils") or "").strip() or "—"
+        c[3].text = (hw.get("total_turns") or "").strip() or "—"
+        if ctrl and tpc:
+            real = Ivec[j] * ENERGY_FACTOR / tpc                     # реальный ток питания
+            c[4].text = f"{real:+.1f}"
+            c[5].text = f"{100.0 * abs(real) / nom:.0f}%" if nom else "—"
+        else:
+            c[4].text = "—"; c[5].text = "—"
     doc.add_paragraph()
 
-    _tcap(doc, f"{m['name']} — проектные (.lte) и фактические коэффициенты при рабочих токах")   # ТАБЛИЦА МОМЕНТОВ
-    tm = doc.add_table(rows=1, cols=4); tm.style = "Light Grid Accent 1"
-    for j, h in enumerate(("момент", "проектный (.lte)", "факт при рабочих токах", "Δ, %")):
-        tm.rows[0].cells[j].text = h
-    for i, mp in enumerate(m["outputs"]):
-        c = tm.add_row().cells; d = design.get(mp, 0.0); a = float(act[i])
-        c[0].text = mp
-        c[1].text = f"{d:+.4e}" if abs(d) > 1e-30 else "— (нет в .lte)"
-        c[2].text = f"{a:+.4e}"
-        c[3].text = "—" if abs(d) < 1e-30 else f"{100.0 * (a - d) / abs(d):+.1f}"
-    doc.add_paragraph()
+    if ctrl:                                                        # ТАБЛИЦА МОМЕНТОВ (проект vs факт)
+        _tcap(doc, f"{m['name']} — проектные (.lte) и фактические коэффициенты при рабочих токах")
+        tm = doc.add_table(rows=1, cols=4); tm.style = "Light Grid Accent 1"
+        for k, h in enumerate(("момент", "проектный (.lte)", "факт при рабочих токах", "Δ, %")):
+            tm.rows[0].cells[k].text = h
+        for i, mp in enumerate(m["outputs"]):
+            c = tm.add_row().cells; d = design.get(mp, 0.0); a = float(act[i])
+            c[0].text = mp
+            c[1].text = f"{d:+.4e}" if abs(d) > 1e-30 else "—"
+            c[2].text = f"{a:+.4e}"
+            c[3].text = "—" if abs(d) < 1e-30 else f"{100.0 * (a - d) / abs(d):+.1f}"
+        doc.add_paragraph()
 
 
 def _matrix_section(doc, m, lo):
