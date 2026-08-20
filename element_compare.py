@@ -27,6 +27,43 @@ _MC2_MEV = 0.51099895069
 _G6 = 6000.0 / _MC2_MEV; _B6 = math.sqrt(1.0 - 1.0 / (_G6 * _G6))
 ENERGY_FACTOR = (_G6 * _B6) / (bm.GAMMA * bm.BETA)
 
+
+# --- Физический ток питания ↔ суррогатный ток карты (arg) ---------------------------------------
+# Единый источник перевода. Карты калиброваны в arg (суррогатный ток при γ≈7); ФИЗИЧЕСКИЙ ток питания
+# при проектной энергии 6 ГэВ = arg × ENERGY_FACTOR / (витки в ОДНОЙ катушке). Отчёт и ввод — в физ. А.
+def dev_tpc(dev):
+    """Витки-на-катушку устройства (int) или None, если не занесены в hardware_library."""
+    s = (HW.get(dev, {}).get("turns_per_coil") or "").strip()
+    return int(s) if s else None
+
+
+def dev_nominal(dev):
+    """Номинальный ток питания устройства (А, паспорт) или None."""
+    s = (HW.get(dev, {}).get("nominal_current_a") or "").strip()
+    return float(s) if s else None
+
+
+def arg_to_amps(dev, arg):
+    """Суррогатный ток карты (arg) → физический ток питания при 6 ГэВ (А). None, если нет витков."""
+    tpc = dev_tpc(dev)
+    return None if tpc is None else float(arg) * ENERGY_FACTOR / tpc
+
+
+def amps_to_arg(dev, amps):
+    """Физический ток питания (А) → суррогатный ток карты (arg) для диффура. None, если нет витков."""
+    tpc = dev_tpc(dev)
+    return None if tpc is None else float(amps) * tpc / ENERGY_FACTOR
+
+
+def _wind_amps_line(m, arg):
+    """arg (общий на все обмотки) → компактная строка физ. тока по обмоткам (одна обмотка → одно число).
+    Разные витки ⇒ один arg = разные амперы на обмотках."""
+    vals = [(_curname(l), arg_to_amps(d, arg)) for l, d in zip(m["labels"], m["devs"])]
+    if len(vals) == 1:
+        a = vals[0][1]
+        return f"{a:+.0f} А" if a is not None else f"{arg:+.2f} (arg)"
+    return ", ".join(f"{n}={a:+.0f}" if a is not None else f"{n}={arg:+.2f}(arg)" for n, a in vals) + " А"
+
 # временные id (не пересекаются с реальными 1/2/3); всё под ними чистится
 TMP_LAT, TMP_GRP, TMP_EXP = 900, 900, 900
 CENTER = 2.0               # положение центра элемента по оси x, м
@@ -633,7 +670,15 @@ def _traj_subtitle(m, cur, coef):
     if m.get("pm") or cur == "-":
         cpart = "PM (фикс. поле)"
     else:
-        cpart = ", ".join(f"{_curname(l)}={cur:+.2f}" for l in m["labels"]) + " А"
+        parts = []
+        for l, d in zip(m["labels"], m["devs"]):
+            a = arg_to_amps(d, cur)
+            if a is None:
+                parts.append(f"{_curname(l)}={cur:+.2f}(arg)")
+            else:
+                nom = dev_nominal(d)
+                parts.append(f"{_curname(l)}={a:+.0f} А" + (f" ({100*abs(a)/nom:.0f}%)" if nom else ""))
+        cpart = ", ".join(parts)
     kpart = ", ".join(f"{k}={coef[k]:+.3e}" for k in coef) if coef else "—"
     return f"{cpart}   →   {kpart}"
 
@@ -1824,7 +1869,9 @@ def _data_table(doc, m):
     for ci in range(len(Icols)):
         moments, rmse, r2 = scan[ci]
         c = t.add_row().cells
-        for j in range(nw): c[j].text = f"{Icols[ci][j]:.2f}"        # ток обмотки j (уникальная комбинация)
+        for j in range(nw):                                          # ток обмотки j → физ. А (уникальная комбинация)
+            a = arg_to_amps(m["devs"][j], Icols[ci][j])
+            c[j].text = f"{a:+.1f}" if a is not None else f"{Icols[ci][j]:.2f}"
         for j in range(len(outs)): c[nw + j].text = f"{moments[j]:+.3e}"
         col = nw + len(outs)
         if has_b:                                                    # радиус поворота от изгибающего момента B строки
@@ -1836,8 +1883,8 @@ def _data_table(doc, m):
         _shrink_table_font(t)                                       # альбомная широкая таблица → шрифт на 2 пт меньше
         _section_orient(doc, landscape=False)
     doc.add_paragraph()                                             # отступ после таблицы (правка: текст не липнет)
-    p = doc.add_paragraph(f"L_eff = {float(m['L']):.4f} м;  рабочий ток = {float(m['i_op']):.2f} А;  "
-                          f"релевантно |I| ≤ {float(m['imax']):.1f} А (R² ≥ 0.95);  R² = {float(m['r2']):.3f}.")
+    p = doc.add_paragraph(f"L_eff = {float(m['L']):.4f} м;  рабочий ток: {_wind_amps_line(m, float(m['i_op']))};  "
+                          f"релевантно (R² ≥ 0.95): |I| ≤ {_wind_amps_line(m, float(m['imax']))};  R² = {float(m['r2']):.3f}.")
     p.runs[0].font.size = Pt(9)
 
 
@@ -2010,12 +2057,14 @@ def _matrix_section(doc, m, lo):
         doc.add_paragraph()                                          # отступ после таблицы
         _moment_legend(doc, m["outputs"])                            # расшифровка вектора моментов (B, G)
     else:                                                            # прямая + обратная матрица + таблица скана
-        M = np.asarray(m["M"], float); Minv = np.linalg.pinv(M); nr, nc = M.shape
+        # столбцы матрицы → ФИЗИЧЕСКИЙ ток: coef=M·arg=(M·diag(tpc/EF))·I_физ ⇒ M[:,j]·(tpc_j/EF). Токи — амперы.
+        col_sc = np.array([(dev_tpc(d) / ENERGY_FACTOR) if dev_tpc(d) else 1.0 for d in m["devs"]])
+        M = np.asarray(m["M"], float) * col_sc[None, :]; Minv = np.linalg.pinv(M); nr, nc = M.shape
         square = (nr == nc and abs(np.linalg.det(M)) > 1e-30)
-        doc.add_paragraph(f"Прямая (ток→коэф):  ({ov})ᵀ = M · ({iv})ᵀ")
+        doc.add_paragraph(f"Прямая (ток→коэф, ток обмоток в А):  ({ov})ᵀ = M · ({iv})ᵀ")
         p = doc.add_paragraph(); lo.add_formula(p, _matrix_latex(M, "M")); doc.add_paragraph()   # отступ после формулы
         _moment_legend(doc, m["outputs"])                            # расшифровка вектора моментов (после выражения связи)
-        doc.add_paragraph(f"Обратная (коэф→ток):  ({iv})ᵀ = {'M⁻¹' if square else 'M⁺'} · ({ov})ᵀ")
+        doc.add_paragraph(f"Обратная (коэф→ток, ток в А):  ({iv})ᵀ = {'M⁻¹' if square else 'M⁺'} · ({ov})ᵀ")
         p = doc.add_paragraph(); lo.add_formula(p, _matrix_latex(Minv, "M^{-1}" if square else "M^{+}")); doc.add_paragraph()
         _data_table(doc, m)
     for tpng, xpng in zip(traj_pngs, xy_pngs):                      # на каждый ток: траектории x/y + сечение x-y до/после
@@ -2038,7 +2087,11 @@ def _ranges_table(doc, mats):
             c[5].text = ";  ".join(f"{k}={v:+.1e}" for k, v in m["fixed"].items()); continue
         imax = float(m.get("imax", 0.0)); r2 = m.get("r2", 1.0)
         c[1].text = ", ".join(m["labels"])
-        c[3].text = f"|I| ≤ {imax:.1f}" + ("" if r2 >= 0.95 else "  (R²<0.95)")
+        maxes = []                                                   # релевантный |I| по обмоткам → физ. А (разные витки)
+        for l, d in zip(m["labels"], m["devs"]):
+            a = arg_to_amps(d, imax)
+            maxes.append(f"{l}≤{abs(a):.0f}" if a is not None else f"{l}≤{imax:.1f}(arg)")
+        c[3].text = ", ".join(maxes) + (" А") + ("" if r2 >= 0.95 else "  (R²<0.95)")
         c[4].text = f"{r2:.3f}"
         c[5].text = ";  ".join(f"|{m['outputs'][i]}| ≤ {np.abs(m['M'][i]).sum() * imax:.1e}" for i in range(len(m["outputs"])))
     _shrink_table_font(t)                                           # сводная — на альбомной странице, шрифт на 2 пт меньше
@@ -2273,7 +2326,20 @@ if __name__ == "__main__":
         kinds = tuple(sys.argv[2].split(",")) if len(sys.argv) > 2 else ("quad", "sext", "oct")
         run_all(kinds); sys.exit(0)
     dev = sys.argv[1] if len(sys.argv) > 1 else "QP_L_1A_L295"
-    cur = float(sys.argv[2]) if len(sys.argv) > 2 else 50.0
+    raw_arg = "--arg" in sys.argv[3:]                              # --arg: трактовать значение как СЫРОЙ arg карты
+    cur_val = float(sys.argv[2]) if len(sys.argv) > 2 else 10.0    # по умолчанию — ФИЗИЧЕСКИЙ ток питания (А, 6 ГэВ)
+    if raw_arg:
+        cur = cur_val
+        print(f"вход: arg={cur:.4f} (сырой ток карты)")
+    else:
+        a = amps_to_arg(dev, cur_val)                             # физ. А → arg (виток/кат из БД + ENERGY_FACTOR)
+        if a is None:
+            print(f"[!] у {dev} нет витков в БД → трактую {cur_val} как сырой arg (для физ. тока укажите витки)")
+            cur = cur_val
+        else:
+            cur = a; nom = dev_nominal(dev)
+            print(f"вход: {cur_val:+.1f} А физ.{f' ({100*abs(cur_val)/nom:.0f}% ном)' if nom else ''} "
+                  f"→ arg={cur:.4f}  (витк/кат={dev_tpc(dev)}, EF={ENERGY_FACTOR:.0f})")
     kind = {r["device_type_id"]: r.get("kind") for r in mt._read("lattice_configs.csv") if r.get("kind")}.get(dev, "quad")
     probes = [(0.0, 0.0)] + [(1e-3 * math.cos(2 * math.pi * k / 12), 1e-3 * math.sin(2 * math.pi * k / 12)) for k in range(12)]
     bak = os.path.join(TB, "_cmp_backup"); os.makedirs(bak, exist_ok=True)   # страховка
@@ -2281,7 +2347,7 @@ if __name__ == "__main__":
     try:
         trajs, geom = run_diffur(dev, cur)
         diff_su = diff_to_su(trajs, geom["xstart"])
-        print(f"диффур {dev} ({kind}) @ {cur}А: {len(trajs)} частиц, точек/частицу {len(trajs[0])}")
+        print(f"диффур {dev} ({kind}) @ arg={cur:.4f}: {len(trajs)} частиц, точек/частицу {len(trajs[0])}")
         coeffs, Leff, mse = fit_element(dev, cur, diff_su, geom, kind, probes)
         cs = "  ".join(f"{k}={v:+.4e}" for k, v in coeffs.items())
         print(f"ФИТ кика: {cs}  L_eff={Leff:.4f}м  (старт .lte {HW[dev].get('eff_length')}м)")
