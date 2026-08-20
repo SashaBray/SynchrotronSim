@@ -664,9 +664,15 @@ def _matrix_traj_at(m, cur):
     return ds, kick_su, bending, coef
 
 
+def _subtitle_fs(text):
+    """Размер шрифта подписи под длину самой длинной строки — чтобы не вылезала за рисунок (5-обм. корректор)."""
+    longest = max((len(l) for l in text.split("\n")), default=0)
+    return 9 if longest <= 78 else (8 if longest <= 98 else 7)
+
+
 def _traj_subtitle(m, cur, coef):
     """Подпись под заголовком графика: ток по КАЖДОЙ обмотке (I1=…, I2=… — в графиках все при одном cur) и
-    получившиеся физкоэф (B=…, G=…). PM — «фикс. поле». Единое правило для всех графиков."""
+    получившиеся физкоэф (B=…, G=…) на ВТОРОЙ строке (чтобы длинная подпись не вылезала). PM — «фикс. поле»."""
     if m.get("pm") or cur == "-":
         cpart = "PM (фикс. поле)"
     else:
@@ -680,7 +686,7 @@ def _traj_subtitle(m, cur, coef):
                 parts.append(f"{_curname(l)}={a:+.0f} А" + (f" ({100*abs(a)/nom:.0f}%)" if nom else ""))
         cpart = ", ".join(parts)
     kpart = ", ".join(f"{k}={coef[k]:+.3e}" for k in coef) if coef else "—"
-    return f"{cpart}   →   {kpart}"
+    return f"{cpart}\n→  {kpart}"                                     # токи и коэф — на разных строках (влезает)
 
 
 def _plot_one_traj(m, cur, outdir, tag):
@@ -696,9 +702,10 @@ def _plot_one_traj(m, cur, outdir, tag):
     for ax in (axx, axy): ax.set_xlabel("s, м"); ax.grid(alpha=0.3)
     axx.set_ylabel("x (гориз.), мм"); axy.set_ylabel("y (верт.), мм")
     axx.set_title("x-плоскость (— диффур, -- кик)"); axy.set_title("y-плоскость" + (" (откл. от опорной дуги)" if bending else ""))
-    fig.suptitle(f"{m['name']} ({m['kind']}) — траектории пучка", fontsize=11)
-    fig.text(0.5, 0.905, _traj_subtitle(m, cur, coef), ha="center", fontsize=9)   # токи обмоток → физкоэф
-    fig.tight_layout(rect=[0, 0, 1, 0.9])
+    fig.suptitle(f"{m['name']} ({m['kind']}) — траектории пучка", fontsize=11, y=0.995)
+    sub = _traj_subtitle(m, cur, coef)                                            # токи обмоток → физкоэф (2 строки)
+    fig.text(0.5, 0.935, sub, ha="center", va="top", fontsize=_subtitle_fs(sub))
+    fig.tight_layout(rect=[0, 0, 1, 0.85])
     png = os.path.join(outdir, f"mtraj_{m['name']}_{tag}.png"); fig.savefig(png, dpi=110); plt.close(fig)
     return png, ds, ks, coef
 
@@ -715,9 +722,10 @@ def _plot_one_xy(m, cur, outdir, tag, ds, ks, coef):
     a0.set_title("до элемента (вход)"); a1.set_title("после элемента (o диффур, ✕ кик)")
     for a in (a0, a1):
         a.set_xlabel("x (гориз.), мм"); a.set_ylabel("y (верт.), мм"); a.grid(alpha=0.3); a.set_aspect("equal", "datalim")
-    fig.suptitle(f"{m['name']} ({m['kind']}) — сечение пучка x-y", fontsize=11)
-    fig.text(0.5, 0.9, _traj_subtitle(m, cur, coef), ha="center", fontsize=9)      # токи обмоток → физкоэф
-    fig.tight_layout(rect=[0, 0, 1, 0.89])
+    fig.suptitle(f"{m['name']} ({m['kind']}) — сечение пучка x-y", fontsize=11, y=0.995)
+    sub = _traj_subtitle(m, cur, coef)                                            # токи обмоток → физкоэф (2 строки)
+    fig.text(0.5, 0.94, sub, ha="center", va="top", fontsize=_subtitle_fs(sub))
+    fig.tight_layout(rect=[0, 0, 1, 0.86])
     png = os.path.join(outdir, f"mxy_{m['name']}_{tag}.png"); fig.savefig(png, dpi=110); plt.close(fig)
     return png
 
@@ -1883,7 +1891,7 @@ def _data_table(doc, m):
         _shrink_table_font(t)                                       # альбомная широкая таблица → шрифт на 2 пт меньше
         _section_orient(doc, landscape=False)
     doc.add_paragraph()                                             # отступ после таблицы (правка: текст не липнет)
-    p = doc.add_paragraph(f"L_eff = {float(m['L']):.4f} м;  рабочий ток: {_wind_amps_line(m, float(m['i_op']))};  "
+    p = doc.add_paragraph(f"L_eff = {float(m['L']):.4f} м;  "
                           f"релевантно (R² ≥ 0.95): |I| ≤ {_wind_amps_line(m, float(m['imax']))};  R² = {float(m['r2']):.3f}.")
     p.runs[0].font.size = Pt(9)
 
@@ -1963,7 +1971,7 @@ def _crop_right(png, frac):
 
 
 def _working_point_table(doc, m):
-    """Рабочая точка элемента: проектные mat_* (.lte, решётка 1) → рабочие токи обмоток решением под проектные
+    """Проектные токи элемента: проектные mat_* (.lte, решётка 1) → проектные токи обмоток решением под проектные
     моменты (N моментов ⇒ первые N обмоток) → РЕАЛЬНЫЙ ток питания = arg_val × ENERGY_FACTOR / (витки-на-катушку)
     и % номинала (витки/номинал из hardware_library). + таблица проект vs факт по матрице связи. PM — токов нет."""
     matcol = {"B": "mat_B", "Bv": "mat_Bv", "G": "mat_G", "Gv": "mat_Gv", "S": "mat_S", "O": "mat_O"}
@@ -1988,8 +1996,8 @@ def _working_point_table(doc, m):
         for k, j in enumerate(cols): Ivec[j] = sol[k]
     act = M @ Ivec
 
-    _tcap(doc, f"{m['name']} — рабочие токи обмоток")             # ТАБЛИЦА ТОКОВ: витки + реальный ток + % номинала
-    hdr = ("обмотка", "витк./катушку", "число катушек", "всего витков", "рабочий ток, А", "% номинала")
+    _tcap(doc, f"{m['name']} — проектные токи обмоток")           # ТАБЛИЦА ТОКОВ: витки + проектный ток + % номинала
+    hdr = ("обмотка", "витк./катушку", "число катушек", "всего витков", "проектный ток, А", "% номинала")
     tc = doc.add_table(rows=1, cols=len(hdr)); tc.style = "Light Grid Accent 1"
     for k, h in enumerate(hdr): tc.rows[0].cells[k].text = h
     for j, lb in enumerate(labels):
@@ -2010,9 +2018,9 @@ def _working_point_table(doc, m):
     doc.add_paragraph()
 
     if ctrl:                                                        # ТАБЛИЦА МОМЕНТОВ (проект vs факт)
-        _tcap(doc, f"{m['name']} — проектные (.lte) и фактические коэффициенты при рабочих токах")
+        _tcap(doc, f"{m['name']} — проектные (.lte) и фактические коэффициенты при проектных токах")
         tm = doc.add_table(rows=1, cols=4); tm.style = "Light Grid Accent 1"
-        for k, h in enumerate(("момент", "проектный (.lte)", "факт при рабочих токах", "Δ, %")):
+        for k, h in enumerate(("момент", "проектный (.lte)", "факт при проектных токах", "Δ, %")):
             tm.rows[0].cells[k].text = h
         for i, mp in enumerate(m["outputs"]):
             c = tm.add_row().cells; d = design.get(mp, 0.0); a = float(act[i])
@@ -2116,6 +2124,12 @@ def _intro_section(doc):
         "Изгибающие элементы — диполи и диполи-квадруполи — в расчёте устанавливаются симметрично: угол входа "
         "равен углу выхода (пучок пересекает торцы под θ/2, как симметричная дуга). Это согласует локальную "
         "систему отсчёта с киковым сектором и уравнивает краевые эффекты входа и выхода.")
+    doc.add_paragraph(
+        "Токи и коэффициенты. Все токи в отчёте — физические токи питания обмоток (амперы при проектной энергии "
+        "6 ГэВ). «Проектные токи обмоток» (таблица в конце каждого раздела) — это токи питания, при которых элемент "
+        "даёт ПРОЕКТНЫЕ мультипольные коэффициенты, заданные в файле решётки .lte; они получены обращением матрицы "
+        "связи под проектные коэффициенты. Токи в подписях к графикам — точки характеризации карты поля (для "
+        "проверки линейности связи), они не равны проектным и могут превышать номинал.")
 
 
 def _apply_body_formatting(doc):
