@@ -167,6 +167,18 @@ def _read(name):
     return list(csv.DictReader(open(os.path.join(WS, "tables", name), encoding="utf-8"), delimiter=";"))
 
 
+def _row_pre_rot(row):
+    """R_map (3×3) из rot_x/y/z_deg строки hardware_library, или None если поворота нет. Геометрию магнита
+    вертим так же, как поле поворачивает C++ FieldMap (столбцы rot_*_deg)."""
+    def d(k):
+        try:
+            return float(np.radians(float(row.get(k, 0) or 0)))
+        except (TypeError, ValueError):
+            return 0.0
+    ang = (d("rot_x_deg"), d("rot_y_deg"), d("rot_z_deg"))
+    return vz.rotation_matrix_zyx(*ang) if any(ang) else None
+
+
 def _total_tris(lc, hw):                                     # оценка полного числа треуг. STL (бинарный STL: (size-84)/50)
     tot = 0
     for dev, n in Counter(r["device_type_id"] for r in lc).items():
@@ -283,7 +295,8 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out, edges=None, co
     ntri = 0
     ex_all, ey_all, ez_all = [], [], []                      # feature-рёбра всех магнитов — в одну трассу
     for dv, tlist in grouped.items():                        # магниты → Mesh3d, цвет по типу
-        big = vz.build_combined_mesh(stl_cache[hw[dv]["stl_path"]], np.asarray(tlist, float))
+        big = vz.build_combined_mesh(stl_cache[hw[dv]["stl_path"]], np.asarray(tlist, float),
+                                     pre_rot=_row_pre_rot(hw[dv]))
         V = np.asarray(big.points, dtype=np.float32)         # float32: −43% веса, μm-точность (масштаб метров) — с запасом
         F = np.asarray(big.faces).reshape(-1, 4)[:, 1:].astype(np.int32)
         ntri += len(F)

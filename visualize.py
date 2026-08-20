@@ -94,7 +94,19 @@ def load_reference_path_points(ws, exp_id):
     return None
 
 
-def build_combined_mesh(base, transforms_np):
+def rotation_matrix_zyx(rot_x, rot_y, rot_z):
+    """R = Rz(rot_z)·Ry(rot_y)·Rx(rot_x), углы в РАДИАНАХ. Совпадает с поворотом карты поля в C++
+    FieldMap (rot_x/y/z_deg): поле повёрнутого магнита ⇒ геометрию (STL) вертим тем же R."""
+    cx, sx = np.cos(rot_x), np.sin(rot_x)
+    cy, sy = np.cos(rot_y), np.sin(rot_y)
+    cz, sz = np.cos(rot_z), np.sin(rot_z)
+    Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+    Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+    Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+    return Rz @ Ry @ Rx
+
+
+def build_combined_mesh(base, transforms_np, pre_rot=None):
     """
     Склеить N трансформированных копий `base` в один PolyData.
 
@@ -104,11 +116,15 @@ def build_combined_mesh(base, transforms_np):
 
     transforms_np: ndarray (n_inst, 6) -- столбцы (yaw, pitch, roll, tx, ty, tz),
                    углы в радианах.
+    pre_rot: опц. 3×3 (R_map) -- поворот карты поля в ЛОКАЛЬНОЙ рамке (до размещения);
+             геометрию магнита вертим так же, как поле (rot_x/y/z_deg). None = без поворота.
 
     Реализация полностью векторизована через numpy + einsum -- ни одного
     Python-цикла по экземплярам или VTK-вызова на копию.
     """
     pts_base = np.asarray(base.points, dtype=np.float64)
+    if pre_rot is not None:
+        pts_base = pts_base @ np.asarray(pre_rot, dtype=np.float64).T   # R_map · pts (локальная рамка)
     n_pts = pts_base.shape[0]
     n_inst = transforms_np.shape[0]
 
@@ -183,6 +199,12 @@ def visualize(target_exp_id, screenshot=None, view="iso", zoom=1.0, elevation=0.
 
     # 2. hardware_library в словарь --------------------------------------------
     hw_lookup = {}
+    rot_lookup = {}                                    # dev_id -> (rotX, rotY, rotZ) рад (поворот карты/геометрии)
+    def _deg(v):
+        try:
+            return 0.0 if pd.isna(v) else float(np.radians(float(v)))
+        except (TypeError, ValueError):
+            return 0.0
     for row in hw_df.itertuples():
         dev_id = str(getattr(row, "device_type_id", "")).strip()
         if not dev_id or dev_id == "nan":
@@ -190,6 +212,9 @@ def visualize(target_exp_id, screenshot=None, view="iso", zoom=1.0, elevation=0.
         stl_name  = str(getattr(row, "stl_path", "")).strip()
         is_active = str(getattr(row, "Active", "")).strip().lower() in ("true", "1", "yes")
         hw_lookup[dev_id] = (stl_name, is_active)
+        rot_lookup[dev_id] = (_deg(getattr(row, "rot_x_deg", 0.0)),
+                              _deg(getattr(row, "rot_y_deg", 0.0)),
+                              _deg(getattr(row, "rot_z_deg", 0.0)))
 
     # 3. STL читаем один раз на уникальный файл -------------------------------
     t0 = time.time()
@@ -241,7 +266,9 @@ def visualize(target_exp_id, screenshot=None, view="iso", zoom=1.0, elevation=0.
     for dev, tlist in grouped.items():
         base = stl_cache[hw_lookup[dev][0]]
         tr_np = np.asarray(tlist, dtype=np.float64)
-        big = build_combined_mesh(base, tr_np)
+        rx, ry, rz = rot_lookup.get(dev, (0.0, 0.0, 0.0))       # поворот карты ⇒ тот же поворот геометрии
+        pre_rot = rotation_matrix_zyx(rx, ry, rz) if (rx or ry or rz) else None
+        big = build_combined_mesh(base, tr_np, pre_rot=pre_rot)
         is_active = hw_lookup[dev][1]
         op = VIZ_CFG.get("lattice_opacity", {})
         opacity = float(op.get("EM", 0.25) if is_active else op.get("PM", 0.4))

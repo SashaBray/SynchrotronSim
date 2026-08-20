@@ -29,11 +29,20 @@ def build_scene(plotter, exp_id, hi_mag=None):
     lat_id = int(exp_df[exp_df["exp_id"] == exp_id]["lattice_id"].iloc[0])
     cur = lattice_df[lattice_df["lattice_id"] == lat_id]
     hw = {}
+    rot = {}                                                # dev -> (rotX,rotY,rotZ) рад (поворот карты/геометрии)
+    def _rad(v):
+        try:
+            return float(np.radians(float(v))) if not pd.isna(v) else 0.0
+        except (TypeError, ValueError):
+            return 0.0
     for row in hw_df.itertuples():
         d = str(getattr(row, "device_type_id", "")).strip()
         if d and d != "nan":
             hw[d] = (str(getattr(row, "stl_path", "")).strip(),
                      str(getattr(row, "Active", "")).strip().lower() in ("true", "1", "yes"))
+            rot[d] = (_rad(getattr(row, "rot_x_deg", 0.0)),
+                      _rad(getattr(row, "rot_y_deg", 0.0)),
+                      _rad(getattr(row, "rot_z_deg", 0.0)))
     stl_cache = {}
     for stl_name, _ in hw.values():
         if stl_name in ("-", "", "nan") or stl_name in stl_cache:
@@ -53,7 +62,9 @@ def build_scene(plotter, exp_id, hi_mag=None):
     op = V.VIZ_CFG.get("lattice_opacity", {})
     for d, tl in grouped.items():
         base = stl_cache[hw[d][0]]
-        big = V.build_combined_mesh(base, np.asarray(tl, float))
+        rx, ry, rz = rot.get(d, (0.0, 0.0, 0.0))
+        pre_rot = V.rotation_matrix_zyx(rx, ry, rz) if (rx or ry or rz) else None
+        big = V.build_combined_mesh(base, np.asarray(tl, float), pre_rot=pre_rot)
         active = hw[d][1]
         plotter.add_mesh(big, color="silver",
                          opacity=float(op.get("EM", 0.25) if active else op.get("PM", 0.4)),

@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 import pyvista as pv
 
-from visualize import build_combined_mesh, load_trajectories
+from visualize import build_combined_mesh, load_trajectories, rotation_matrix_zyx
 from _common import tracker_exe, project_root, workspace_dir
 
 
@@ -102,12 +102,21 @@ class LiveVisualizer:
         print(f"  lattice {lat_id}: {len(current_lat)} instances")
 
         hw_lookup = {}
+        rot_lookup = {}                                       # dev -> (rotX,rotY,rotZ) рад (поворот карты/геометрии)
+        def _rad(v):
+            try:
+                return float(np.radians(float(v))) if not pd.isna(v) else 0.0
+            except (TypeError, ValueError):
+                return 0.0
         for row in hw_df.itertuples():
             dev_id = str(getattr(row, "device_type_id", "")).strip()
             if not dev_id or dev_id == "nan": continue
             stl_name  = str(getattr(row, "stl_path", "")).strip()
             is_active = str(getattr(row, "Active", "")).strip().lower() in ("true", "1", "yes")
             hw_lookup[dev_id] = (stl_name, is_active)
+            rot_lookup[dev_id] = (_rad(getattr(row, "rot_x_deg", 0.0)),
+                                  _rad(getattr(row, "rot_y_deg", 0.0)),
+                                  _rad(getattr(row, "rot_z_deg", 0.0)))
 
         stl_cache = {}
         for stl_name, _ in hw_lookup.values():
@@ -137,7 +146,9 @@ class LiveVisualizer:
 
         for dev, tlist in grouped.items():
             base = stl_cache[hw_lookup[dev][0]]
-            big = build_combined_mesh(base, np.asarray(tlist, dtype=np.float64))
+            rx, ry, rz = rot_lookup.get(dev, (0.0, 0.0, 0.0))
+            pre_rot = rotation_matrix_zyx(rx, ry, rz) if (rx or ry or rz) else None
+            big = build_combined_mesh(base, np.asarray(tlist, dtype=np.float64), pre_rot=pre_rot)
             is_active = hw_lookup[dev][1]
             op = VIZ_CFG.get("lattice_opacity", {})
             opacity = float(op.get("EM", 0.25) if is_active else op.get("PM", 0.4))
