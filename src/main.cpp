@@ -187,10 +187,19 @@ int main(int argc, char* argv[]) {
             bool foundType = false;
             FieldType fieldKind = FieldType::MAGNETIC;
             bool useSym = true;
+            double rotX = 0.0, rotY = 0.0, rotZ = 0.0;   // hardware_library rot_x/y/z_deg (19/20/21) → рад
 
             for (auto& h : hwData) {
                 if (h[0] == type) {
                     isActive = (h[1] == "True" || h[1] == "true" || h[1] == "1");
+                    auto deg2rad = [](const std::string& s) -> double {
+                        if (s.empty() || s == "-") return 0.0;
+                        try { return std::stod(s) * 3.14159265358979323846 / 180.0; }
+                        catch (...) { return 0.0; }
+                    };
+                    if (h.size() > 19) rotX = deg2rad(h[19]);
+                    if (h.size() > 20) rotY = deg2rad(h[20]);
+                    if (h.size() > 21) rotZ = deg2rad(h[21]);
                     // Колонки hardware_library.csv:
                     //   0:device_type_id 1:Active 2:field_type 3:map_raw_path
                     //   4:map_bin_path 5:stl_path 6:use_symmetry 7:nominal_arg
@@ -232,6 +241,7 @@ int main(int argc, char* argv[]) {
                 el.map         = mapCache[type];
                 el.type        = fieldKind;
                 el.useSymmetry = useSym;
+                el.rotX = rotX; el.rotY = rotY; el.rotZ = rotZ;
 
                 // Переносим калибровочные параметры
                 el.isActive = isActive;

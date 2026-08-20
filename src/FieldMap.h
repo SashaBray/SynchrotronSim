@@ -6,6 +6,7 @@
 #include <string>
 #include <fstream>
 #include <memory>
+#include <cmath>
 
 class FieldMap {
 private:
@@ -38,8 +39,30 @@ public:
      * @param p Точка в локальной системе координат (метры)
      * @param useSymmetry Флаг использования симметрии YZ (относительно X=0)
      */
-    FieldVector getInterpolatedField(FieldVector p, bool useSymmetry) const {
+    FieldVector getInterpolatedField(FieldVector p, bool useSymmetry,
+                                     double rotX = 0.0, double rotY = 0.0, double rotZ = 0.0) const {
         bool mirrored = false;
+        const bool hasRot = (rotX != 0.0 || rotY != 0.0 || rotZ != 0.0);
+
+        // Поворот 3-вектора вокруг локальной оси (ax: 0=x,1=y,2=z) на угол ang (рад).
+        auto rotAxis = [](FieldVector v, int ax, double ang) -> FieldVector {
+            double c = std::cos(ang), s = std::sin(ang);
+            FieldVector o = v;
+            if (ax == 0)      { o.y = v.y * c - v.z * s; o.z = v.y * s + v.z * c; }  // Rx
+            else if (ax == 1) { o.z = v.z * c - v.x * s; o.x = v.z * s + v.x * c; }  // Ry
+            else              { o.x = v.x * c - v.y * s; o.y = v.x * s + v.y * c; }  // Rz
+            return o;
+        };
+
+        // 0. Поворот карты (переориентация установленного магнита). R = Rz·Ry·Rx (углы rotX/Y/Z, рад).
+        //    Поле ПОВЁРНУТОГО магнита в точке p: опрашиваем ИСХОДНОЕ поле в Rᵀp, затем поворачиваем
+        //    вектор поля B(p)=R·B_исх(Rᵀp). Поворот — собственное преобразование (det=+1), псевдовектор
+        //    B при нём преобразуется как обычный вектор (в отличие от отражения). Rᵀ = Rxᵀ·Ryᵀ·Rzᵀ.
+        if (hasRot) {
+            p = rotAxis(p, 2, -rotZ);
+            p = rotAxis(p, 1, -rotY);
+            p = rotAxis(p, 0, -rotX);
+        }
 
         // 1. Учет симметрии по плоскости YZ (нормаль - ось X)
         if (useSymmetry && p.x < 0) {
@@ -104,6 +127,13 @@ public:
         // 6. Применяем правило симметрии: инвертируем Bx, если мы в отзеркаленной зоне
         if (mirrored) {
             res.x = -res.x;
+        }
+
+        // 7. Поворот вектора поля R·B_исх: R = Rz·Ry·Rx (сначала Rx, затем Ry, затем Rz).
+        if (hasRot) {
+            res = rotAxis(res, 0, rotX);
+            res = rotAxis(res, 1, rotY);
+            res = rotAxis(res, 2, rotZ);
         }
 
         return res;

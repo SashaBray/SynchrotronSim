@@ -49,6 +49,8 @@ public:
     // поддерживает оба типа поля и асимметричные карты.
     FieldType type     = FieldType::MAGNETIC;
     bool useSymmetry   = true;
+    // Поворот карты (hardware_library.rot_x/y/z_deg → радианы): переориентация установленного магнита.
+    double rotX = 0.0, rotY = 0.0, rotZ = 0.0;
 
     // Калибровочные параметры
     bool isActive;         // колонка hardware_library.Active (True/False)
@@ -127,7 +129,7 @@ public:
         if (isOutsideBounds(globalPos)) return;
 
         FieldVector localPos = transform.transformPointInv(globalPos);
-        FieldVector localF = map->getInterpolatedField(localPos, useSymmetry);
+        FieldVector localF = map->getInterpolatedField(localPos, useSymmetry, rotX, rotY, rotZ);
 
         if (localF.x == 0 && localF.y == 0 && localF.z == 0) return;
 
