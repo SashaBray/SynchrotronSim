@@ -26,6 +26,7 @@ __all__ = [
     "workspace_dir",
     "set_matplotlib_backend",
     "no_window",
+    "ansys_dir",
 ]
 
 # ---------------------------------------------------------------------------
@@ -37,6 +38,19 @@ EXE_SUFFIX = ".exe" if sys.platform == "win32" else ""
 def exe_name(stem: str) -> str:
     """`SynchrotronTracker` -> `SynchrotronTracker.exe` (Windows) или без суффикса."""
     return f"{stem}{EXE_SUFFIX}"
+
+
+_ANSYS_DEFAULT = "C:/Sasha/Work/SILA/ansis approximations"
+
+
+def ansys_dir() -> Path:
+    """Каталог с исходными картами ANSYS (`.fld`) — он лежит ВНЕ репозитория.
+
+    Путь машинно-зависим, поэтому берётся из переменной окружения `SS_ANSYS_DIR`; значение по
+    умолчанию — рабочая машина разработки. На другой системе достаточно задать переменную, менять
+    код не нужно:  set SS_ANSYS_DIR=D:\\maps   /   export SS_ANSYS_DIR=/data/maps
+    """
+    return Path(os.environ.get("SS_ANSYS_DIR", _ANSYS_DEFAULT))
 
 
 def no_window() -> dict:

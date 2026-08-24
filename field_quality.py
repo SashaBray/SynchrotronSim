@@ -33,7 +33,7 @@ def load(path):
             nx, ny, nz = struct.unpack_from("<3i", b, 72)
             B = np.frombuffer(f.read(nx * ny * nz * 24), dtype="<f8").reshape(nx, ny, nz, 3)
     else:  # .fld
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:   # явная кодировка: на Linux дефолт иной
             hdr = f.readline()
         nums = [float(x) for x in re.findall(r"-?\d+\.?\d*", hdr)]
         # заголовок .fld в ММ, а данные (столбцы X,Y,Z) в МЕТРАХ — приводим заголовок к метрам

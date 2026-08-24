@@ -17,8 +17,9 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 os.chdir(ROOT)
 import matrix_tracker as mt
+from _common import exe_name
 
-EXE = os.path.join(ROOT, "build", "MatrixTracker.exe")
+EXE = os.path.join(ROOT, "build", exe_name("MatrixTracker"))   # .exe только на Windows
 QP = mt.QP
 NSL = 5
 # эталонные элементы: (kind, Leff, angle, k1, k2, k3, edge1, edge2)
@@ -114,11 +115,17 @@ class TestKickServe(unittest.TestCase):
         cls.np = np
         if not os.path.exists(EXE):
             raise unittest.SkipTest(f"C++ ядро не собрано: {EXE}")
+        # C++ запрашивается БЕЗ излучения (флаг sr=0 в _cpp), а Python-эталон берёт его из окружения.
+        # Значит, сравнение обязано идти при выключенном SS_SR — иначе чужой модуль, включивший СИ
+        # (например test_matrix_core_ring при импорте), рассинхронизирует стороны на потери энергии.
+        cls._sr = os.environ.pop("SS_SR", None)
         cls.srv = subprocess.Popen([EXE, "--serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    text=True, bufsize=1)
 
     @classmethod
     def tearDownClass(cls):
+        if cls._sr is not None:
+            os.environ["SS_SR"] = cls._sr
         try:
             cls.srv.stdin.write("QUIT\n"); cls.srv.stdin.flush(); cls.srv.wait(timeout=5)
         except Exception:

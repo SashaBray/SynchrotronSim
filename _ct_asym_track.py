@@ -8,6 +8,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from field_quality import load
 import field_line_viz as flv
+from _common import ansys_dir
 
 C = 299792458.0
 ME = 9.1093837e-31
@@ -15,7 +16,7 @@ QE = -1.602176634e-19
 V = 2.967e8
 GAMMA0 = 1.0 / math.sqrt(1 - (V / C) ** 2)
 FIGS = os.path.join("workspace", "bip_compare", "figs")
-FLD = r"C:/Sasha/Work/SILA/ansis approximations/KD/QP_L/QP_L_100A_full_v2.fld"
+FLD = str(ansys_dir() / "KD" / "QP_L" / "QP_L_100A_full_v2.fld")   # каталог карт — env SS_ANSYS_DIR
 
 
 def make_field(h, B, kind="full"):

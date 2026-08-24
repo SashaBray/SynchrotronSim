@@ -13,13 +13,13 @@ import numpy as np
 import matrix_tracker as mt
 import bip_matrix as bm
 from scipy.optimize import minimize, minimize_scalar
-from _common import no_window
+from _common import exe_name, no_window
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 TB = os.path.join(ROOT, "workspace", "tables")
 RESULTS = os.path.join(ROOT, "workspace", "results")
-EXE = os.path.join(ROOT, "build", "SynchrotronTracker.exe")     # диффур (Boris по картам)
-EXE_MT = os.path.join(ROOT, "build", "MatrixTracker.exe")       # C++ киковое ядро (--serve): трекинг кик-модели
+EXE = os.path.join(ROOT, "build", exe_name("SynchrotronTracker"))   # диффур (Boris по картам)
+EXE_MT = os.path.join(ROOT, "build", exe_name("MatrixTracker"))     # C++ киковое ядро (--serve): трекинг кик-модели
 V_BEAM = 2.967e8            # скорость пучка (particle_groups)
 ME, QE = 9.1093837e-31, -1.602176634e-19    # точные константы (как bip_matrix/matrix_core.h) — без усечёнки
 # Энергетический множитель Bρ(проект 6 ГэВ)/Bρ(суррогат γ≈7): трекинг идёт на суррогатной энергии, реальный

@@ -31,6 +31,7 @@ sys.path.insert(0, ROOT)
 
 import numpy as np
 import matrix_tracker as mt
+from _common import exe_name
 
 
 # ------------------------------------------------------------------ фикстуры/утилиты
@@ -329,9 +330,9 @@ class TestDBPipeline(unittest.TestCase):
 # ================================================================== 9. C++ диффурное ядро (gated)
 class TestCppKernel(unittest.TestCase):
     """C++ SynchrotronTracker.exe (диффурное ядро). Наличие бинаря + smoke-прогон."""
-    EXE = next((p for p in (os.path.join(ROOT, "build", "SynchrotronTracker.exe"),
-                            os.path.join(ROOT, "build", "Release", "SynchrotronTracker.exe"))
-                if os.path.exists(p)), None)
+    EXE = next((p for p in (os.path.join(ROOT, "build", exe_name("SynchrotronTracker")),
+                            os.path.join(ROOT, "build", "Release", exe_name("SynchrotronTracker")))
+                if os.path.exists(p)), None)   # .exe только на Windows; Release — раскладка MSVC
 
     def test_exe_built(self):
         self.assertIsNotNone(self.EXE, "SynchrotronTracker.exe не собран (cmake --build build)")

@@ -27,7 +27,7 @@ import numpy as np
 import beam_injection as bi
 import matrix_traj_export as mte
 import matrix_tracker as mt
-from _common import no_window
+from _common import exe_name, no_window
 
 TB = os.path.join("workspace", "tables")
 RESULTS = os.path.join("workspace", "results")
@@ -129,9 +129,9 @@ def load_experiment(exp_id):
 def run_diff(lattice, group, exp_id):
     """Режим 1: C++ диффур-трекер по картам поля, полный оборот до плоскости инжекции."""
     info = author_experiment(lattice, group, exp_id)
-    exe = os.path.join("build", "SynchrotronTracker.exe")
+    exe = os.path.join("build", exe_name("SynchrotronTracker"))
     if not os.path.exists(exe):
-        exe = os.path.join("build", "Release", "SynchrotronTracker.exe")
+        exe = os.path.join("build", "Release", exe_name("SynchrotronTracker"))   # раскладка MSVC
     print(f"  запуск {exe} {exp_id} … (загрузка карт + интегрирование, может занять минуты)")
     r = subprocess.run([exe, str(exp_id)], capture_output=True, text=True, encoding="utf-8",
                        errors="replace", **no_window())

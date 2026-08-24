@@ -16,8 +16,9 @@ os.environ.setdefault("SS_DESIGN_MEV", "6000")   # СИЛА 6 ГэВ (как rad
 ROOT = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, ROOT); os.chdir(ROOT)
 import numpy as np
 import matrix_traj_export as mte
+from _common import exe_name
 
-EXE = os.path.join(ROOT, "build", "MatrixTracker.exe")
+EXE = os.path.join(ROOT, "build", exe_name("MatrixTracker"))   # .exe только на Windows
 NPZ1 = os.path.join(ROOT, "workspace", "results", "trajectories_local_exp1.npz")   # --track перезапишет — бэкапим
 
 

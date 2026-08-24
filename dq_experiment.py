@@ -16,8 +16,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from field_quality import load
 from _ct_asym_track import make_field, ME, QE, V, GAMMA0, C
+from _common import ansys_dir
 
-KD = r"C:/Sasha/Work/SILA/ansis approximations/KD/DQ"
+KD = str(ansys_dir() / "KD" / "DQ")                                # каталог карт — env SS_ANSYS_DIR
 MAPS = ["DQ_I1_100A_v3.fld", "DQ_I2_100A_v3.fld", "DQ_I3_100A_v3.fld"]
 OUT = os.path.join("workspace", "research", "dq_edge")
 os.makedirs(OUT, exist_ok=True)

@@ -13,10 +13,10 @@ import os, sys, csv, struct, shutil
 import numpy as np
 import matrix_tracker as mt
 import matrix_optimizer as mo
-from _common import no_window
+from _common import exe_name, no_window
 
 RESULTS = os.path.join("workspace", "results")
-EXE_MT = os.path.join("build", "MatrixTracker.exe")            # C++ киковое ядро (--full) для демо-траекторий
+EXE_MT = os.path.join("build", exe_name("MatrixTracker"))      # C++ киковое ядро (--full) для демо-траекторий
 TB = mt.TB
 
 

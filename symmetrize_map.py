@@ -13,6 +13,7 @@ import os, struct, sys
 import numpy as np
 from scipy.ndimage import gaussian_filter
 from field_quality import load
+from _common import ansys_dir
 
 HDR = 96
 
@@ -101,7 +102,7 @@ def write_bin(h, B, path, nominal_arg=1.0):
 
 
 def main():
-    src = sys.argv[1] if len(sys.argv) > 1 else r"C:/Sasha/Work/SILA/ansis approximations/KD/SP/SP_I2_100A_v4.fld"
+    src = sys.argv[1] if len(sys.argv) > 1 else str(ansys_dir() / "KD" / "SP" / "SP_I2_100A_v4.fld")
     kind = sys.argv[2] if len(sys.argv) > 2 else "sext"
     sigma = float(sys.argv[3]) if len(sys.argv) > 3 else 1.0
     print(f"вход:  {os.path.basename(src)}  (мультиполь: {kind})")
