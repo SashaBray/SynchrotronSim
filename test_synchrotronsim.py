@@ -414,5 +414,220 @@ class TestCouplingTable(unittest.TestCase):
                 ec.TB = old
 
 
+class TestDesignCurrents(unittest.TestCase):
+    """design_currents.py: разбор таблицы матриц, сопоставление обмоток с устройствами решётки, решение."""
+
+    def test_label_and_base_mapping(self):
+        """Имя элемента таблицы связи и device_type_id решётки должны сходиться к ОДНОЙ базе."""
+        import design_currents as dc
+        self.assertEqual(dc._base_name("SP_I1_1A_L166"), "SP_1A_L166")
+        self.assertEqual(dc._base_name("DQ_I2_1A_L400"), dc._base_name("DQ_I1_1A_L400"))   # имя главной обмотки
+        self.assertEqual(dc._base_name("corrector_c1_100A_L100"), "corrector_100A_L100")
+        self.assertEqual(dc._winding_label("SP_I2_1A_L166"), "I2")
+        self.assertEqual(dc._winding_label("corrector_main_100A_L100"), "main")
+        self.assertEqual(dc._winding_label("OP_1A_L90"), "I")
+        self.assertEqual(dc._norm_label("I_c1"), "c1")          # в таблице токи названы I_c1/I_main
+        self.assertEqual(dc._norm_label("I1"), "I1")
+
+    def test_attach_devices(self):
+        """Обмотки восстанавливаются по базе+метке, а не обратным разбором имени.
+
+        Отдельно проверяется вариант модели (`_sext` — DQ с секступольным киком): физический магнит и
+        его обмотки те же, поэтому пометка варианта не должна мешать найти устройства.
+        """
+        import design_currents as dc
+        lcrow = {d: {} for d in ("DQ_I1_1A_L400", "DQ_I2_1A_L400", "DQ_I3_1A_L400",
+                                 "corrector_c1_100A_L100", "corrector_main_100A_L100")}
+        mats = [dict(name="DQ_I1_1A_L400", kind="dq", pm=False, labels=["I1", "I2", "I3"]),
+                dict(name="DQ_I1_1A_L400_sext", kind="dq", pm=False, labels=["I1", "I2", "I3"]),
+                dict(name="corrector_100A_L100", kind="kicker", pm=False, labels=["I_c1", "I_main"])]
+        dc.attach_devices(mats, lcrow)
+        dq = ["DQ_I1_1A_L400", "DQ_I2_1A_L400", "DQ_I3_1A_L400"]
+        self.assertEqual(mats[0]["devs"], dq)
+        self.assertEqual(mats[1]["devs"], dq, "вариант _sext — тот же магнит, те же обмотки")
+        self.assertEqual(mats[2]["devs"], ["corrector_c1_100A_L100", "corrector_main_100A_L100"])
+
+    def test_load_coupling_roundtrip(self):
+        """Прямые строки таблицы собираются обратно в матрицу; PM даёт ветку fixed."""
+        import design_currents as dc, tempfile, csv as _csv
+        hdr = ["element", "kind", "n_windings", "n_moments", "direction", "out_label", "in_label",
+               "value", "units", "eff_length", "i_op", "imax", "r2"]
+        rows = [["T", "sext", "2", "1", "forward", "S", "I1", "3.0", "coef/A", "0.2", "1.0", "5.0", "0.99"],
+                ["T", "sext", "2", "1", "forward", "S", "I2", "0.5", "coef/A", "0.2", "1.0", "5.0", "0.99"],
+                ["P", "dipole", "0", "1", "fixed", "B", "-", "-1e-4", "coef", "0.4", "-", "-", "-"]]
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, dc.COUPLING_TABLE), "w", encoding="utf-8", newline="") as f:
+                w = _csv.writer(f, delimiter=";")
+                w.writerow(hdr); w.writerows(rows)
+            mats = {m["name"]: m for m in dc.load_coupling(td)}
+        self.assertEqual(mats["T"]["labels"], ["I1", "I2"])
+        np.testing.assert_allclose(mats["T"]["M"], [[3.0, 0.5]])
+        self.assertTrue(mats["P"]["pm"])
+        self.assertAlmostEqual(mats["P"]["fixed"]["B"], -1e-4)
+
+    @staticmethod
+    def _mini_db(td):
+        """Мини-база: матрица одного квадруполя + его строки в hardware_library и lattice_configs."""
+        import csv as _csv
+        import design_currents as dc
+
+        def put(name, header, rows):
+            with open(os.path.join(td, name), "w", encoding="utf-8", newline="") as f:
+                w = _csv.writer(f, delimiter=";")
+                w.writerow(header); w.writerows(rows)
+
+        put(dc.COUPLING_TABLE,
+            ["element", "kind", "n_windings", "n_moments", "direction", "out_label", "in_label",
+             "value", "units", "eff_length", "i_op", "imax", "r2"],
+            [["QP_X", "quad", "1", "1", "forward", "G", "I", "2.0", "coef/A", "0.3", "1.0", "9.0", "0.99"]])
+        put("hardware_library.csv",
+            ["device_type_id", "map_bin_path", "nominal_arg", "use_symmetry", "field_direction",
+             "correct_coeff", "rot_x_deg", "rot_y_deg", "rot_z_deg", "turns_per_coil"],
+            [["QP_X", "QP_X.bin", "100", "1", "1", "1", "0", "0", "0", "85"]])
+        put("lattice_configs.csv",
+            ["lattice_id", "device_type_id", "eff_length", "kind"], [["1", "QP_X", "0.3", "quad"]])
+
+    def _patch(self, td, name, col, value):
+        """Заменить значение в единственной строке таблицы мини-базы."""
+        import csv as _csv
+        p = os.path.join(td, name)
+        with open(p, encoding="utf-8") as f:
+            rows = list(_csv.reader(f, delimiter=";"))
+        rows[1][rows[0].index(col)] = value
+        with open(p, "w", encoding="utf-8", newline="") as f:
+            _csv.writer(f, delimiter=";").writerows(rows)
+
+    def test_staleness_uses_input_fingerprint(self):
+        """Устаревание определяется по САМИМ входным данным, а не по дате файла.
+
+        Дата ненадёжна: element_compare переписывает lattice_configs по ходу работы (временные и
+        демо-конфигурации), и таблица оказывалась «старее» своих входов сразу после честной пересборки.
+        """
+        import design_currents as dc, tempfile
+        with tempfile.TemporaryDirectory() as td:
+            self._mini_db(td)
+            self.assertIn("нет отпечатка", dc.staleness(td))          # снято прежней версией — не проверить
+
+            dc.write_stamps(dc.current_hashes(td), td)                # как после честного измерения
+            self.assertEqual(dc.staleness(td), "", "свежие матрицы не должны помечаться устаревшими")
+
+            self._patch(td, "hardware_library.csv", "rot_z_deg", "180")   # развернули магнит — знак G меняется
+            msg = dc.staleness(td)
+            self.assertIn("устарели 1 из 1", msg)
+            self.assertIn("QP_X", msg)
+
+            self._patch(td, "hardware_library.csv", "rot_z_deg", "0")
+            self._patch(td, "hardware_library.csv", "turns_per_coil", "42")  # витки матрицу НЕ меняют
+            self.assertEqual(dc.staleness(td), "", "смена витков не должна помечать матрицу устаревшей")
+
+            self._patch(td, "lattice_configs.csv", "eff_length", "0.4")      # геометрия — меняет
+            self.assertIn("устарели", dc.staleness(td))
+
+
+class TestGuiShell(unittest.TestCase):
+    """Оболочка: модули импортируются, команды собираются правильно (без запуска Qt-приложения)."""
+
+    def test_command_builders(self):
+        from gui.runner import exe_job, py_job
+        j = py_job("трек", "track3.py", "--mode", "kick-phys", "--exp", 1)
+        self.assertTrue(j.argv[1].endswith("track3.py"))
+        self.assertEqual(j.argv[2:], ["--mode", "kick-phys", "--exp", "1"])   # числа приводятся к строкам
+        self.assertEqual(py_job("t", "s.py", "--a", None, "--b").argv[2:], ["--a", "--b"])  # None опускается
+        self.assertTrue(exe_job("кик", "MatrixTracker", "--track", 1, 10).argv[0].endswith(
+            "MatrixTracker.exe" if sys.platform == "win32" else "MatrixTracker"))
+
+    def test_interrupted_run_recovers_tables(self):
+        """Убитый на полпути прогон не должен оставлять базу испорченной.
+
+        element_compare временно правит 4 таблицы и возвращает их в конце; при убийстве процесса
+        (кнопка «Остановить», закрытие окна) возврат не отрабатывает. Метка прогона, пережившая
+        процесс, означает прерывание — следующий старт обязан вернуть таблицы из копии.
+        """
+        import element_compare as ec
+        import shutil
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            old_tb, old_guard, old_mark = ec.TB, ec.GUARD_DIR, ec.GUARD_MARK
+            ec.TB = td
+            ec.GUARD_DIR = os.path.join(td, "_cmp_backup")
+            ec.GUARD_MARK = os.path.join(ec.GUARD_DIR, "in_progress")
+            try:
+                for f in ec.CSV4:                                   # исходное состояние таблиц
+                    with open(os.path.join(td, f), "w", encoding="utf-8") as fh:
+                        fh.write("a;b;kind\n1;2;quad\n")
+                ec.guard_tables()
+                self.assertTrue(os.path.exists(ec.GUARD_MARK), "метка прогона должна быть выставлена")
+                with open(os.path.join(td, ec.CSV4[0]), "w", encoding="utf-8") as fh:
+                    fh.write("a;b\n1;2\n")                          # рабочее состояние: часть столбцов потеряна
+                self.assertEqual(ec.recover_tables(), ec.CSV4)      # следующий старт возвращает всё
+                self.assertEqual(open(os.path.join(td, ec.CSV4[0]), encoding="utf-8").read(),
+                                 "a;b;kind\n1;2;quad\n")
+                self.assertFalse(os.path.exists(ec.GUARD_MARK), "после восстановления метки быть не должно")
+                ec.guard_tables()
+                ec.release_tables()                                 # штатное завершение — метка снята
+                self.assertEqual(ec.recover_tables(), [], "без метки восстанавливать нечего")
+            finally:
+                ec.TB, ec.GUARD_DIR, ec.GUARD_MARK = old_tb, old_guard, old_mark
+
+    def test_discover_projects_from_db(self):
+        """Решётки из базы должны предлагаться проектами — иначе при первом запуске список пуст."""
+        from gui import projects as pr
+        found = pr.discover_projects()
+        lats = {p.lattice for p in found}
+        in_db = {lid for lid, n in pr.lattices_in_db().items() if n >= pr.MIN_ELEMENTS}
+        self.assertEqual(lats, in_db, "предложены не все содержательные решётки базы")
+        self.assertTrue(all(p.exp and p.group for p in found), "у проекта должны быть опыт и пучок")
+        known = [p for p in found if p.lattice == min(lats)]                   # уже заведённые — не дублируем
+        self.assertNotIn(min(lats), {p.lattice for p in pr.discover_projects(known)})
+
+    def test_sub_lattice_label(self):
+        """Подпись суб-решётки берётся из её описания и режется по смыслу, а не по символу."""
+        from gui.projects import _short
+        self.assertEqual(_short("Конфигурация 3 = SP1: 1 стандартный SP + начало SP2 (gid 1..79)"),
+                         "Конфигурация 3 = SP1")
+        self.assertEqual(_short("Короткое"), "Короткое")
+        self.assertTrue(_short("слово " * 40).endswith("…"))
+
+    def test_numeric_sort_key(self):
+        """Сортировка таблиц по клику: числа сравниваются как числа (иначе «16» встаёт перед «2»)."""
+        from gui.csvtable import NumericSortProxy as P
+        self.assertEqual(P._num("16"), 16.0)
+        self.assertEqual(P._num("1.00E-11"), 1e-11)
+        self.assertEqual(P._num("-3,5"), -3.5)                # запятая-десятичная тоже читается
+        self.assertIsNone(P._num("QP_L_1A_L295"))
+        self.assertIsNone(P._num(""))
+
+    def test_csv_roundtrip_preserves_format(self):
+        """Правка таблицы не меняет разделитель, кодировку, состав столбцов и переводы строк (CRLF)."""
+        from pathlib import Path
+        from gui.csvtable import read_csv, write_csv
+        import gui.paths as gp
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "t.csv"
+            p.write_bytes("a;b\r\n1.5;2\r\n".encode("utf-8-sig"))
+            hdr, rows, enc = read_csv(p)
+            self.assertEqual((hdr, rows, enc), (["a", "b"], [["1.5", "2"]], "utf-8-sig"))
+            rows[0][0] = "9.75"
+            old_tables = gp.TABLES
+            gp.TABLES = Path(td)                                      # бэкап пишется рядом, не в БД проекта
+            try:
+                bak = write_csv(p, hdr, rows, enc)
+            finally:
+                gp.TABLES = old_tables
+            self.assertEqual(p.read_bytes(), "a;b\r\n9.75;2\r\n".encode("utf-8-sig"))   # формат сохранён
+            self.assertTrue(bak.exists(), "прежняя версия таблицы должна уходить в резервную копию")
+
+            lf = Path(td) / "lf.csv"                              # таблица с LF не должна стать CRLF
+            lf.write_bytes(b"a;b\n1;2\n")
+            hdr, rows, enc = read_csv(lf)
+            gp.TABLES = Path(td)
+            try:
+                write_csv(lf, hdr, rows, enc)
+            finally:
+                gp.TABLES = old_tables
+            self.assertEqual(lf.read_bytes(), b"a;b\n1;2\n", "переводы строк исходного файла сохраняются")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")

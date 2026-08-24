@@ -13,6 +13,7 @@ import numpy as np
 import matrix_tracker as mt
 import bip_matrix as bm
 from scipy.optimize import minimize, minimize_scalar
+from _common import no_window
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 TB = os.path.join(ROOT, "workspace", "tables")
@@ -172,7 +173,7 @@ def run_diffur(dev, cur, yaw=0.0):
     """Собрать конфиг, прогнать C++-диффур, вернуть траектории (список (N,3)). Конфиг остаётся в БД —
     чистит вызывающий (cleanup). Возврат (trajs, geom)."""
     geom = build_config(dev, cur, yaw)
-    r = subprocess.run([EXE, str(TMP_EXP)], capture_output=True, text=True, cwd=ROOT)
+    r = subprocess.run([EXE, str(TMP_EXP)], capture_output=True, text=True, cwd=ROOT, **no_window())
     if r.returncode != 0:
         raise RuntimeError(f"диффур упал: {r.stderr[-400:]}")
     return read_bin(TMP_EXP), geom
@@ -188,6 +189,50 @@ def cleanup():
         p = os.path.join(RESULTS, f)
         if os.path.exists(p): os.remove(p)
 
+
+# ============================ ЗАЩИТА ТАБЛИЦ ОТ ПРЕРВАННОГО ПРОГОНА ===========================
+# Прогон временно правит 4 таблицы БД и возвращает их в конце. Если процесс УБИТЬ (кнопка «Остановить»
+# в оболочке, закрытие окна), возврат не отработает и в базе останется рабочее состояние прогона.
+# Поэтому перед правкой снимается копия и ставится метка; метка, пережившая процесс, означает
+# прерывание — при следующем старте таблицы возвращаются из копии автоматически.
+GUARD_DIR = os.path.join(TB, "_cmp_backup")
+GUARD_MARK = os.path.join(GUARD_DIR, "in_progress")
+
+
+def guard_tables():
+    """Снять копию 4 таблиц и отметить, что прогон начался."""
+    os.makedirs(GUARD_DIR, exist_ok=True)
+    for f in CSV4:
+        src = os.path.join(TB, f)
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.join(GUARD_DIR, f))
+    with open(GUARD_MARK, "w", encoding="utf-8") as f:
+        f.write(f"pid={os.getpid()}\n")
+
+
+def release_tables():
+    """Прогон завершился штатно — метку снять (копия остаётся как страховка)."""
+    if os.path.exists(GUARD_MARK):
+        os.remove(GUARD_MARK)
+
+
+def recover_tables():
+    """Вернуть таблицы из копии, если прошлый прогон был прерван. Возврат: восстановленные имена."""
+    if not os.path.exists(GUARD_MARK):
+        return []
+    done = []
+    for f in CSV4:
+        bak = os.path.join(GUARD_DIR, f)
+        if os.path.exists(bak):
+            shutil.copy2(bak, os.path.join(TB, f))
+            done.append(f)
+    os.remove(GUARD_MARK)
+    if done:
+        print(f"[восстановление] прошлый прогон был прерван — таблицы возвращены из копии: {', '.join(done)}")
+    return done
+
+
+recover_tables()                                       # ДО чтения таблиц ниже: иначе прочтём рабочее состояние
 
 # ============================ МАТРИЧНОЕ ЯДРО (Python) + ФИТ ==================================
 os.environ.setdefault("SS_SECTOR", "1")                # секторный/кик режим ядра (drift-kick-drift, НЕ матрицы)
@@ -221,7 +266,7 @@ class _KickServer:
 
     def __init__(self):
         self.p = subprocess.Popen([EXE_MT, "--serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                  text=True, cwd=ROOT, bufsize=1)
+                                  text=True, cwd=ROOT, bufsize=1, **no_window())
 
     def track(self, coeffs, L, kind, geom, probes, M=24):
         """(K,3)=(s,u,v) на пробу через дрейф di→элемент(M суб-срезов L/M)→дрейф do. edge=0, sr=0 — как
@@ -466,7 +511,7 @@ def tune_bend_yaw(dev, cur, iters=6, tol=1e-6):
 
 
 # ============================ СВИП ТОКОВ + ДАТАСЕТ ==========================================
-CUR_RANGE = list(range(-50, 51, 10))                   # −50..+50 шаг 10 (прямые токовые)
+CUR_RANGE = list(range(-50, 51, 10))                   # −50..+50 шаг 10 — ЗАПАСНОЙ свип (нет проектного mat_* → рабочая точка неизвестна)
 
 
 def dq_operating_current(dev):
@@ -480,13 +525,20 @@ def dq_operating_current(dev):
 
 
 def element_currents(dev, kind):
-    """Токи свипа по типу. PM-диполь → одна конфигурация (поле фиксировано). DQ → вокруг РАБОЧЕГО тока
-    (±50А = перегруз ×17, пучок раздувается). Прямой токовый → ±50А."""
+    """Токи свипа по типу — РАБОЧАЯ ОБЛАСТЬ. PM-диполь → одна конфигурация (поле фиксировано). DQ → вокруг
+    РАБОЧЕГО тока. Чистый токовый с проектным mat_* → доли рабочего тока (_ladder_fracs, 25–150%); без
+    проектных данных (вспом. обмотки) → запасной свип ±50А (CUR_RANGE)."""
     if is_pm(dev):
         return [0.0]                                     # одна конфигурация (arg_val игнор — элемент неактивен)
     if kind == "dq":
         Iop = dq_operating_current(dev)                  # ~несколько ампер
         return [round(f * Iop, 3) for f in (0.4, 0.6, 0.8, 1.0, 1.2, 1.4)]
+    if kind in DOM:                                      # рабочая точка через 1А-пробу (как в отчёте матриц)
+        col = {"G": "mat_G", "S": "mat_S", "O": "mat_O"}[DOM[kind]]
+        if abs(float(LCROW.get(dev, {}).get(col) or 0.0)) > 1e-30:
+            L = float(LCROW[dev].get("eff_length") or 0.1)
+            Iop = element_operating_current(kind, [dev], L)
+            return [round(float(f * Iop), 4) for f in _ladder_fracs(kind)]
     return [float(c) for c in CUR_RANGE]
 
 
@@ -543,7 +595,8 @@ HTML_OUT = os.path.join(RESULTS, "html")           # HTML-отчёты элем�
 
 def _show_currents(recs):
     """Показательные токи для графиков: 2 шт БЕЗ нулевого (ток 0 = чистый дрейф, неинформативен). Знаковый
-    свип (прямые) → ток ближайший к ±50% макс. Положительный свип (DQ) → 50% и 100% макс. PM/малый — как есть."""
+    свип (запасной ±50А) → ток ближайший к ±50% макс. Положительный свип (рабочая область: прямые, DQ) →
+    50% и 100% макс. PM/малый — как есть."""
     curs = sorted({r["cur"] for r in recs})
     if len(curs) <= 2:
         return curs
@@ -731,23 +784,22 @@ def _plot_one_xy(m, cur, outdir, tag, ds, ks, coef):
 
 
 def _matrix_plots(m, outdir):
-    """НЕСКОЛЬКО отдельных графиков (диффур+кик) при АДАПТИВНЫХ токах, привязанных к релевантному диапазону
-    элемента: граница релевантности imax (R²≥0.95) + ½ релевантного (±imax/2). Так нет графиков с чрезмерным
-    перегрузом (DQ при своих ~3А, не ±50). У PM — только фикс. поле. На КАЖДЫЙ ток: график траекторий x/y И
-    сечение пучка x-y. Возврат (traj_pngs, xy_pngs, rmse0) — списки парны по токам; rmse0 при первом токе."""
+    """НЕСКОЛЬКО отдельных графиков (диффур+кик) при токах РАБОЧЕЙ ОБЛАСТИ: 50% и 100% рабочей точки i_op
+    + верх рабочей области (150%; корректор 125% номинала). Так нет графиков с перегрузом (DQ при своих ~3А,
+    не ±50). У PM — только фикс. поле. На КАЖДЫЙ ток: график траекторий x/y И сечение пучка x-y.
+    Возврат (traj_pngs, xy_pngs, rmse0) — списки парны по токам; rmse0 — в рабочей точке (тег iop)."""
     if m.get("pm"):
         curlist = [("-", "pm")]
-    else:                                                       # АДАПТИВНЫЙ ток: привязан к релевантному диапазону
-        im = float(m["imax"])                                   # граница релевантности (R²≥0.95) + ±½ — не перегруз
-        curlist = [(im, "imax"), (0.5 * im, "halfp"), (-0.5 * im, "halfm")]
-    traj_pngs = []; xy_pngs = []; rmse0 = float("nan"); first = True
+    else:                                                       # токи демонстрации — доли рабочей точки
+        iop = float(m["i_op"]); top = iop * float(_ladder_fracs(m["kind"])[-1])
+        curlist = [(0.5 * iop, "half"), (iop, "iop"), (top, "top")]
+    traj_pngs = []; xy_pngs = []; rmse0 = float("nan")
     for cur, tag in curlist:
         try:
             tpng, ds, ks, coef = _plot_one_traj(m, cur, outdir, tag)         # траектории x/y при токе cur
             xpng = _plot_one_xy(m, cur, outdir, tag, ds, ks, coef)           # сечение x-y при том же токе
             traj_pngs.append(tpng); xy_pngs.append(xpng)
-            if first:                                                  # RMSE — при первом (моём/PM) токе
-                first = False
+            if tag in ("iop", "pm"):                                   # RMSE — в рабочей точке (PM — фикс. поле)
                 try:
                     rmse0 = math.sqrt(traj_mse(ds, ks)) * 1e3 if all(k is not None for k in ks) else float("nan")
                 except Exception:
@@ -758,8 +810,9 @@ def _matrix_plots(m, outdir):
 
 
 def _cumulative_r2(ts, vals):
-    """R² линейности moment(ток) НАРАСТАЮЩИМ окном по |ток| ≤ |ток строки|. В релевантной области ≈1; при
-    добавлении ПЕРЕГРУЖЕННЫХ токов (параксиальное извлечение ломается / feed-down) падает. Возврат список R²."""
+    """R² линейности moment(ток) НАРАСТАЮЩИМ окном по |ток| ≤ |ток строки|. В рабочей области ≈1; падает,
+    только если нелинейность (параксиальный слом / feed-down) начинается уже ВНУТРИ рабочей области.
+    Возврат список R² (первые <3 точек → nan, в таблице «—»)."""
     out = []
     for k in range(len(ts)):
         idx = [j for j in range(len(ts)) if abs(ts[j]) <= abs(ts[k]) + 1e-9 and vals[j] == vals[j]]
@@ -772,19 +825,20 @@ def _cumulative_r2(ts, vals):
 
 
 def _scan_table_data(m):
-    """Данные таблицы: скан магнитуды t от −50 до +50 А (С ПЕРЕГРУЗОМ — виден спад R²), ~15 строк.
-    Многообмоточные: обмотки с РАЗНЫМИ весами w_j (ток обмотки I_j = t·w_j) → каждая строка = УНИКАЛЬНАЯ
-    комбинация токов (не одинаковые). На строку: моменты = M·I, RMSE диффур↔кик, R² = линейности ИЗВЛЕЧЁННОГО
-    доминантного момента (нарастающим окном по |ток|; ≈1 в релевантной области, падает при перегрузе).
+    """Данные таблицы: лестница магнитуды t по РАБОЧЕЙ ОБЛАСТИ (доли рабочего тока i_op из _ladder_fracs,
+    25–150%; корректор до 125% номинала). Многообмоточные: обмотки с РАЗНЫМИ весами w_j (ток обмотки
+    I_j = t·w_j) → каждая строка = УНИКАЛЬНАЯ комбинация токов (не одинаковые). На строку: моменты = M·I,
+    RMSE диффур↔кик, R² = линейности ИЗВЛЕЧЁННОГО доминантного момента (нарастающим окном по |ток|; в рабочей
+    области ≈1, граница линейности — отдельными пробами выше, см. _relevant_imax_ext).
     Возврат (Icols, rows): Icols[k]=(I1,..,In), rows[k]=(moments_tuple, rmse_mm, r2)."""
     kind, devs, L = m["kind"], m["devs"], float(m["L"])
     bending = kind in ("dipole", "dq", "kicker"); keff = "dq" if kind == "kicker" else kind
     nw = len(devs)
     w = np.linspace(1.0, 0.5, nw) if nw > 1 else np.array([1.0])  # РАЗНЫЕ веса обмоток → уникальные комбинации
-    ts = np.linspace(-50.0, 50.0, 15)
+    ts = float(m["i_op"]) * _ladder_fracs(kind)                  # строки таблицы — только рабочая область
     Mw = np.asarray(m["M"], float) @ w                           # момент на единицу t (в направлении w)
     dom = int(np.argmax(np.abs(Mw))); dom_name = m["outputs"][dom]   # доминантный момент — для R² линейности
-    i_ref = 0.5 * float(m["imax"])
+    i_ref = float(m["i_op"])                                     # опорный фит кик-коэф — в рабочей точке
 
     def combo(t):
         wnd = [(devs[j], float(t * w[j])) for j in range(nw)]
@@ -849,8 +903,9 @@ def build_report(elements, path):
                       "matrix_tracker в режиме SS_SECTOR — симплектический drift-kick-drift, порт elegant "
                       "KQUAD/KSEXT/KOCT/CSBEND, а НЕ передаточные матрицы) подогнана последовательными "
                       "приближениями: физкоэф на каждый ток + один L_eff на элемент. Пучок 13 частиц (12 по "
-                      "кругу Ø2мм + центр). Прямые токовые — свип −50..+50 А; изгибающие DQ — вокруг рабочего "
-                      "тока; PM-диполи — одна конфигурация (поле фиксировано). Изгибающие сравниваются в "
+                      "кругу Ø2мм + центр). Прямые токовые — лестница рабочей области (25–150% рабочего тока; "
+                      "без проектных данных — свип −50..+50 А); изгибающие DQ — вокруг рабочего тока; PM-диполи — "
+                      "одна конфигурация (поле фиксировано). Изгибающие сравниваются в "
                       "проекции Френе (отклонение от опорной дуги).")
     for el in elements:
         if el is None: continue
@@ -925,8 +980,7 @@ def run_all(kinds=("quad", "sext", "oct")):
     bend = [k for k in kinds if k in ("dipole", "dq")]
     devs = candidates(straight) + (candidates_bending(bend) if bend else [])
     print(f"кандидатов ({','.join(kinds)}): {len(devs)}")
-    bak = os.path.join(TB, "_cmp_backup"); os.makedirs(bak, exist_ok=True)
-    for f in CSV4: shutil.copy2(os.path.join(TB, f), os.path.join(bak, f))
+    guard_tables()                                    # копия таблиц + метка (прерывание безопасно)
     elements = []
     try:
         for dev, kind in devs:
@@ -937,6 +991,7 @@ def run_all(kinds=("quad", "sext", "oct")):
                 print(f"  ! {dev}: {type(e).__name__}: {e}"); cleanup()
     finally:
         cleanup()
+        release_tables()
         for f in CSV4:                                # восстановить при сбое очистки
             b = os.path.join(bak, f)
             if os.path.exists(b) and os.path.getsize(os.path.join(TB, f)) == 0:
@@ -950,7 +1005,7 @@ def run_all(kinds=("quad", "sext", "oct")):
 def run_diffur_windings(windings, yaw=0.0):
     """Диффур для N со-локованных обмоток (суперпозиция полей). Возврат (trajs, geom). Чистит вызывающий."""
     geom = build_windings(windings, yaw)
-    r = subprocess.run([EXE, str(TMP_EXP)], capture_output=True, text=True, cwd=ROOT)
+    r = subprocess.run([EXE, str(TMP_EXP)], capture_output=True, text=True, cwd=ROOT, **no_window())
     if r.returncode != 0:
         raise RuntimeError(f"диффур упал: {r.stderr[-400:]}")
     return read_bin(TMP_EXP), geom
@@ -1021,8 +1076,7 @@ def run_dq_combo(base="L400", ngrid=4, sext=False):
     Leff = sweep_currents(main, "dq", PROBES)[0]["Leff_common"]   # общий L_eff из свипа главной обмотки
     print(f"  общий L_eff (из свипа I1) = {Leff:.4f}м; перебор комбинаций…")
     grid = np.linspace(-Imax, Imax, ngrid)
-    bak = os.path.join(TB, "_cmp_backup"); os.makedirs(bak, exist_ok=True)
-    for f in CSV4: shutil.copy2(os.path.join(TB, f), os.path.join(bak, f))
+    guard_tables()                                    # копия таблиц + метка (прерывание безопасно)
     recs = []
     try:
         for n, (i1, i2, i3) in enumerate(itertools.product(grid, grid, grid), 1):
@@ -1043,6 +1097,7 @@ def run_dq_combo(base="L400", ngrid=4, sext=False):
                 print(f"  {n}/{N3}  (посл. RMS={recs[-1]['rms_mm']:.4f}мм)" if recs else f"  {n}/{N3}")
     finally:
         cleanup()
+        release_tables()
         for f in CSV4:
             b = os.path.join(bak, f)
             if os.path.exists(b) and os.path.getsize(os.path.join(TB, f)) == 0:
@@ -1136,7 +1191,7 @@ def setup_viz(dev, cur, viz_id, Leff=None):
     cur_val = 0.0 if pm else float(cur)
     yaw = 0.0 if corrector else (tune_bend_yaw(dev, cur_val) if bending else 0.0)   # корректор НЕ поворачиваем
     geom = build_windings([(dev, "-" if pm else cur_val)], yaw, lat_id=viz_id, grp_id=viz_id, exp_id=viz_id)
-    rr = subprocess.run([EXE, str(viz_id)], capture_output=True, text=True, cwd=ROOT)   # диффур → .bin
+    rr = subprocess.run([EXE, str(viz_id)], capture_output=True, text=True, cwd=ROOT, **no_window())   # диффур → .bin
     if rr.returncode != 0:
         raise RuntimeError(f"диффур упал: {rr.stderr[-400:]}")
     trajs = read_bin(viz_id); ref_lab = trajs[0]
@@ -1238,15 +1293,16 @@ def extract_coeffs(windings, L):
 
 
 DOM = {"quad": "G", "sext": "S", "oct": "O"}              # доминантный (проектный) момент чистого элемента
-LIN_FRACS = 3                                            # первые N точек лестницы (около рабочей точки) — линейны, по ним НАКЛОН
+LIN_FRACS = 4                                            # первые N точек лестницы (≤ рабочей точки) — линейны, по ним НАКЛОН
 
 
 def _ladder_fracs(kind):
-    """Доли рабочего тока для свипа. Чистый элемент — вверх за рабочую точку (ищем начало нелинейности);
-    корректор (kicker) — доли номинала (не гонять за паспорт)."""
-    if kind in DOM:
-        return np.array([0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
-    return np.array([0.25, 0.5, 0.75, 1.0, 1.25])
+    """Доли рабочего тока для свипа и таблиц — РАБОЧАЯ ОБЛАСТЬ (25–150% рабочей точки). Начало нелинейности
+    ищут отдельные пробы ВЫШЕ лестницы (_relevant_imax_ext) — в таблицы отчёта они не входят.
+    Корректор (kicker) — доли номинала, потолок 125% (не гонять за паспорт)."""
+    if kind == "kicker":
+        return np.array([0.25, 0.5, 0.75, 1.0, 1.25])
+    return np.array([0.25, 0.5, 0.75, 1.0, 1.25, 1.5])
 
 
 def element_operating_current(kind, devs, L):
@@ -1450,7 +1506,7 @@ def compute_element_matrices(elements=None):
             kij = np.abs(M) * (abs(mt.QP * L) * scale)[:, None]      # линейность по ДОМИНАНТНОМУ (по кику) выходу обмотки
             pairs = [(int(kij[:, j].argmax()), j) for j in range(len(labels))]
         imax, r2 = _relevant_imax_ext(devs, L, pairs, curs, Vals)    # + проба выше лестницы, если линейно до её верха
-        combo = combo_verify(base, devs, L, M, rows, imax) if len(devs) > 1 else None   # суперпозиция многообмоточных
+        combo = combo_verify(base, devs, L, M, rows, float(curs[-1])) if len(devs) > 1 else None   # суперпозиция (в раб. области)
         res.append(dict(base=base, kind=kind, labels=labels, devs=devs, M=M, rows=rows, L=L, r2=r2,
                         imax=imax, i_op=i_op, curs=curs, Vals=Vals, combo=combo, pm=False))
     return res
@@ -1652,8 +1708,8 @@ def _matrix_block(doc, m, before, lo):
     valid = (f"весь тест-диапазон (R²={r2:.3f}≥0.95)" if r2 >= 0.95
              else f"УЖЕ — R²={r2:.3f}<0.95 (связь нелинейна выше)")
     cb = m.get("combo")
-    combo_txt = (f"  Проверка суперпозиции ({cb['n']} комбо обмоток в ±0.5·Imax; отн. невязка матрица↔диффур по "
-                 f"моментам): " + ", ".join(f"{k} {v * 100:.1f}%" for k, v in cb["per"].items()) + "." if cb else "")
+    combo_txt = (f"  Проверка суперпозиции ({cb['n']} комбо обмоток в пределах рабочей области; отн. невязка "
+                 f"матрица↔диффур по моментам): " + ", ".join(f"{k} {v * 100:.1f}%" for k, v in cb["per"].items()) + "." if cb else "")
     p1 = doc.add_paragraph(f"Матрица связи (ток→коэф):  ({ov})ᵀ = M · ({iv})ᵀ  — строки M: {ov};  столбцы: {iv}.")
     p2 = doc.add_paragraph(); lo.add_formula(p2, _matrix_latex(M, "M"))
     p3 = doc.add_paragraph(f"Обратный расчёт (коэф→ток):  ({iv})ᵀ = {'M⁻¹' if square else 'M⁺'} · ({ov})ᵀ.{ihint}")
@@ -1690,8 +1746,11 @@ def _coupling_summary(doc, mats, lo):
     doc.add_paragraph("Релевантный диапазон тока — тот, в котором линейная связь справедлива. КРИТЕРИЙ: R² ≥ 0.95 "
                       "(R² линейного фита коэф.=slope·ток по тест-точкам от рабочей точки вверх). Ток свипа привязан "
                       "к РАБОЧЕЙ точке каждого элемента (не фиксирован): у слабых квадов рабочий ток ~2 А, гнать их "
-                      "до десятков А физически бессмысленно (перегруз, насыщение). Релевантный |ток| — максимальный, "
-                      "при котором R² ещё ≥ 0.95; в этих пределах матрица (и обратная к ней) справедлива.")
+                      "до десятков А физически бессмысленно (перегруз, насыщение). Таблицы данных в разделах "
+                      "охватывают РАБОЧУЮ ОБЛАСТЬ (25–150% рабочего тока; корректор — до 125% номинала); граница "
+                      "линейности определяется отдельными пробами ВЫШЕ рабочей области (в таблицы не входят). "
+                      "Релевантный |ток| — максимальный, при котором R² ещё ≥ 0.95; в этих пределах матрица "
+                      "(и обратная к ней) справедлива.")
     st = doc.add_table(rows=1, cols=6); st.style = "Light Grid Accent 1"
     for j, h in enumerate(("элемент", "обмотки", "моменты", "релевантный ток, А (критерий R²≥0.95)", "R²", "диапазон |коэф|")):
         st.rows[0].cells[j].text = h
@@ -1813,9 +1872,20 @@ def upsert_coupling_table(rows_by_element):
 
 
 def write_coupling_table(mats):
-    """Записать/обновить таблицу БД coupling_matrices из списка mats (прямые+обратные / fixed для PM)."""
+    """Записать/обновить таблицу БД coupling_matrices из списка mats (прямые+обратные / fixed для PM).
+
+    Рядом кладём ОТПЕЧАТОК входных данных каждого элемента (карта поля, её ориентация, геометрия) —
+    по нему `design_currents` понимает, что матрица описывает уже другую машину. Проверять по дате
+    файла нельзя: этот же прогон переписывает lattice_configs (временные и демо-конфигурации)."""
     path, nupd, ntot = upsert_coupling_table({m["name"]: _matrix_table_rows(m) for m in mats})
     print(f"  таблица БД: обновлено элементов {nupd}, всего строк {ntot} → workspace/tables/{COUPLING_TABLE}")
+    try:
+        import design_currents as dc
+        stamps = {m["name"]: dc.inputs_hash(m.get("devs") or [m["name"]], HW, LCROW) for m in mats}
+        dc.write_stamps(stamps, TB)
+        print(f"  отпечаток входных данных: {len(stamps)} элементов → workspace/tables/{dc.STAMP_FILE}")
+    except Exception as e:                                   # отпечаток — служебный, из-за него не падаем
+        print(f"  ! отпечаток входных данных не записан: {type(e).__name__}: {e}")
     return path
 
 
@@ -1856,7 +1926,8 @@ def _shrink_table_font(t, pt=9):
 
 def _data_table(doc, m):
     """Таблица данных: столбцы = токи ОБМОТОК (I1, I2, …, уникальная комбинация на строку) + моменты (M·I) +
-    RMSE + R² (диффур↔кик). Строки — скан магнитуды ±50 А (с перегрузом → виден спад R²). Многообмоточные
+    RMSE + R² (диффур↔кик). Строки — РАБОЧАЯ ОБЛАСТЬ (доли рабочего тока, 25–150%; корректор до 125%);
+    граница линейности — отдельной строкой под таблицей (пробы выше рабочей области). Многообмоточные
     (обмоток ≥3, широкая) — на альбомной странице, затем портретная. + строка метаданных. Только числа."""
     from docx.shared import Pt
     labels, outs = m["labels"], m["outputs"]; nw = len(labels)
@@ -1970,20 +2041,17 @@ def _crop_right(png, frac):
         print(f"  ! кроп {os.path.basename(png)}: {type(e).__name__}: {e}")
 
 
-def _working_point_table(doc, m):
-    """Проектные токи элемента: проектные mat_* (.lte, решётка 1) → проектные токи обмоток решением под проектные
-    моменты (N моментов ⇒ первые N обмоток) → РЕАЛЬНЫЙ ток питания = arg_val × ENERGY_FACTOR / (витки-на-катушку)
-    и % номинала (витки/номинал из hardware_library). + таблица проект vs факт по матрице связи. PM — токов нет."""
+def _design_ivec(m):
+    """Проектные токи обмоток элемента (сырой arg): проектные mat_* (.lte, решётка 1) → решение матрицы связи
+    под проектные моменты (N управляемых моментов ⇒ первые N обмоток; остальные 0). Возврат (Ivec, ctrl,
+    design): токи-arg по обмоткам, список управляемых моментов (пуст ⇒ проекта нет, напр. корректор),
+    словарь проектных значений."""
     matcol = {"B": "mat_B", "Bv": "mat_Bv", "G": "mat_G", "Gv": "mat_Gv", "S": "mat_S", "O": "mat_O"}
-    if m.get("pm"):
-        doc.add_paragraph("Постоянный магнит — обмоток и токов нет; состав поля приведён в таблице выше.")
-        return
-    labels = m["labels"]; nI = len(labels)
-    dev0 = m["devs"][0]; row0 = LCROW.get(dev0, {})
+    nI = len(m["labels"])
+    row0 = LCROW.get(m["devs"][0], {})
     design = {mp: float(row0.get(matcol.get(mp, ""), 0.0) or 0.0) for mp in m["outputs"]}
     M = np.asarray(m["M"], float)
     ctrl = [mp for mp in m["outputs"] if abs(design.get(mp, 0.0)) > 1e-30]   # управляемые моменты (есть проект .lte)
-
     Ivec = np.zeros(nI)                                             # arg_val обмоток (суррогат); нет проекта ⇒ 0
     if ctrl:
         cols = list(range(min(len(ctrl), nI)))                      # первые N обмоток под N управляемых моментов
@@ -1994,10 +2062,23 @@ def _working_point_table(doc, m):
         except np.linalg.LinAlgError:
             sol = np.linalg.lstsq(M2, tgt, rcond=None)[0]
         for k, j in enumerate(cols): Ivec[j] = sol[k]
-    act = M @ Ivec
+    return Ivec, ctrl, design
 
-    _tcap(doc, f"{m['name']} — проектные токи обмоток")           # ТАБЛИЦА ТОКОВ: витки + проектный ток + % номинала
-    hdr = ("обмотка", "витк./катушку", "число катушек", "всего витков", "проектный ток, А", "% номинала")
+
+def _working_point_table(doc, m):
+    """Проектные токи элемента: _design_ivec (проектные mat_* .lte → токи обмоток) → РЕАЛЬНЫЙ ток питания =
+    arg_val × ENERGY_FACTOR / (витки-на-катушку) и % номинала (витки/номинал из hardware_library). Столбец
+    «сырой ток (arg)» — ток-аргумент карты ДО энергетического пересчёта и поправки на витки (= arg_val БД,
+    вход модели); есть и без данных о витках. + таблица проект vs факт по матрице связи. PM — токов нет."""
+    if m.get("pm"):
+        doc.add_paragraph("Постоянный магнит — обмоток и токов нет; состав поля приведён в таблице выше.")
+        return
+    labels = m["labels"]
+    Ivec, ctrl, design = _design_ivec(m)
+    act = np.asarray(m["M"], float) @ Ivec
+
+    _tcap(doc, f"{m['name']} — проектные токи обмоток")           # ТАБЛИЦА ТОКОВ: витки + сырой arg + проектный ток + % номинала
+    hdr = ("обмотка", "витк./катушку", "число катушек", "всего витков", "сырой ток (arg), А", "проектный ток, А", "% номинала")
     tc = doc.add_table(rows=1, cols=len(hdr)); tc.style = "Light Grid Accent 1"
     for k, h in enumerate(hdr): tc.rows[0].cells[k].text = h
     for j, lb in enumerate(labels):
@@ -2009,12 +2090,13 @@ def _working_point_table(doc, m):
         c[1].text = tpc_s or "—"
         c[2].text = (hw.get("num_coils") or "").strip() or "—"
         c[3].text = (hw.get("total_turns") or "").strip() or "—"
+        c[4].text = f"{Ivec[j]:+.4f}" if ctrl else "—"               # сырой arg (до энергопересчёта и витков)
         if ctrl and tpc:
             real = Ivec[j] * ENERGY_FACTOR / tpc                     # реальный ток питания
-            c[4].text = f"{real:+.1f}"
-            c[5].text = f"{100.0 * abs(real) / nom:.0f}%" if nom else "—"
+            c[5].text = f"{real:+.1f}"
+            c[6].text = f"{100.0 * abs(real) / nom:.0f}%" if nom else "—"
         else:
-            c[4].text = "—"; c[5].text = "—"
+            c[5].text = "—"; c[6].text = "—"
     doc.add_paragraph()
 
     if ctrl:                                                        # ТАБЛИЦА МОМЕНТОВ (проект vs факт)
@@ -2083,25 +2165,36 @@ def _matrix_section(doc, m, lo):
 
 
 def _ranges_table(doc, mats):
-    """Сводная таблица диапазонов (без прозы): элемент, обмотки, моменты, релевантный ток (R²≥0.95), R², диапазон."""
+    """Сводная таблица диапазонов (без прозы): элемент, обмотки, моменты, проектные токи (физ. А из _design_ivec;
+    без витков — arg), релевантный ток (R²≥0.95), R², диапазон."""
     _tcap(doc, "Сводка по всем элементам")
-    t = doc.add_table(rows=1, cols=6); t.style = "Light Grid Accent 1"
-    for j, h in enumerate(("элемент", "обмотки", "моменты", "релевантный |I|, А (R²≥0.95)", "R²", "диапазон |коэф|")):
+    t = doc.add_table(rows=1, cols=7); t.style = "Light Grid Accent 1"
+    for j, h in enumerate(("элемент", "обмотки", "моменты", "проектные токи, А",
+                           "релевантный |I|, А (R²≥0.95)", "R²", "диапазон |коэф|")):
         t.rows[0].cells[j].text = h
     for m in mats:
         c = t.add_row().cells; c[0].text = m["name"]; c[2].text = ", ".join(m["outputs"])
         if m.get("pm"):
-            c[1].text = "— (PM)"; c[3].text = "фикс. поле"; c[4].text = "—"
-            c[5].text = ";  ".join(f"{k}={v:+.1e}" for k, v in m["fixed"].items()); continue
+            c[1].text = "— (PM)"; c[3].text = "—"; c[4].text = "фикс. поле"; c[5].text = "—"
+            c[6].text = ";  ".join(f"{k}={v:+.1e}" for k, v in m["fixed"].items()); continue
         imax = float(m.get("imax", 0.0)); r2 = m.get("r2", 1.0)
         c[1].text = ", ".join(m["labels"])
+        Ivec, ctrl, _ = _design_ivec(m)                              # проектные токи обмоток → физ. А (без витков — arg)
+        if ctrl:
+            dsn = []
+            for j, (l, d) in enumerate(zip(m["labels"], m["devs"])):
+                a = arg_to_amps(d, float(Ivec[j]))
+                dsn.append(f"{l}={a:+.1f}" if a is not None else f"{l}={Ivec[j]:+.2f}(arg)")
+            c[3].text = ", ".join(dsn)
+        else:
+            c[3].text = "—"
         maxes = []                                                   # релевантный |I| по обмоткам → физ. А (разные витки)
         for l, d in zip(m["labels"], m["devs"]):
             a = arg_to_amps(d, imax)
             maxes.append(f"{l}≤{abs(a):.0f}" if a is not None else f"{l}≤{imax:.1f}(arg)")
-        c[3].text = ", ".join(maxes) + (" А") + ("" if r2 >= 0.95 else "  (R²<0.95)")
-        c[4].text = f"{r2:.3f}"
-        c[5].text = ";  ".join(f"|{m['outputs'][i]}| ≤ {np.abs(m['M'][i]).sum() * imax:.1e}" for i in range(len(m["outputs"])))
+        c[4].text = ", ".join(maxes) + (" А") + ("" if r2 >= 0.95 else "  (R²<0.95)")
+        c[5].text = f"{r2:.3f}"
+        c[6].text = ";  ".join(f"|{m['outputs'][i]}| ≤ {np.abs(m['M'][i]).sum() * imax:.1e}" for i in range(len(m["outputs"])))
     _shrink_table_font(t)                                           # сводная — на альбомной странице, шрифт на 2 пт меньше
 
 
@@ -2128,8 +2221,11 @@ def _intro_section(doc):
         "Токи и коэффициенты. Все токи в отчёте — физические токи питания обмоток (амперы при проектной энергии "
         "6 ГэВ). «Проектные токи обмоток» (таблица в конце каждого раздела) — это токи питания, при которых элемент "
         "даёт ПРОЕКТНЫЕ мультипольные коэффициенты, заданные в файле решётки .lte; они получены обращением матрицы "
-        "связи под проектные коэффициенты. Токи в подписях к графикам — точки характеризации карты поля (для "
-        "проверки линейности связи), они не равны проектным и могут превышать номинал.")
+        "связи под проектные коэффициенты. Там же приведён столбец «сырой ток (arg)» — ток-аргумент карты поля "
+        "до энергетического пересчёта и поправки на число витков; именно это значение подаётся на вход модели "
+        "(arg_val в базе данных). Таблицы данных и графики охватывают рабочую область элемента — "
+        "25–150% рабочего тока (корректор — до 125% номинала); граница линейности связи определяется "
+        "дополнительными пробами выше рабочей области и приведена отдельной строкой в каждом разделе.")
 
 
 def _apply_body_formatting(doc):
@@ -2144,15 +2240,19 @@ def _apply_body_formatting(doc):
         p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
 
 
-def build_matrix_report(path=None):
+def build_matrix_report(path=None, mats=None):
     """ФОРМАЛЬНЫЙ автоотчёт расчёта матриц связи ВСЕХ элементов: вводный раздел (метод) + однородный раздел на
     элемент (прямая+обратная матрица, расшифровка моментов, таблица данных свипа, графики траекторий x/y +
-    сечение пучка x-y) + сводная таблица диапазонов. Красная строка + выравнивание по ширине. Свежий .docx."""
+    сечение пучка x-y) + сводная таблица диапазонов. Красная строка + выравнивание по ширине. Свежий .docx.
+
+    `mats` — уже измеренные матрицы (полный охват). Без них меряем сами; передавать стóит, когда
+    вызывающий только что их измерил: измерение идёт диффуром по картам поля и повторять его дорого."""
     from docx import Document
     import latex2omml as lo
     path = path or os.path.join(OUTDIR, "element_compare_report.docx")
     os.makedirs(OUTDIR, exist_ok=True)
-    mats = build_all_mats()
+    if mats is None:
+        mats = build_all_mats()
     _tcap.n = 0                                                      # сброс сквозной нумерации таблиц
     doc = Document()
     doc.add_heading("SynchrotronSim — матрицы связи ток→физкоэф: расчёт по элементам", level=0)
@@ -2288,20 +2388,25 @@ def build_library(single=None, do_report=None, do_demo=None, do_html=None):
     if do_html is None: do_html = allmode
     els, dq_bases = (None, None) if allmode else _resolve_single(single)
     print(f"=== матрицы связи ток→физкоэф: {'ВСЯ БИБЛИОТЕКА' if allmode else single} ===")
-    mats = build_all_mats(els, dq_bases)                          # матрицы (+ свип/комбо датасеты внутри)
-    write_coupling_table(mats)                                    # таблица БД (upsert)
-    if not allmode:
-        print_matrices(mats)
-    if do_report:                                                # формальный отчёт матриц — всегда полный охват
-        build_matrix_report()
-    ids = None
-    if do_demo:                                                  # демо-конфиги (setup_viz_all — весь набор)
-        try:
-            ids = [s["id"] for s in setup_viz_all()]
-        except Exception as e:
-            print(f"  ! демо-конфиги: {type(e).__name__}: {e}")
-    if do_html:
-        generate_html_reports(ids)
+    guard_tables()                                                # копия таблиц + метка (прерывание безопасно)
+    try:
+        mats = build_all_mats(els, dq_bases)                      # матрицы (+ свип/комбо датасеты внутри)
+        write_coupling_table(mats)                                # таблица БД (upsert)
+        if not allmode:
+            print_matrices(mats)
+        if do_report:                                            # формальный отчёт матриц — всегда полный охват
+            build_matrix_report(mats=mats if allmode else None)   # полный прогон уже всё измерил — не мерить вновь
+        ids = None
+        if do_demo:                                              # демо-конфиги (setup_viz_all — весь набор)
+            try:
+                ids = [s["id"] for s in setup_viz_all()]
+            except Exception as e:
+                print(f"  ! демо-конфиги: {type(e).__name__}: {e}")
+        if do_html:
+            generate_html_reports(ids)
+    finally:
+        cleanup()
+        release_tables()                                          # штатное завершение — метку снять
     print(f"=== готово: элементов {len(mats)} ===")
     return mats
 
@@ -2356,8 +2461,8 @@ if __name__ == "__main__":
                   f"→ arg={cur:.4f}  (витк/кат={dev_tpc(dev)}, EF={ENERGY_FACTOR:.0f})")
     kind = {r["device_type_id"]: r.get("kind") for r in mt._read("lattice_configs.csv") if r.get("kind")}.get(dev, "quad")
     probes = [(0.0, 0.0)] + [(1e-3 * math.cos(2 * math.pi * k / 12), 1e-3 * math.sin(2 * math.pi * k / 12)) for k in range(12)]
-    bak = os.path.join(TB, "_cmp_backup"); os.makedirs(bak, exist_ok=True)   # страховка
-    for f in CSV4: shutil.copy2(os.path.join(TB, f), os.path.join(bak, f))
+    guard_tables()                                    # копия таблиц + метка (прерывание безопасно)
+    bak = GUARD_DIR
     try:
         trajs, geom = run_diffur(dev, cur)
         diff_su = diff_to_su(trajs, geom["xstart"])
@@ -2374,6 +2479,7 @@ if __name__ == "__main__":
         print(f"макс. расхождение финальных позиций (13 частиц): {worst:.4f} мм")
     finally:
         cleanup()
+        release_tables()
         for f in CSV4:                                    # восстановить на случай сбоя очистки
             b = os.path.join(bak, f)
             if os.path.exists(b) and os.path.getsize(os.path.join(TB, f)) == 0:

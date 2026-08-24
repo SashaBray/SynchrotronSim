@@ -35,6 +35,21 @@ workspace/tables/lattice_configs.csv
 # Таблица матриц связи ток→физкоэф (генерируется element_compare.py library)
 workspace/tables/coupling_matrices.csv
 
+# Проектные токи обмоток (производная от матриц связи, генерируется design_currents.py)
+workspace/tables/design_currents.csv
+
+# Отпечатки входных данных матриц связи (пишутся вместе с coupling_matrices.csv, он тоже игнорится)
+workspace/tables/coupling_matrices.inputs.json
+
+# Рабочая копия 4 таблиц на время прогона element_compare (страховка от прерывания)
+workspace/tables/_cmp_backup/
+
+# Реестр проектов графической оболочки (у каждого свой)
+workspace/configs/gui_projects.json
+
+# Ярлыки запуска: хранят абсолютные пути машины (пересоздаются make_shortcut.py)
+*.lnk
+
 # Сгенерированные optimconfig (производные от JSON)
 workspace/optim_inputs/*.optimconfig
 

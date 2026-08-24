@@ -69,27 +69,32 @@ def metrics(p, closed, n_turns=1):
            if (closed and n_turns == 1 and p["survived"] and len(x) >= 2) else None)
     return dict(survived=p["survived"], surv_turns=p.get("surv_turns", 1), n=len(S),
                 mean_mm=float(np.mean(r_mm)), max_mm=float(np.max(r_mm)), min_mm=float(np.min(r_mm)),
+                x0=float(x[0]) * 1e3 if len(x) else 0.0, y0=float(y[0]) * 1e3 if len(y) else 0.0,
                 dqx=dqx, dqy=dqy, clo=clo, kx=kx, ax=ax * 1e3, ky=ky, ay=ay * 1e3)
 
 
 def _fig_info(res, n_turns=1):
     """Панель 1: таблица общей информации по частицам. При n_turns>1 — выживание за N оборотов + дробный тюн."""
     P = len(res)
+    # начальные x и y — СО ЗНАКОМ: у пучка «центр + спутники ±» модуль делает пары неразличимыми
+    x0 = [f"{r.get('x0', 0.0):+.3f}" for r in res]
+    y0 = [f"{r.get('y0', 0.0):+.3f}" for r in res]
     if n_turns > 1:
-        hdr = ["№", "оборотов", "ср.|откл|, мм", "макс, мм", "тюн Qx", "тюн Qy"]
+        hdr = ["№", "оборотов", "нач. x, мм", "нач. y, мм", "ср.|откл|, мм", "макс, мм", "тюн Qx", "тюн Qy"]
         col = [[str(i) for i in range(P)],
-               [f"{r['surv_turns']}/{n_turns}" for r in res],
+               [f"{r['surv_turns']}/{n_turns}" for r in res], x0, y0,
                [f"{r['mean_mm']:.3f}" for r in res], [f"{r['max_mm']:.3f}" for r in res],
                [f"{r['dqx']:.2f}" for r in res], [f"{r['dqy']:.2f}" for r in res]]
-        cw = [26, 60, 70, 55, 60, 60]
+        cw = [26, 60, 62, 62, 70, 55, 60, 60]
     else:
-        hdr = ["№", "дошла", "ср.|откл|, мм", "макс, мм", "мин, мм", "дом. Qx", "дом. Qy", "замык. |Δ|, мм"]
+        hdr = ["№", "дошла", "нач. x, мм", "нач. y, мм", "ср.|откл|, мм", "макс, мм", "мин, мм",
+               "дом. Qx", "дом. Qy", "замык. |Δ|, мм"]
         col = [[str(i) for i in range(P)],
-               ["да" if r["survived"] else "НЕТ" for r in res],
+               ["да" if r["survived"] else "НЕТ" for r in res], x0, y0,
                [f"{r['mean_mm']:.3f}" for r in res], [f"{r['max_mm']:.3f}" for r in res],
                [f"{r['min_mm']:.3f}" for r in res], [f"{r['dqx']:.0f}" for r in res], [f"{r['dqy']:.0f}" for r in res],
                [("—" if r["clo"] is None else f"{r['clo']:.3f}") for r in res]]
-        cw = [26, 40, 70, 55, 55, 50, 50, 75]
+        cw = [26, 40, 62, 62, 70, 55, 55, 50, 50, 75]
     fig = go.Figure(go.Table(
         columnwidth=cw,
         header=dict(values=hdr, fill_color="#4e79a7", font=dict(color="white", size=12), align="center", height=26),
@@ -227,18 +232,20 @@ def metrics_long(p):
         float(A[0]) if len(A) else 0.0, float(A[-1]) if len(A) else 0.0)   # оконная амплитуда старт/конец (не 1 точка)
     Ax0, Axend = awin(Ax)
     return dict(survived=p["survived"], surv_turns=p["surv_turns"], turns=turns, x=x, xp=xp, y=y, yp=yp,
-                Ax=Ax, Ay=Ay, x0=float(x[0]) if len(x) else 0.0,
+                Ax=Ax, Ay=Ay, x0=float(x[0]) if len(x) else 0.0, y0=float(y[0]) if len(y) else 0.0,
                 xmax=float(np.max(np.abs(x))) if len(x) else 0.0, Ax0=Ax0, Axend=Axend)
 
 
 def _fig_info_long(res, n_turns):
     P = len(res)
-    hdr = ["№", "оборотов", "нач. |x|, мм", "макс |x|, мм", "ампл Ax нач", "ампл Ax кон", "Δампл, %"]
+    # начальные x и y — СО ЗНАКОМ: у пучка «центр + спутники ±» модуль делает пары неразличимыми
+    hdr = ["№", "оборотов", "нач. x, мм", "нач. y, мм", "макс |x|, мм", "ампл Ax нач", "ампл Ax кон", "Δампл, %"]
     col = [[str(i) for i in range(P)], [f"{r['surv_turns']}/{n_turns}" for r in res],
-           [f"{abs(r['x0']):.3f}" for r in res], [f"{r['xmax']:.3f}" for r in res],
+           [f"{r['x0']:+.3f}" for r in res], [f"{r.get('y0', 0.0):+.3f}" for r in res],
+           [f"{r['xmax']:.3f}" for r in res],
            [f"{r['Ax0']:.3f}" for r in res], [f"{r['Axend']:.3f}" for r in res],
            [f"{(r['Axend']/r['Ax0']-1)*100:+.1f}" if r['Ax0'] > 0 else "—" for r in res]]
-    fig = go.Figure(go.Table(columnwidth=[26, 60, 65, 65, 65, 65, 60],
+    fig = go.Figure(go.Table(columnwidth=[26, 60, 62, 62, 65, 65, 65, 60],
         header=dict(values=hdr, fill_color="#4e79a7", font=dict(color="white", size=12), align="center", height=26),
         cells=dict(values=col, align="center", height=22,
                    fill_color=[["#f4f6f8" if i % 2 else "white" for i in range(P)]])))
@@ -461,10 +468,10 @@ def main():
         surv = sum(r["survived"] for r in res)
         print(f"=== анализ траектории — эксперимент {a.exp} (решётка {d['lattice']}, {nt} оборотов) ===")
         print(f"кольцо {d['ring_len']:.2f}м, частиц {len(res)}, выжило {surv}/{len(res)} · {_rad_str(d)}")
-        print("\n№  оборотов    нач|x|,мм  макс|x|,мм  ампл_нач  ампл_кон  Δампл,%")
+        print("\n№  оборотов    нач.x,мм  нач.y,мм  макс|x|,мм  ампл_нач  ампл_кон  Δампл,%")
         for i, r in enumerate(res):
             dA = f"{(r['Axend']/r['Ax0']-1)*100:+.1f}" if r["Ax0"] > 0 else "—"
-            print(f"{i:<2} {r['surv_turns']:>5}/{nt:<6} {abs(r['x0']):>7.3f}   {r['xmax']:>8.3f}   "
+            print(f"{i:<2} {r['surv_turns']:>5}/{nt:<6} {r['x0']:>+8.3f}  {r['y0']:>+8.3f}   {r['xmax']:>8.3f}   "
                   f"{r['Ax0']:>7.3f}  {r['Axend']:>7.3f}   {dA:>6}")
         with open(out, "w", encoding="utf-8") as f:
             f.write(build_long_html(d, res))
@@ -480,15 +487,16 @@ def main():
           f"{'замкнуто' if d['closed'] else 'открыто'}, оборотов {nt}) ===")
     print(f"кольцо {d['ring_len']:.2f}м, элементов {len(d['elem_names'])-1}, частиц {len(res)}, выжило {surv}/{len(res)}")
     if nt > 1:
-        print("\n№  оборотов   ср.|откл|,мм  макс,мм   тюн Qx   тюн Qy")
+        print("\n№  оборотов   нач.x,мм  нач.y,мм  ср.|откл|,мм  макс,мм   тюн Qx   тюн Qy")
         for i, r in enumerate(res):
-            print(f"{i:<2} {r['surv_turns']:>4}/{nt:<5} {r['mean_mm']:>9.3f}  {r['max_mm']:>7.3f}   "
-                  f"{r['dqx']:>6.2f}   {r['dqy']:>6.2f}")
+            print(f"{i:<2} {r['surv_turns']:>4}/{nt:<5} {r['x0']:>+8.3f}  {r['y0']:>+8.3f}  "
+                  f"{r['mean_mm']:>9.3f}  {r['max_mm']:>7.3f}   {r['dqx']:>6.2f}   {r['dqy']:>6.2f}")
     else:
-        print("\n№  дошла  ср.|откл|,мм  макс,мм  мин,мм   дом.Qx  дом.Qy  замык.,мм")
+        print("\n№  дошла  нач.x,мм  нач.y,мм  ср.|откл|,мм  макс,мм  мин,мм   дом.Qx  дом.Qy  замык.,мм")
         for i, r in enumerate(res):
             clo = "—" if r["clo"] is None else f"{r['clo']:.3f}"
-            print(f"{i:<2} {'да ' if r['survived'] else 'НЕТ'}   {r['mean_mm']:>9.3f}  {r['max_mm']:>7.3f}  "
+            print(f"{i:<2} {'да ' if r['survived'] else 'НЕТ'}  {r['x0']:>+8.3f}  {r['y0']:>+8.3f}  "
+                  f"{r['mean_mm']:>9.3f}  {r['max_mm']:>7.3f}  "
                   f"{r['min_mm']:>6.3f}   {r['dqx']:>5.0f}  {r['dqy']:>6.0f}   {clo:>8}")
 
     # --- интерактивное окно (HTML) ---

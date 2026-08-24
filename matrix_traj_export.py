@@ -13,6 +13,7 @@ import os, sys, csv, struct, shutil
 import numpy as np
 import matrix_tracker as mt
 import matrix_optimizer as mo
+from _common import no_window
 
 RESULTS = os.path.join("workspace", "results")
 EXE_MT = os.path.join("build", "MatrixTracker.exe")            # C++ киковое ядро (--full) для демо-траекторий
@@ -131,7 +132,7 @@ def _cpp_full(exp):
     C++, демо-сегмент: ведущий дрейф → элемент → завершающий дрейф). Единый источник для deviation_paths и
     experiment_closure — программа расчёта траекторий = киковое C++ ядро (по просьбе)."""
     import subprocess
-    r = subprocess.run([EXE_MT, "--full", str(int(exp)), "1"], capture_output=True, text=True)
+    r = subprocess.run([EXE_MT, "--full", str(int(exp)), "1"], capture_output=True, text=True, **no_window())
     if r.returncode != 0:
         raise RuntimeError(f"MatrixTracker --full упал: {r.stderr[-400:]}")
     return read_local_npz(os.path.join(RESULTS, f"trajectories_local_exp{int(exp)}.npz"))

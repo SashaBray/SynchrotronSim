@@ -32,6 +32,7 @@ import pyvista as pv
 
 from visualize import build_combined_mesh, load_trajectories, rotation_matrix_zyx
 from _common import tracker_exe, project_root, workspace_dir
+from _common import no_window
 
 
 SCRIPT_DIR = project_root()
@@ -194,11 +195,11 @@ class LiveVisualizer:
     # =========================================================================
     def run_simulation(self):
         t0 = time.time()
-        r = subprocess.run([sys.executable, str(ASM)], capture_output=True, text=True)
+        r = subprocess.run([sys.executable, str(ASM)], capture_output=True, text=True, **no_window())
         if r.returncode != 0:
             print(f"  ASSEMBLE FAILED: {r.stderr.strip()[:200]}")
             return False
-        r = subprocess.run([str(EXE), str(self.exp_id)], capture_output=True, text=True)
+        r = subprocess.run([str(EXE), str(self.exp_id)], capture_output=True, text=True, **no_window())
         if r.returncode != 0:
             print(f"  TRACKER FAILED: {r.stderr.strip()[:200]}")
             return False

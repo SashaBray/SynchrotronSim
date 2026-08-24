@@ -25,6 +25,7 @@ build_matrix_db — element_connectivity, поэтому каждая загру
   py -3.14 load_config.py --config v1 --force                        # по короткому имени (удобство)
 """
 import os, sys, csv, glob, json, re, shutil, subprocess, argparse
+from _common import no_window
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 LTE_ROOT = os.path.join(ROOT, "workspace", "lte")
@@ -35,7 +36,8 @@ FMT_RU = {"sila": "СИЛА desc+line", "flat": "плоский .lte (PyAT)", "n
 
 def _has_line_def(path):
     try:
-        return bool(re.search(r"\bLINE\s*=", open(path, encoding="utf-8", errors="ignore").read(), re.I))
+        with open(path, encoding="utf-8", errors="ignore") as f:     # with: детект зовётся часто (окно выбора проекта)
+            return bool(re.search(r"\bLINE\s*=", f.read(), re.I))
     except OSError:
         return False
 
@@ -142,7 +144,7 @@ def _backup(rel):
 def sh(args):
     """Запуск шага пайплайна тем же интерпретатором. Останов при ошибке."""
     print(f"\n$ {os.path.basename(sys.executable)} {' '.join(args)}")
-    r = subprocess.run([sys.executable] + args, cwd=ROOT)
+    r = subprocess.run([sys.executable] + args, cwd=ROOT, **no_window())
     if r.returncode != 0:
         raise SystemExit(f"[стоп] шаг завершился с кодом {r.returncode}: {args[0]}")
 

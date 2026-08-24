@@ -21,6 +21,7 @@ git-коммит, суммы строк по решёткам). manifest поз�
   py -3.14 db_snapshot.py restore --snap <папка> [--force]
 """
 import os, csv, json, shutil, argparse, subprocess, collections
+from _common import no_window
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 TB = os.path.join(ROOT, "workspace", "tables")
@@ -34,7 +35,7 @@ TABLES = ["lattice_configs.csv", "lattice_layout.csv", "sp_elements.csv"]
 def _git(*args):
     try:
         return subprocess.run(["git"] + list(args), cwd=ROOT, capture_output=True,
-                              text=True, timeout=10).stdout.strip()
+                              text=True, timeout=10, **no_window()).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return ""
 

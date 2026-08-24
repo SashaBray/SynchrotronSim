@@ -27,6 +27,7 @@ import numpy as np
 import beam_injection as bi
 import matrix_traj_export as mte
 import matrix_tracker as mt
+from _common import no_window
 
 TB = os.path.join("workspace", "tables")
 RESULTS = os.path.join("workspace", "results")
@@ -132,7 +133,8 @@ def run_diff(lattice, group, exp_id):
     if not os.path.exists(exe):
         exe = os.path.join("build", "Release", "SynchrotronTracker.exe")
     print(f"  запуск {exe} {exp_id} … (загрузка карт + интегрирование, может занять минуты)")
-    r = subprocess.run([exe, str(exp_id)], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    r = subprocess.run([exe, str(exp_id)], capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", **no_window())
     tail = "\n".join((r.stdout or "").splitlines()[-12:])
     print(tail)
     # разбор траекторий: survivor — дошедший до финиш-плоскости (длинная траектория)
@@ -161,7 +163,12 @@ def _load_trajs(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", required=True, choices=["diff", "kick-phys"])
+    ap.add_argument("--mode", choices=["diff", "kick-phys"],
+                    help="ядро трекинга; не нужен при --author-only")
+    ap.add_argument("--author-only", action="store_true",
+                    help="только записать строку опыта (установка+пучок+финиш-плоскость) в experiments.csv "
+                         "и выйти — чтобы ЛЮБОЕ ядро (в т.ч. автономный C++ MatrixTracker, читающий БД) "
+                         "стартовало из этой конфигурации")
     ap.add_argument("--exp", type=int, required=True, help="id эксперимента в experiments.csv (установка+пучок+финиш-плоскость)")
     ap.add_argument("--lattice", type=int, default=None, help="переопределить установку (иначе — из experiments.csv[exp])")
     ap.add_argument("--group", type=int, default=None, help="переопределить пучок (иначе — из experiments.csv[exp])")
@@ -220,6 +227,14 @@ def main():
         plane_parallel_tol=a.plane_parallel_tol, n_slices=a.n_slices)
     if lattice is None or group is None:
         ap.error(f"эксперимент {a.exp} не найден в experiments.csv — задайте --lattice и --group, чтобы создать его")
+
+    if a.author_only:                                      # только конфиг опыта, без трекинга
+        author_experiment(lattice, group, a.exp, loss_mm=settings.loss_radius_m * 1e3)
+        print(f"опыт {a.exp} в experiments.csv: установка {lattice}, пучок {group}, "
+              f"финиш-плоскость = плоскость инжекции пучка")
+        return
+    if a.mode is None:
+        ap.error("укажите --mode diff|kick-phys (или --author-only, если нужен только конфиг опыта)")
 
     print(f"=== SynchrotronSim: трекинг, режим '{a.mode}', эксперимент {a.exp} (установка {lattice}, пучок {group}) ===")
     if a.mode == "diff":

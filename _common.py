@@ -25,6 +25,7 @@ __all__ = [
     "project_root",
     "workspace_dir",
     "set_matplotlib_backend",
+    "no_window",
 ]
 
 # ---------------------------------------------------------------------------
@@ -36,6 +37,22 @@ EXE_SUFFIX = ".exe" if sys.platform == "win32" else ""
 def exe_name(stem: str) -> str:
     """`SynchrotronTracker` -> `SynchrotronTracker.exe` (Windows) или без суффикса."""
     return f"{stem}{EXE_SUFFIX}"
+
+
+def no_window() -> dict:
+    """Аргументы для `subprocess.*`, чтобы дочерний процесс не поднимал консольное окно (Windows).
+
+    Консольной программе (трекер, MatrixTracker, git) Windows выдаёт СВОЁ окно, если у родителя
+    консоли нет — из графической оболочки это выглядит как мигающие чёрные окна. Флаг только убирает
+    окно: перенаправленные потоки и наследованные дескрипторы работают как обычно, поэтому вывод
+    по-прежнему попадает и в журнал оболочки, и в консоль при запуске из терминала.
+
+        subprocess.run([exe, arg], capture_output=True, **no_window())
+    """
+    if sys.platform != "win32":
+        return {}
+    import subprocess
+    return {"creationflags": subprocess.CREATE_NO_WINDOW}
 
 
 def exe_path(stem: str, root: Path | None = None) -> Path:
