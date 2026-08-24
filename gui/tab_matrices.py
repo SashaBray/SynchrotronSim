@@ -52,16 +52,34 @@ class MatricesTab(TabBase):
         self.ck_html.setChecked(False)
         self.ck_html.setToolTip("HTML-отчёты элементов заметно дольше остального конвейера")
 
+        # Формат отчёта. Сборка всегда идёт в .docx (python-docx, чистый Python — Word не нужен);
+        # другой формат получается конвертацией силами LibreOffice сразу после сборки.
+        self.report_fmt = QComboBox()
+        self.report_fmt.addItem("DOCX — Word (собирается напрямую)", "docx")
+        self.report_fmt.addItem("ODT — LibreOffice", "odt")
+        self.report_fmt.addItem("PDF", "pdf")
+        self.report_fmt.setToolTip("Формат готового отчёта. DOCX собирается напрямую и открывается\n"
+                                   "и в Word, и в LibreOffice. ODT/PDF получаются конвертацией сразу\n"
+                                   "после сборки — нужна установленная LibreOffice (путь: SS_SOFFICE).")
+
         self.btn_matrices.clicked.connect(self._run_matrices)
         self.btn_library.clicked.connect(self._run_library)
         self.btn_one.clicked.connect(self._run_one)
         self.btn_compare.clicked.connect(self._run_all)
+
+        self.report_info = QLabel("")
+        self.report_info.setStyleSheet("color:#666;")
+        self.report_info.setWordWrap(True)
+        self.report_fmt.currentIndexChanged.connect(lambda _i: self._update_report_info())
 
         box1 = QGroupBox("Измерение матриц связи (диффур по картам поля — долго)")
         v1 = QVBoxLayout(box1)
         r1 = QHBoxLayout()
         r1.addWidget(self.btn_matrices)
         r1.addWidget(self.btn_compare)
+        r1.addSpacing(12)
+        r1.addWidget(QLabel("Формат отчёта:"))
+        r1.addWidget(self.report_fmt)
         r1.addStretch(1)
         r2 = QHBoxLayout()
         r2.addWidget(self.btn_library)
@@ -75,6 +93,7 @@ class MatricesTab(TabBase):
         r3.addStretch(1)
         for r in (r1, r2, r3):
             v1.addLayout(r)
+        v1.addWidget(self.report_info)
 
         # --- проектные токи ---------------------------------------------------
         self.btn_currents = QPushButton("Рассчитать проектные токи по матрицам")
@@ -82,15 +101,10 @@ class MatricesTab(TabBase):
                                      "токи обмоток (сырой arg и физические амперы, % номинала).")
         self.btn_open_report = QPushButton("Открыть отчёт (.docx)")
         self.btn_open_report.clicked.connect(lambda: self._open(REPORT))
-        # .docx собирается чистым Python и открывается и в Word, и в LibreOffice; конвертация — для
-        # другого формата (правка в LibreOffice, рассылка PDF) и делается самой LibreOffice.
-        self.conv_fmt = QComboBox()
-        for f in ("odt", "pdf"):
-            self.conv_fmt.addItem(f"в {f.upper()}", f)
-        self.btn_convert = QPushButton("Конвертировать")
-        self.btn_convert.setToolTip("office_convert.py — конвертация отчёта силами LibreOffice "
-                                    "(soffice --headless). Нужна установленная LibreOffice; путь к ней "
-                                    "можно задать переменной SS_SOFFICE.")
+        self.btn_convert = QPushButton("Конвертировать готовый")
+        self.btn_convert.setToolTip("office_convert.py — перевести УЖЕ собранный отчёт в формат,\n"
+                                    "выбранный выше, не пересобирая его. Делает LibreOffice\n"
+                                    "(soffice --headless); путь к ней можно задать в SS_SOFFICE.")
         self.btn_convert.clicked.connect(self._convert_report)
         self.btn_currents.clicked.connect(self._run_currents)
         self.stale = QLabel("")
@@ -101,7 +115,6 @@ class MatricesTab(TabBase):
         rr = QHBoxLayout()
         rr.addWidget(self.btn_currents)
         rr.addWidget(self.btn_open_report)
-        rr.addWidget(self.conv_fmt)
         rr.addWidget(self.btn_convert)
         rr.addStretch(1)
         v2.addLayout(rr)
@@ -123,9 +136,32 @@ class MatricesTab(TabBase):
     def refresh(self) -> None:
         self._fill_elements()
         self._update_stale()
+        self._update_report_info()
         p = paths.table("design_currents.csv")
         if p.exists():
             self.table.load(p)
+
+    def _report_path(self):
+        """Файл отчёта в ВЫБРАННОМ формате (конвертация кладёт его рядом с исходным .docx)."""
+        return REPORT.with_suffix("." + self.report_fmt.currentData())
+
+    def _update_report_info(self) -> None:
+        """Где будет отчёт и собран ли он — путь виден до запуска, а не только в журнале."""
+        import datetime as dt
+        p = self._report_path()
+        try:
+            rel = p.relative_to(paths.ROOT)
+        except ValueError:
+            rel = p
+        if p.exists():
+            st = p.stat()
+            mark = (f"есть, {st.st_size / 1e6:.1f} МБ, "
+                    f"{dt.datetime.fromtimestamp(st.st_mtime).strftime('%d.%m %H:%M')}")
+        else:
+            mark = "ещё не собран"
+        extra = ("" if self.report_fmt.currentData() == "docx"
+                 else "  ·  собирается .docx, затем конвертируется LibreOffice")
+        self.report_info.setText(f"отчёт → {rel}   ({mark}){extra}")
 
     def _fill_elements(self) -> None:
         """Список элементов — из таблицы матриц (что уже измерено), иначе из решётки проекта."""
@@ -166,17 +202,36 @@ class MatricesTab(TabBase):
             self.say(err, True)
 
     # ---- команды ---------------------------------------------------------
+    def _convert_job(self):
+        """Задача конвертации отчёта в выбранный формат — или None, если нужен исходный .docx.
+
+        Сборка всегда даёт .docx; ODT и PDF получаются из него конвертацией, поэтому задача просто
+        дописывается в очередь СЛЕДОМ за сборкой и выполняется, когда отчёт уже на диске."""
+        fmt = self.report_fmt.currentData()
+        if fmt == "docx":
+            return None
+        return py_job(f"конвертация отчёта в {fmt.upper()}", "office_convert.py", str(REPORT), "--to", fmt,
+                      on_done=lambda c: self.refresh())
+
+    def _run_report_chain(self, job) -> None:
+        """Поставить сборку отчёта и, если выбран не DOCX, конвертацию следом."""
+        self.runner.run(*[j for j in (job, self._convert_job()) if j])
+
     def _run_matrices(self) -> None:
-        self.runner.run(py_job("матрицы связи + Word-отчёт", "element_compare.py", "matrices",
-                               on_done=lambda c: self.refresh()))
+        self._run_report_chain(py_job("матрицы связи + отчёт", "element_compare.py", "matrices",
+                                      on_done=lambda c: self.refresh()))
 
     def _run_library(self) -> None:
         flags = []
         flags.append("--report" if self.ck_report.isChecked() else "--no-report")
         flags.append("--demo" if self.ck_demo.isChecked() else "--no-demo")
         flags.append("--html" if self.ck_html.isChecked() else "--no-html")
-        self.runner.run(py_job("полный конвейер матриц (library)", "element_compare.py", "library", *flags,
-                               on_done=lambda c: self.refresh()))
+        job = py_job("полный конвейер матриц (library)", "element_compare.py", "library", *flags,
+                     on_done=lambda c: self.refresh())
+        if self.ck_report.isChecked():                      # без отчёта конвертировать нечего
+            self._run_report_chain(job)
+        else:
+            self.runner.run(job)
 
     def _run_one(self) -> None:
         name = self.elem.currentText().strip()
@@ -187,17 +242,19 @@ class MatricesTab(TabBase):
                                on_done=lambda c: self.refresh()))
 
     def _run_all(self) -> None:
-        self.runner.run(py_job("сравнение моделей по элементам", "element_compare.py", "all",
-                               "quad,sext,oct,dipole,dq", on_done=lambda c: self.refresh()))
+        self._run_report_chain(py_job("сравнение моделей по элементам", "element_compare.py", "all",
+                                      "quad,sext,oct,dipole,dq", on_done=lambda c: self.refresh()))
 
     def _convert_report(self) -> None:
-        """Конвертировать готовый отчёт в выбранный формат (делает LibreOffice)."""
+        """Перевести УЖЕ собранный отчёт в выбранный формат, не пересобирая его."""
         if not REPORT.exists():
             self.say(f"нет отчёта {REPORT} — сначала соберите его", True)
             return
-        fmt = self.conv_fmt.currentData()
-        self.runner.run(py_job(f"конвертация отчёта в {fmt.upper()}", "office_convert.py",
-                               str(REPORT), "--to", fmt))
+        job = self._convert_job()
+        if job is None:
+            self.say("выбран формат DOCX — отчёт уже в нём, конвертировать нечего")
+            return
+        self.runner.run(job)
 
     def _run_currents(self) -> None:
         lat = self.project.lattice if self.project else 1
