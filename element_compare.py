@@ -2018,6 +2018,12 @@ def _element_shot(m, outdir):
         import visualize as V
     except Exception:
         return None
+    # Без файла траекторий сцена нарисуется БЕЗ пучка — молча и внешне правдоподобно (виден только
+    # магнит). Проверяем явно: такой снимок в отчёте выглядит как «частицы не долетели».
+    traj = os.path.join(RESULTS, f"trajectories_exp{vid}.bin")
+    if not os.path.exists(traj):
+        print(f"  ! сцена {m['name']}: нет {os.path.basename(traj)} — снимок будет без пучка "
+              f"(демо-конфигурации не собраны: element_compare.py viz-all)")
     try:
         png = os.path.join(outdir, f"shot_{m['name']}.png")
         V.visualize(vid, screenshot=png, view="iso", elevation=13, zoom=1.25)   # камера чуть выше уровня пучка
@@ -2401,14 +2407,17 @@ def build_library(single=None, do_report=None, do_demo=None, do_html=None):
         write_coupling_table(mats)                                # таблица БД (upsert)
         if not allmode:
             print_matrices(mats)
-        if do_report:                                            # формальный отчёт матриц — всегда полный охват
-            build_matrix_report(mats=mats if allmode else None)   # полный прогон уже всё измерил — не мерить вновь
+        # ПОРЯДОК ВАЖЕН: демо-конфигурации ПЕРЕД отчётом. Отчёт вставляет скриншоты сцен, а сцены
+        # рисуются по демо-траекториям; если делать отчёт раньше, он заберёт демо-состояние ПРОШЛОГО
+        # прогона — и, если оно было неполным, часть магнитов уедет в отчёт без пучка.
         ids = None
         if do_demo:                                              # демо-конфиги (setup_viz_all — весь набор)
             try:
                 ids = [s["id"] for s in setup_viz_all()]
             except Exception as e:
                 print(f"  ! демо-конфиги: {type(e).__name__}: {e}")
+        if do_report:                                            # формальный отчёт матриц — всегда полный охват
+            build_matrix_report(mats=mats if allmode else None)   # полный прогон уже всё измерил — не мерить вновь
         if do_html:
             generate_html_reports(ids)
     finally:
