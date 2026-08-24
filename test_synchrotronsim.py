@@ -525,6 +525,50 @@ class TestDesignCurrents(unittest.TestCase):
             self.assertIn("устарели", dc.staleness(td))
 
 
+class TestReportPortability(unittest.TestCase):
+    """Отчёт .docx собирается без Microsoft Office; формулы деградируют, а не роняют сборку."""
+
+    def test_formula_falls_back_to_text(self):
+        """Нет XSL Office (обычное дело вне Windows) ⇒ формула идёт текстом, исключения нет."""
+        import latex2omml as lo
+        from docx import Document
+        old_xsl, old_tr, old_warn = lo._XSL, lo._transform, lo._warned
+        lo._XSL, lo._transform, lo._warned = os.path.join(ROOT, "нет-такого.xsl"), None, True
+        try:
+            self.assertFalse(lo.available())
+            p = Document().add_paragraph("Формула: ")
+            lo.add_formula(p, r"\theta_0 = QP \cdot B \cdot L")          # не должно бросить
+            self.assertIn("theta_0", p.text, "формула должна остаться в тексте абзаца")
+        finally:
+            lo._XSL, lo._transform, lo._warned = old_xsl, old_tr, old_warn
+
+    def test_native_formula_when_xsl_present(self):
+        """Есть XSL ⇒ вставляется НАТИВНЫЙ OMML-узел, а не текст."""
+        import latex2omml as lo
+        if not lo.available():
+            self.skipTest("XSL Office недоступен на этой машине")
+        from docx import Document
+        p = Document().add_paragraph("Формула: ")
+        lo.add_formula(p, r"k_1 = QP \cdot G")
+        self.assertEqual(len([e for e in p._p if "oMath" in e.tag]), 1)
+        self.assertEqual(p.text, "Формула: ", "нативная формула не должна дублироваться текстом")
+
+    def test_convert_reports_missing_libreoffice(self):
+        """Без LibreOffice конвертация даёт ВНЯТНУЮ ошибку, а не падение по месту вызова."""
+        import office_convert as oc
+        self.assertIn("odt", oc.FORMATS)
+        with self.assertRaises(ValueError):                              # неизвестный формат
+            oc.convert(__file__, to="xyz")
+        old = oc.soffice
+        oc.soffice = lambda: None
+        try:
+            with self.assertRaises(FileNotFoundError) as e:
+                oc.convert(__file__, to="odt")
+            self.assertIn("LibreOffice", str(e.exception))
+        finally:
+            oc.soffice = old
+
+
 class TestGuiShell(unittest.TestCase):
     """Оболочка: модули импортируются, команды собираются правильно (без запуска Qt-приложения)."""
 

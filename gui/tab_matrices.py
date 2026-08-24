@@ -82,6 +82,16 @@ class MatricesTab(TabBase):
                                      "токи обмоток (сырой arg и физические амперы, % номинала).")
         self.btn_open_report = QPushButton("Открыть отчёт (.docx)")
         self.btn_open_report.clicked.connect(lambda: self._open(REPORT))
+        # .docx собирается чистым Python и открывается и в Word, и в LibreOffice; конвертация — для
+        # другого формата (правка в LibreOffice, рассылка PDF) и делается самой LibreOffice.
+        self.conv_fmt = QComboBox()
+        for f in ("odt", "pdf"):
+            self.conv_fmt.addItem(f"в {f.upper()}", f)
+        self.btn_convert = QPushButton("Конвертировать")
+        self.btn_convert.setToolTip("office_convert.py — конвертация отчёта силами LibreOffice "
+                                    "(soffice --headless). Нужна установленная LibreOffice; путь к ней "
+                                    "можно задать переменной SS_SOFFICE.")
+        self.btn_convert.clicked.connect(self._convert_report)
         self.btn_currents.clicked.connect(self._run_currents)
         self.stale = QLabel("")
         self.stale.setWordWrap(True)
@@ -91,6 +101,8 @@ class MatricesTab(TabBase):
         rr = QHBoxLayout()
         rr.addWidget(self.btn_currents)
         rr.addWidget(self.btn_open_report)
+        rr.addWidget(self.conv_fmt)
+        rr.addWidget(self.btn_convert)
         rr.addStretch(1)
         v2.addLayout(rr)
         v2.addWidget(self.stale)
@@ -99,7 +111,8 @@ class MatricesTab(TabBase):
         self.table.message.connect(lambda t, e: self.say(t, e))
         v2.addWidget(self.table, 1)
 
-        self.guard(self.btn_matrices, self.btn_library, self.btn_one, self.btn_compare, self.btn_currents)
+        self.guard(self.btn_matrices, self.btn_library, self.btn_one, self.btn_compare,
+                   self.btn_currents, self.btn_convert)
 
         lay = QVBoxLayout(self)
         lay.addWidget(SectionLabel("Матрицы связи ток → физические коэффициенты"))
@@ -176,6 +189,15 @@ class MatricesTab(TabBase):
     def _run_all(self) -> None:
         self.runner.run(py_job("сравнение моделей по элементам", "element_compare.py", "all",
                                "quad,sext,oct,dipole,dq", on_done=lambda c: self.refresh()))
+
+    def _convert_report(self) -> None:
+        """Конвертировать готовый отчёт в выбранный формат (делает LibreOffice)."""
+        if not REPORT.exists():
+            self.say(f"нет отчёта {REPORT} — сначала соберите его", True)
+            return
+        fmt = self.conv_fmt.currentData()
+        self.runner.run(py_job(f"конвертация отчёта в {fmt.upper()}", "office_convert.py",
+                               str(REPORT), "--to", fmt))
 
     def _run_currents(self) -> None:
         lat = self.project.lattice if self.project else 1

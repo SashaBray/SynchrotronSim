@@ -11,9 +11,8 @@ matplotlib). Диффурное ядро — бинарь `build\SynchrotronTrac
 > **Linux / macOS.** Везде ниже вместо `py -3.14` пишите `python3` (лаунчер `py` — только Windows),
 > вместо `gui.bat` — `./gui.sh`. Бинари собираются без суффикса (`build/SynchrotronTracker`), код
 > подставляет его сам через `_common.exe_name`. Каталог исходных карт ANSYS лежит вне репозитория и
-> задаётся переменной `SS_ANSYS_DIR` (по умолчанию — путь рабочей машины). Не работают только
-> нативные формулы Word (`latex2omml.py` — нужен XSL из Microsoft Office; путь переопределяется
-> `MML2OMML_XSL`) и ярлык `make_shortcut.py` (`.lnk` — формат Windows).
+> задаётся переменной `SS_ANSYS_DIR` (по умолчанию — путь рабочей машины). Единственное, чего нет
+> вовсе, — ярлык `make_shortcut.py` (`.lnk` — формат Windows).
 
 **Установки в БД:** `1` — СИЛА, полное кольцо (2082 магнита, замкнутое); `2` — Сибирь (сторонний
 импорт, 144 магнита); `3` — SP1, первый супериод СИЛЫ (53 магнита). Эксперименты `1`/`2`/`3` ссылаются
@@ -384,6 +383,26 @@ py -3.14 element_compare.py library L400 --report         # DQ_L400 + перес
   1–4 %, слабые G/S на шумовом полу карты.
 - **Датасеты** (`workspace/results/element_compare/datasets/`): `sweep_<element>.csv` (лестница токов →
   извлечённые мультиполи), `combo_<element>.csv` (комбо-проверка).
+
+### Формат отчёта: Word, LibreOffice, PDF
+
+Отчёты собираются в `.docx` **чистым Python** (`python-docx`) — Microsoft Word для сборки не нужен,
+на Linux и macOS всё работает, а LibreOffice открывает `.docx` напрямую. Нужен другой формат —
+конвертирует сама LibreOffice, второго генератора документов в проекте нет:
+
+```powershell
+py -3.14 office_convert.py workspace/results/element_compare/element_compare_report.docx --to odt
+py -3.14 office_convert.py <отчёт>.docx --to pdf [--outdir куда]
+```
+
+В оболочке — выпадающий список формата и кнопка «Конвертировать» рядом с «Открыть отчёт». Нужна
+установленная LibreOffice: ищется в `PATH` и типовых местах, путь переопределяется `SS_SOFFICE`.
+
+**Формулы.** `latex2omml.py` делает НАТИВНЫЕ формулы Word: `latex2mathml` (чистый Python) → OMML
+через XSL `MML2OMML.XSL` **из Microsoft Office**. Файл — часть Office, скопировать в репозиторий
+нельзя, но путь переопределяется `MML2OMML_XSL`: перенеся копию с Windows-машины, нативные формулы
+получают и на Linux. Без XSL формулы вставляются ТЕКСТОМ (курсивом) и печатается предупреждение —
+отчёт при этом собирается целиком.
 
 ### Таблица БД `workspace/tables/coupling_matrices.csv`
 
