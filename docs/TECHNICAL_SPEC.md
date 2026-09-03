@@ -91,9 +91,12 @@
 | `lattice_configs.csv` | **Собранная решётка — её читают ОБА ядра.** Строка на экземпляр: геометрия, `arg_val`/`correct_coeff`, физкоэф. `mat_*`, структурные столбцы (`eff_length`, `kind`, `n_slices`, `edge1`, `edge2`). |
 | `element_connectivity.csv` | Порядок обхода: предшественник/преемник каждого экземпляра. Источник правды. |
 | `hardware_library.csv` | Типы устройств: путь к карте, `eff_length`, `nominal_arg`, `field_direction`, `correct_coeff`, `edge_ff`, `edge_delta`, STL. |
-| `experiments.csv` | Эксперименты: решётка, пучок, `dt`, финиш-плоскость (3 точки + направление) и **параметры ядра** (`loss_radius_mm`, `plane_same_tol_mm`, `plane_parallel_tol`, `n_slices`). |
+| `experiments.csv` | Эксперименты: решётка, пучок, `dt`, финиш-плоскость (3 точки + направление) и **параметры ядра** (`loss_radius_mm`, `plane_same_tol_mm`, `plane_parallel_tol`, `n_slices`, `max_time_s` — предел модельного времени полёта; пусто ⇒ считается автоматически как учетверённое время прямого пролёта до финиш-плоскости, у кольцевых опытов отключён). |
 | `particle_groups.csv` | Пучки: стартовые частицы (в МИРОВЫХ координатах). |
 | `bpm_config.csv` / `bpm_readings.csv` | Несовершенства датчиков положения / накопленные показания. |
+| `saturation_branches.csv` | **Граф ветвей магнитопровода** на элемент: ветвь, материал, сечение и длина железа (пусто ⇒ подбираются). Задаётся человеком по чертежу. |
+| `saturation_branch_members.csv` | Размещение обмоток по ветвям: `(element, branch, winding, turns_per_coil)`. Ветви без обмоток — производная величина. |
+| `field_maps.csv` | **Реестр карт поля**: `map_id`, привязка к устройству `hardware_library`, обмотка, возбуждение, `split` (`train` — три карты на обмотку для подгонки, `test` — остальные уровни, комбинации и обратная полярность), сетка, **физический ток обмоток** (`current_a`, пересчитан из ампер-витков по числу витков), **ссылка на кривую намагничивания** (`material_curve`), пути к `.fld` и `.bin`. Снимает ограничение `hardware_library` «одна карта на устройство». |
 
 `lattice_configs` / `lattice_layout` / `sp_elements` **генерируются и гитигнорятся**; их состояние
 фиксирует снимок `workspace/tables/snapshot_design/` (`db_snapshot.py`).

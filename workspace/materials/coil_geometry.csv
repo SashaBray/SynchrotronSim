@@ -1,0 +1,11 @@
+element;winding;coil_width_mm;iron_length_mm;coil_build_mm;coil_window_area_mm2;db_length_variant
+DQ;i1;70;400;110;28000;DQ_I1_1A_L400
+DQ;i2;40;400;55;16000;DQ_I2_1A_L400
+DQ;i3;40;400;20;16000;DQ_I3_1A_L400
+QP_L;i1;90;374.5;156;33705;QP_L_1A_L374
+QP_sh;i1;120;212;128;25440;QP_sh_1A_L212
+SP;i1;96;166;80;15936;SP_I1_1A_L166
+SP;i2;96;166;50;15936;SP_I2_1A_L166
+OP;i1;34;90;73;3060;OP_1A_L90
+corrector;main;40;108;128.4;4320;
+corrector;c;15;108;154.8;1620;

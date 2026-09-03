@@ -1,0 +1,18 @@
+element;branch;winding;turns_per_coil;comment
+QP_sh;core;I;68;
+QP_L;core;I;85;
+OP;core;I1;34;
+SP;core;I1;41;последовательно с I2 на том же ребре
+SP;core;I2;390;последовательно с I1 на том же ребре
+DQ;A1;I1;53;пара катушек I1: левый полюс
+DQ;B1;I1;53;пара катушек I1: правый полюс (тот же ток)
+DQ;A2;I2;13;пара катушек I2: левый полюс
+DQ;B2;I2;13;пара катушек I2: правый полюс (тот же ток)
+DQ;A3;I3;90;пара катушек I3: левый полюс
+DQ;B3;I3;90;пара катушек I3: правый полюс (тот же ток)
+corrector;T+;c1;548;
+corrector;T-;c2;548;
+corrector;B+;c3;548;
+corrector;B-;c4;548;
+corrector;yokeA;main;622;верхняя катушка main
+corrector;yokeB;main;622;нижняя катушка main (последовательно, тот же ток)

@@ -16,6 +16,8 @@ venv/
 # Данные и результаты (большие бинарные)
 workspace/fields_bin/
 workspace/fields_raw/
+# упорядоченные ссылки на карты для модели насыщения (жёсткие ссылки, место не занимают)
+workspace/fields_model/
 workspace/results/
 *.bak
 

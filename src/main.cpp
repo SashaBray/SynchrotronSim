@@ -8,6 +8,7 @@
 #include <sstream>
 #include <filesystem>
 #include <system_error>
+#include <cmath>       // sqrt/fabs/ceil — предел по модельному времени
 
 #ifdef _WIN32
 #include <windows.h>
@@ -134,6 +135,11 @@ int main(int argc, char* argv[]) {
     int latId = -1, grpId = -1, maxTurns = 0;
     int trajStride = 1;
     double dt = 0;
+    // Предел МОДЕЛЬНОГО ВРЕМЕНИ полёта (колонка 22 max_time_s). Частица, промахнувшаяся мимо
+    // финиш-плоскости, иначе идёт до жёсткого потолка в 50 млн шагов и копит точки: при
+    // traj_stride=1 это ~1.2 ГБ на частицу. Пусто/0 -- предел считается автоматически по геометрии.
+    double maxTime = 0.0;
+    double vRef = 0.0;              // скорость пучка (для автопредела), м/с
     // Финишная плоскость задаётся тремя точками p1, p2, p3
     FieldVector fp1 = {5.0, -1.0, -1.0};
     FieldVector fp2 = {5.0,  1.0, -1.0};
@@ -156,6 +162,9 @@ int main(int argc, char* argv[]) {
             }
             if (r.size() >= 18) {   // направление пересечения финиш-плоскости
                 fpDir = {std::stod(r[15]), std::stod(r[16]), std::stod(r[17])};
+            }
+            if (r.size() >= 23 && !r[22].empty() && r[22] != "-") {   // max_time_s
+                try { maxTime = std::stod(r[22]); } catch (...) { maxTime = 0.0; }
             }
             break;
         }
@@ -296,6 +305,7 @@ int main(int argc, char* argv[]) {
             s.pos = {std::stod(r[4]), std::stod(r[5]), std::stod(r[6])};
             FieldVector v0 = {std::stod(r[7]), std::stod(r[8]), std::stod(r[9])};
             s.mom = Integrator::velocityToMomentum(v0, masses.back());
+            if (vRef == 0.0) vRef = std::sqrt(v0.x * v0.x + v0.y * v0.y + v0.z * v0.z);
             beam.push_back(s);
         }
     }
@@ -322,15 +332,39 @@ int main(int argc, char* argv[]) {
                   << std::endl;
     }
 
+    // Предел по модельному времени. Явный max_time_s важнее; иначе автопредел -- учетверённое
+    // время прямого пролёта от старта до финиш-плоскости (запас на изгиб траектории).
+    // 50 млн шагов остаются абсолютным потолком.
+    long long maxSteps = 50000000LL;
+    if (dt > 0.0) {
+        double tLimit = maxTime;
+        // Автопредел ТОЛЬКО для коротких опытов «пролёт до плоскости впереди». У кольцевого
+        // трекинга плоскость стоит НА СТАРТЕ (skipSteps>0, расстояние ~0) -- там автопредел
+        // обрезал бы оборот, поэтому он отключается и остаётся лишь явный max_time_s.
+        if (tLimit <= 0.0 && !planes.empty() && vRef > 0.0 && planes[0].skipSteps == 0) {
+            FieldVector d = {planes[0].p0.x - startRef.x,
+                             planes[0].p0.y - startRef.y,
+                             planes[0].p0.z - startRef.z};
+            double dist = std::fabs(d.x * planes[0].n.x + d.y * planes[0].n.y + d.z * planes[0].n.z);
+            if (dist > 0.01) tLimit = 4.0 * dist / vRef;   // <1 см -- плоскость на старте, не предел
+        }
+        if (tLimit > 0.0) {
+            long long lim = (long long)std::ceil(tLimit / dt);
+            if (lim > 0 && lim < maxSteps) maxSteps = lim;
+        }
+    }
+    std::cout << "  max_steps=" << maxSteps << " (model time limit "
+              << (maxSteps * dt) << " s)" << std::endl;
+
     {
         auto turn_timer = StepTimer();
         #pragma omp parallel for schedule(dynamic)
         for (int i = 0; i < (int)beam.size(); ++i) {
-            int steps = 0;
+            long long steps = 0;
             // ВСЕГДА сохраняем стартовую точку, чтобы по bin'у можно было
             // восстановить начало траектории.
             results[i].push_back(beam[i].pos);
-            while (steps < 50000000) {
+            while (steps < maxSteps) {
                 Integrator::borisStep(beam[i], masses[i], charges[i], lattice, dt);
                 steps++;
                 bool crossed = planes[i].hasCrossed(beam[i].pos);

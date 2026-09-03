@@ -3357,3 +3357,5 @@ lattice_id;instance_id;device_type_id;prev_instance_id;next_instance_id
 14;1;DQ_I1_1A_L1000;;
 15;1;DQ_I1_1A_L400;;
 16;1;corrector_main_100A_L100;;
+950;1;_satmodel_QP_sh_I_100;;
+951;1;_satmodel_QP_sh_I_13176;;

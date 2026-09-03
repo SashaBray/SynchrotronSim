@@ -56,6 +56,14 @@ def amps_to_arg(dev, amps):
     return None if tpc is None else float(amps) * tpc / ENERGY_FACTOR
 
 
+def nominal_arg_of(dev):
+    """ПАСПОРТНАЯ рабочая точка обмотки в arg (номинальный ток × витки / ENERGY_FACTOR).
+    None, если в БД нет номинала или витков. Нужна элементам БЕЗ проектных mat_* (корректор
+    не подтюнен ⇒ рабочий ток из решётки не выводится, берём паспорт железа)."""
+    a = (HW.get(dev, {}).get("nominal_current_a") or "").strip()
+    return None if not a else amps_to_arg(dev, float(a))
+
+
 def _wind_amps_line(m, arg):
     """arg (общий на все обмотки) → компактная строка физ. тока по обмоткам (одна обмотка → одно число).
     Разные витки ⇒ один arg = разные амперы на обмотках."""
@@ -106,12 +114,12 @@ def make_beam(x0, radius=1e-3, n_circle=12, grp_id=TMP_GRP):
     return rows
 
 
-def build_config(dev, cur, yaw=0.0):
+def build_config(dev, cur, yaw=0.0, radius=1e-3):
     """Одно-элементный конфиг (dev при токе cur). Обёртка над build_windings (одна обмотка)."""
-    return build_windings([(dev, cur)], yaw)
+    return build_windings([(dev, cur)], yaw, radius=radius)
 
 
-def build_windings(windings, yaw=0.0, lat_id=TMP_LAT, grp_id=TMP_GRP, exp_id=TMP_EXP):
+def build_windings(windings, yaw=0.0, lat_id=TMP_LAT, grp_id=TMP_GRP, exp_id=TMP_EXP, radius=1e-3):
     """Записать конфиг из N СО-ЛОКОВАННЫХ обмоток (все в CENTER, ось +x, поворот yaw) в 4 CSV под id
     lat/grp/exp. windings = [(dev, cur|'-'), …]. Диффур суперпозирует поля со-локованных элементов
     (getTotalFields). id по умолчанию TMP (900, чистится cleanup); свои id (напр. 950) — ПОСТОЯННЫЙ конфиг
@@ -138,7 +146,7 @@ def build_windings(windings, yaw=0.0, lat_id=TMP_LAT, grp_id=TMP_GRP, exp_id=TMP
     lat_new = [r for r in lat_r if r[0] != str(lat_id)] + lat_rows
     con_new = [r for r in con_r if r[0] != str(lat_id)] + con_rows
     # пучок у стартовой плоскости
-    grp_new = [r for r in grp_r if r[0] != str(grp_id)] + make_beam(CENTER - ENTRY, grp_id=grp_id)
+    grp_new = [r for r in grp_r if r[0] != str(grp_id)] + make_beam(CENTER - ENTRY, radius=radius, grp_id=grp_id)
     # опыт: финиш-плоскость на x=CENTER+EXIT, нормаль +x (3 точки + направление)
     xf = CENTER + EXIT
     p1 = (xf, 1.0, 1.0); p2 = (xf, -1.0, 1.0); p3 = (xf, 0.0, -1.0)
@@ -836,6 +844,10 @@ def _scan_table_data(m):
     nw = len(devs)
     w = np.linspace(1.0, 0.5, nw) if nw > 1 else np.array([1.0])  # РАЗНЫЕ веса обмоток → уникальные комбинации
     ts = float(m["i_op"]) * _ladder_fracs(kind)                  # строки таблицы — только рабочая область
+    if kind == "kicker" and nw > 1:                              # корректор: обмотки с РАЗНЫМИ паспортами
+        noms = [nominal_arg_of(d) for d in devs]                 # (main 2 А×622 вит, c1..c4 3.3 А×548)
+        if all(noms) and float(m["i_op"]) > 0:                   # веса = отношения паспортов ⇒ на 100%
+            w = np.array(noms, float) / float(m["i_op"])         # лестницы КАЖДАЯ обмотка на своём номинале
     Mw = np.asarray(m["M"], float) @ w                           # момент на единицу t (в направлении w)
     dom = int(np.argmax(np.abs(Mw))); dom_name = m["outputs"][dom]   # доминантный момент — для R² линейности
     i_ref = float(m["i_op"])                                     # опорный фит кик-коэф — в рабочей точке
@@ -1318,7 +1330,10 @@ def element_operating_current(kind, devs, L):
         sl = extract_coeffs([(dwd, 1.0)], L)[mp]             # наклон коэф/ток около нуля (1 А заведомо линейно)
         if abs(design) > 1e-30 and abs(sl) > 1e-30:
             return abs(design / sl)
-    m = re.search(r"_(\d+(?:\.\d+)?)A", devs[0])             # номинал из имени устройства
+    noms = [v for v in (nominal_arg_of(d) for d in devs) if v]
+    if noms:
+        return float(noms[0])                                # паспорт железа (корректор: mat_*=0, тюна нет)
+    m = re.search(r"_(\d+(?:\.\d+)?)A", devs[0])             # последний рубеж: число из имени устройства
     return float(m.group(1)) if m else 45.0
 
 
