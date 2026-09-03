@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import os
 import sys
+import types
 
 import numpy as np
 from scipy.optimize import least_squares
@@ -105,6 +107,7 @@ class Circuit:
         self.edge, self.kind, self.sym = g["edge"], g["kind"], g["sym"]
         self.turns = g["turns"]
         self.coil_branches = g["coils"]                     # обмотка → список рёбер
+        self.share = g["share"]                             # доля МДС обмотки на каждом её ребре
         self.nodes = []
         for b in self.branches:
             for n in self.edge[b]:
@@ -119,8 +122,25 @@ class Circuit:
         self.mirror_classes = sorted({self.sym[b] for b in self.gaps if self.mirror[b] != 0})
         # поле у пучка создают только ветви МЕЖДУ НАКОНЕЧНИКАМИ; рассеяние через окно влияет на цепь,
         # но собственного вклада в кик не даёт (оно далеко от пучка)
-        self.kick_classes = sorted({self.sym[b] for b in self.gaps if not self.sym[b].startswith("win_")})
+        # Поле у пучка создают только ветви, идущие ЧЕРЕЗ АПЕРТУРУ и вдоль неё (между наконечниками).
+        # Междуполюсная утечка идёт по бокам ног, в сотне миллиметров от пучка, и вклада не даёт;
+        # рассеяние через окно — тем более. Иначе базис почти вырожден и МНК гасит главную обмотку.
+        self.kick_classes = sorted({self.sym[b] for b in self.gaps
+                                    if self.sym[b].startswith(("gap_", "tip_row"))})
         self.sense = {w: 1.0 for w in self.coil_branches}   # уточняется по данным
+        # Если у ВСЕХ ветвей в БД проставлены сечение и длина — цепь задана геометрией, и подбирать
+        # в ней нечего: свободной остаётся только матрица «потоки → кик» (метод МЭС в чистом виде).
+        self.geom = None
+        if all(b_ in g["geom"] for b_ in self.branches):
+            mu0 = 4e-7 * np.pi
+            lens, secs, perms = {}, {}, {}
+            for b_ in self.branches:
+                S, L = g["geom"][b_]
+                if self.kind[b_] == "iron":
+                    lens[self.sym[b_]], secs[self.sym[b_]] = L, S
+                else:
+                    perms[self.sym[b_]] = mu0 * S / L
+            self.geom = (lens, perms, secs)
         bh = np.loadtxt(sm.MATERIAL, delimiter=";", skiprows=1)
         self.Harr, self.Barr = bh[:, 0], bh[:, 1]
         self.mu0 = 4e-7 * np.pi
@@ -131,6 +151,31 @@ class Circuit:
         slopes = np.diff(self.Barr) / np.maximum(np.diff(self.Harr), 1e-30)
         mid = 0.5 * (self.Harr[:-1] + self.Harr[1:])
         return np.where(a <= self.Harr[-1], np.interp(a, mid, slopes), self.mu0)
+
+    # Физические координаты наконечников в поперечной плоскости (мм): y — шаг полюсов,
+    # z — половина своей апертуры (средние полюса отодвинуты и потому дальше от пучка).
+    PITCH_MM, HALF_GAP_MM = 30.0, {"o": 12.5, "c": 16.5}
+
+    def tip_xy(self, node):
+        """(y, z) наконечника в мм. None для узлов, не выходящих к апертуре."""
+        if len(node) < 3 or node[0] != "p":
+            return None
+        y = self.PITCH_MM * {"1": 1.0, "0": 0.0, "2": -1.0}[node[2]]
+        z = self.HALF_GAP_MM["c" if node[2] == "0" else "o"] * (1.0 if node[1] == "T" else -1.0)
+        return y, z
+
+    def direction(self, b):
+        """Единичное направление трубки потока ребра, как комплексное u_y + i·u_z.
+
+        Поле, создаваемое потоком у пучка, смотрит ВДОЛЬ трубки: прямой зазор даёт чистую вертикаль,
+        дальняя диагональ — почти горизонталь. Направление берётся из геометрии, не подбирается."""
+        a_, c_ = self.edge[b]
+        pa, pc = self.tip_xy(a_), self.tip_xy(c_)
+        if pa is None or pc is None:
+            return 0j
+        dy, dz = pc[0] - pa[0], pc[1] - pa[1]
+        n = math.hypot(dy, dz)
+        return complex(dy / n, dz / n) if n else 0j
 
     def crosses(self, b):
         """Пересекает ли воздушная ветвь апертуру (верхний наконечник ↔ нижний)."""
@@ -159,7 +204,7 @@ class Circuit:
                 continue
             f = currents[w] * self.sense.get(w, 1.0)
             for b in brs:
-                F[b] += f
+                F[b] += f * self.share.get((w, b), 1.0)
         return F
 
     def _prep(self):
@@ -239,7 +284,12 @@ SEC_FIXED = "yoke"
 
 
 def unpack(p, cir):
-    """Нелинейные параметры: длины путей, проводимости зазоров и относительные сечения ног."""
+    """Нелинейные параметры: длины путей, проводимости зазоров и относительные сечения ног.
+
+    Если цепь задана геометрией из БД — возвращаем её, вектор `p` не участвует."""
+    if getattr(cir, "geom", None) is not None:
+        lens, perms, secs = cir.geom
+        return lens, perms, secs
     n1, n2 = len(cir.len_classes), len(cir.gap_classes)
     lens = {c: float(np.exp(p[i])) for i, c in enumerate(cir.len_classes)}
     perms = {c: float(np.exp(p[n1 + i])) for i, c in enumerate(cir.gap_classes)}
@@ -261,21 +311,15 @@ def mirror_sign(cir, b):
 
 
 def gap_basis(cir, currents, p):
-    """Базис линейной части: кик — СВОБОДНАЯ линейная функция потоков в воздушных ветвях.
+    """Базис линейной части: на класс воздушных ветвей — ОДИН вещественный вес.
 
-    Раньше способ свёртки был задан руками (один вес на полный поток через апертуру, один на Σy·Φ),
-    и это заставляло кик главной обмотки лежать на той же оси, что у боковых. Здесь на КАЖДЫЙ класс
-    воздушных ветвей даётся два элемента: симметричная сумма потоков и знакопеременная. По симметрии
-    первая создаёт поле в одной плоскости, вторая — в перпендикулярной, поэтому они входят как
-    вещественная и мнимая части."""
+    Вклад ребра в кик = поток × направление его трубки (комплексное, из координат концов). Раньше
+    направление задавалось двумя свободными весами на класс (симметричная и знакопеременная суммы);
+    теперь оно геометрическое, а подбирается только величина. Это и строже, и вдвое дешевле."""
     lens, perms, secs = unpack(p, cir)
     phi, _ = cir.solve(currents, lens, perms, secs=secs)
-    out = []
-    for c in cir.kick_classes:
-        bs = [b for b in cir.gaps if cir.sym[b] == c]
-        out.append(complex(sum(phi[b] for b in bs), 0.0))                    # симметричная часть
-        out.append(complex(0.0, sum(mirror_sign(cir, b) * phi[b] for b in bs)))  # антисимметричная
-    return np.array(out, dtype=complex)
+    return np.array([sum(phi[b] * cir.direction(b) for b in cir.gaps if cir.sym[b] == c)
+                     for c in cir.kick_classes], dtype=complex)
 
 
 def solve_weights(cir, rows, p, wts=None):
@@ -289,6 +333,11 @@ def solve_weights(cir, rows, p, wts=None):
         den = den / np.array([wts.get(tuple(sorted(c)), 1.0) for c, _, _, _ in rows])
     M = np.vstack([np.real(A) / den[:, None], np.imag(A) / den[:, None]])   # веса ВЕЩЕСТВЕННЫЕ
     b = np.concatenate([np.real(y) / den, np.imag(y) / den])
+    # Регуляризация: базисные векторы почти коллинеарны, и без неё МНК находит гигантские
+    # взаимно сокращающиеся веса (10^5), при которых главная обмотка предсказывается нулём.
+    lam = 1e-3 * float(np.sqrt((M ** 2).sum() / M.shape[0]))
+    M = np.vstack([M, lam * np.eye(M.shape[1])])
+    b = np.concatenate([b, np.zeros(M.shape[1])])
     w, *_ = np.linalg.lstsq(M, b, rcond=None)
     return w
 
@@ -320,7 +369,9 @@ def fit(element, order=1, verbose=True):
         raise SystemExit(f"нет карт для {element}")
     single = [t for t in maps if len(t[0]) == 1]
     combo = [t for t in maps if len(t[0]) > 1]
-    train = [t for t in single if t[2] == "train"] or single
+    # Подгонка — по ВСЕМ одиночным обмоткам, проверка — по комбинациям, которые в подгонку не входят
+    # вообще. Делить одиночные на train/test незачем: честность даёт именно отложенный набор комбинаций.
+    train = single
     Fmax = max(abs(v) for t in maps for v in t[0].values())
 
     # Начальное приближение по смыслу: проводимость зазора такая, чтобы на САМОМ СИЛЬНОМ возбуждении
@@ -363,7 +414,7 @@ def fit(element, order=1, verbose=True):
     # Мультистарт: задача невыпуклая, с одной точки оптимизатор садится в локальный минимум
     # (длина упиралась в границу). Пробуем несколько разумных наборов длин и берём лучший.
     best = None
-    for ell in (0.25,):
+    for ell in ((0.25,) if cir.geom is None else ()):
         for kp in (0.3,):
             st = np.concatenate([np.full(n1, np.log(ell)), p0[n1:n1 + n2] + np.log(kp),
                                  np.zeros(nsec)])
@@ -378,6 +429,8 @@ def fit(element, order=1, verbose=True):
             if best is None or cand.cost < best.cost:
                 best = cand
     sol = best
+    if cir.geom is not None:                                # геометрия задана — оптимизировать нечего
+        sol = types.SimpleNamespace(x=p0, cost=float(np.sum(resid(p0) ** 2)))
     w = solve_weights(cir, train, sol.x)
     lens, perms, secs = unpack(sol.x, cir)
     if verbose:

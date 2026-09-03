@@ -69,7 +69,7 @@ def read_graph(branches=BRANCHES, members=MEMBERS):
     for r in _rows(branches):
         d = g.setdefault(r["element"], dict(branches=[], unwound=[], coils={}, turns={},
                                             material={}, geom={}, edge={}, kind={}, sym={},
-                                            mirror={}, pos={}))
+                                            mirror={}, pos={}, share={}))
         d["branches"].append(r["branch"])
         d["material"][r["branch"]] = r["material"] or "steel_1008"
         d["edge"][r["branch"]] = ((r.get("node_from") or "").strip(), (r.get("node_to") or "").strip())
@@ -88,6 +88,10 @@ def read_graph(branches=BRANCHES, members=MEMBERS):
         if r["branch"] not in d["branches"]:
             raise SystemExit(f"{r['element']}: ветви {r['branch']} нет в {branches}")
         d["coils"].setdefault(r["winding"], []).append(r["branch"])
+        # Доля МДС обмотки на этом ребре. У DQ и main это РАЗНЫЕ катушки — по 1.0 на каждой (МДС
+        # складывается). У обмотки, размазанной по участкам одного корня, доля 1/N: катушка одна.
+        sh = (r.get("mmf_share") or "").strip()
+        d["share"][(r["winding"], r["branch"])] = float(sh.replace(",", ".")) if sh else 1.0
         t = (r.get("turns_per_coil") or "").strip()
         if t:
             d["turns"][r["winding"]] = int(float(t))

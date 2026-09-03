@@ -1,61 +1,70 @@
-element;branch;material;S_m2;len_m;origin;comment;node_from;node_to;kind;sym_class;mirror;pos_from;pos_to
-QP_sh;core;steel_1008;;;fit;несёт обмотку;n1;n2;iron;core;0;0;0
-QP_L;core;steel_1008;;;fit;несёт обмотку;n1;n2;iron;core;0;0;0
-OP;core;steel_1008;;;fit;несёт обмотку;n1;n2;iron;core;0;0;0
-SP;core;steel_1008;;;fit;две обмотки последовательно на одном ребре;n1;n2;iron;core;0;0;0
-DQ;A1;steel_1008;;;fit;левый полюс, обмотка I1;jL;pL1;iron;p1;1;0;1
-DQ;A2;steel_1008;;;fit;левый полюс, обмотка I2;jL;pL2;iron;p2;0;0;0
-DQ;A3;steel_1008;;;fit;левый полюс, обмотка I3;jL;pL3;iron;p3;-1;0;-1
-DQ;yoke;steel_1008;;;fit;ярмо между полюсами, без обмоток;jL;jR;iron;yoke;0;0;0
-DQ;B1;steel_1008;;;fit;правый полюс, обмотка I1 (последовательно с A1);jR;pR1;iron;p1;1;0;1
-DQ;B2;steel_1008;;;fit;правый полюс, обмотка I2 (последовательно с A2);jR;pR2;iron;p2;0;0;0
-DQ;B3;steel_1008;;;fit;правый полюс, обмотка I3 (последовательно с A3);jR;pR3;iron;p3;-1;0;-1
-DQ;g1;air;;;fit;зазор между наконечниками полюсов 1;pL1;pR1;gap;gap;1;1;1
-DQ;g2;air;;;fit;зазор между наконечниками полюсов 2;pL2;pR2;gap;gap;0;0;0
-DQ;g3;air;;;fit;зазор между наконечниками полюсов 3;pL3;pR3;gap;gap;-1;-1;-1
-corrector;yokeA;steel_1008;;;fit;ярмо: участок с ВЕРХНЕЙ катушкой main;cT;yM1;iron;yoke;0;2;2
-corrector;yokeM;steel_1008;;;fit;ярмо: промежуток между катушками main;yM1;yM2;iron;yoke;0;2;2
-corrector;yokeB;steel_1008;;;fit;ярмо: участок с НИЖНЕЙ катушкой main;yM2;cB;iron;yoke;0;2;2
-corrector;plTc;steel_1008;;;fit;верхняя пластина: угол ярма — нога c1;cT;nT1;iron;plate_end;0;2;1
-corrector;plBc;steel_1008;;;fit;нижняя пластина: угол ярма — нога c3;cB;nB1;iron;plate_end;0;2;1
-corrector;plT1;steel_1008;;;fit;верхняя пластина: c1 — центр;nT1;nT0;iron;plate;0;1;0
-corrector;plT2;steel_1008;;;fit;верхняя пластина: центр — c2;nT0;nT2;iron;plate;0;0;-1
-corrector;plB1;steel_1008;;;fit;нижняя пластина: c3 — центр;nB1;nB0;iron;plate;0;1;0
-corrector;plB2;steel_1008;;;fit;нижняя пластина: центр — c4;nB0;nB2;iron;plate;0;0;-1
-corrector;T+;steel_1008;;;fit;верхняя нога, обмотка c1;nT1;pT1;iron;outer;0;1;1
-corrector;T0;steel_1008;;;fit;верхняя центральная нога, без обмотки;nT0;pT0;iron;center;0;0;0
-corrector;T-;steel_1008;;;fit;верхняя нога, обмотка c2;nT2;pT2;iron;outer;0;-1;-1
-corrector;B+;steel_1008;;;fit;нижняя нога, обмотка c3 (под c1);nB1;pB1;iron;outer;0;1;1
-corrector;B0;steel_1008;;;fit;нижняя центральная нога, без обмотки;nB0;pB0;iron;center;0;0;0
-corrector;B-;steel_1008;;;fit;нижняя нога, обмотка c4 (под c2);nB2;pB2;iron;outer;0;-1;-1
-corrector;a_T1_T0;air;;;fit;воздушный путь;pT1;pT0;gap;air_row_adj;0;1;0
-corrector;a_T1_T2;air;;;fit;воздушный путь;pT1;pT2;gap;air_row_far;0;1;-1
-corrector;a_T1_B1;air;;;fit;воздушный путь;pT1;pB1;gap;air_v_outer;0;1;1
-corrector;a_T1_B0;air;;;fit;воздушный путь;pT1;pB0;gap;air_diag_near;0;1;0
-corrector;a_T1_B2;air;;;fit;воздушный путь;pT1;pB2;gap;air_diag_far;0;1;-1
-corrector;a_T0_T2;air;;;fit;воздушный путь;pT0;pT2;gap;air_row_adj;0;0;-1
-corrector;a_T0_B1;air;;;fit;воздушный путь;pT0;pB1;gap;air_diag_near;0;0;1
-corrector;a_T0_B0;air;;;fit;воздушный путь;pT0;pB0;gap;air_v_center;0;0;0
-corrector;a_T0_B2;air;;;fit;воздушный путь;pT0;pB2;gap;air_diag_near;0;0;-1
-corrector;a_T2_B1;air;;;fit;воздушный путь;pT2;pB1;gap;air_diag_far;0;-1;1
-corrector;a_T2_B0;air;;;fit;воздушный путь;pT2;pB0;gap;air_diag_near;0;-1;0
-corrector;a_T2_B2;air;;;fit;воздушный путь;pT2;pB2;gap;air_v_outer;0;-1;-1
-corrector;a_B1_B0;air;;;fit;воздушный путь;pB1;pB0;gap;air_row_adj;0;1;0
-corrector;a_B1_B2;air;;;fit;воздушный путь;pB1;pB2;gap;air_row_far;0;1;-1
-corrector;a_B0_B2;air;;;fit;воздушный путь;pB0;pB2;gap;air_row_adj;0;0;-1
-corrector;w_cT_cB;air;;;fit;рассеяние через окно магнита (мимо полюсов);cT;cB;gap;win_straight;0;2;2
-corrector;w_cT_nB1;air;;;fit;рассеяние через окно магнита (мимо полюсов);cT;nB1;gap;win_diag;0;2;1
-corrector;w_cT_nB0;air;;;fit;рассеяние через окно магнита (мимо полюсов);cT;nB0;gap;win_diag;0;2;0
-corrector;w_cT_nB2;air;;;fit;рассеяние через окно магнита (мимо полюсов);cT;nB2;gap;win_diag;0;2;-1
-corrector;w_nT1_cB;air;;;fit;рассеяние через окно магнита (мимо полюсов);nT1;cB;gap;win_diag;0;1;2
-corrector;w_nT1_nB1;air;;;fit;рассеяние через окно магнита (мимо полюсов);nT1;nB1;gap;win_straight;0;1;1
-corrector;w_nT1_nB0;air;;;fit;рассеяние через окно магнита (мимо полюсов);nT1;nB0;gap;win_diag;0;1;0
-corrector;w_nT1_nB2;air;;;fit;рассеяние через окно магнита (мимо полюсов);nT1;nB2;gap;win_diag;0;1;-1
-corrector;w_nT0_cB;air;;;fit;рассеяние через окно магнита (мимо полюсов);nT0;cB;gap;win_diag;0;0;2
-corrector;w_nT0_nB1;air;;;fit;рассеяние через окно магнита (мимо полюсов);nT0;nB1;gap;win_diag;0;0;1
-corrector;w_nT0_nB0;air;;;fit;рассеяние через окно магнита (мимо полюсов);nT0;nB0;gap;win_straight;0;0;0
-corrector;w_nT0_nB2;air;;;fit;рассеяние через окно магнита (мимо полюсов);nT0;nB2;gap;win_diag;0;0;-1
-corrector;w_nT2_cB;air;;;fit;рассеяние через окно магнита (мимо полюсов);nT2;cB;gap;win_diag;0;-1;2
-corrector;w_nT2_nB1;air;;;fit;рассеяние через окно магнита (мимо полюсов);nT2;nB1;gap;win_diag;0;-1;1
-corrector;w_nT2_nB0;air;;;fit;рассеяние через окно магнита (мимо полюсов);nT2;nB0;gap;win_diag;0;-1;0
-corrector;w_nT2_nB2;air;;;fit;рассеяние через окно магнита (мимо полюсов);nT2;nB2;gap;win_straight;0;-1;-1
+element;branch;material;S_m2;len_m;origin;comment;node_from;node_to;kind;sym_class;mirror;pos_from;pos_to;mmf_share
+QP_sh;core;steel_1008;;;fit;несёт обмотку;n1;n2;iron;core;0;0;0;
+QP_L;core;steel_1008;;;fit;несёт обмотку;n1;n2;iron;core;0;0;0;
+OP;core;steel_1008;;;fit;несёт обмотку;n1;n2;iron;core;0;0;0;
+SP;core;steel_1008;;;fit;две обмотки последовательно на одном ребре;n1;n2;iron;core;0;0;0;
+DQ;A1;steel_1008;;;fit;левый полюс, обмотка I1;jL;pL1;iron;p1;1;0;1;
+DQ;A2;steel_1008;;;fit;левый полюс, обмотка I2;jL;pL2;iron;p2;0;0;0;
+DQ;A3;steel_1008;;;fit;левый полюс, обмотка I3;jL;pL3;iron;p3;-1;0;-1;
+DQ;yoke;steel_1008;;;fit;ярмо между полюсами, без обмоток;jL;jR;iron;yoke;0;0;0;
+DQ;B1;steel_1008;;;fit;правый полюс, обмотка I1 (последовательно с A1);jR;pR1;iron;p1;1;0;1;
+DQ;B2;steel_1008;;;fit;правый полюс, обмотка I2 (последовательно с A2);jR;pR2;iron;p2;0;0;0;
+DQ;B3;steel_1008;;;fit;правый полюс, обмотка I3 (последовательно с A3);jR;pR3;iron;p3;-1;0;-1;
+DQ;g1;air;;;fit;зазор между наконечниками полюсов 1;pL1;pR1;gap;gap;1;1;1;
+DQ;g2;air;;;fit;зазор между наконечниками полюсов 2;pL2;pR2;gap;gap;0;0;0;
+DQ;g3;air;;;fit;зазор между наконечниками полюсов 3;pL3;pR3;gap;gap;-1;-1;-1;
+corrector;yokeA;steel_1008;0.00324;0.141;geom;ярмо: верхняя катушка main [сечение подобрано по контрасту насыщения];cT;yM1;iron;yoke_coil;0;2;2;
+corrector;yokeM;steel_1008;0.00324;0.131;geom;ярмо: между катушками [сечение подобрано по контрасту насыщения];yM1;yM2;iron;yoke_mid;0;2;2;
+corrector;yokeB;steel_1008;0.00324;0.141;geom;ярмо: нижняя катушка main [сечение подобрано по контрасту насыщения];yM2;cB;iron;yoke_coil;0;2;2;
+corrector;plTc;steel_1008;0.005076;0.0675;geom;верхняя пластина: ярмо — нога;cT;nT1;iron;plate_end;0;2;1;
+corrector;plT1;steel_1008;0.005076;0.03;geom;верхняя пластина;nT1;nT0;iron;plate;0;1;0;
+corrector;plT2;steel_1008;0.005076;0.03;geom;верхняя пластина;nT0;nT2;iron;plate;0;0;-1;
+corrector;plBc;steel_1008;0.005076;0.0675;geom;нижняя пластина: ярмо — нога;cB;nB1;iron;plate_end;0;2;1;
+corrector;plB1;steel_1008;0.005076;0.03;geom;нижняя пластина;nB1;nB0;iron;plate;0;1;0;
+corrector;plB2;steel_1008;0.005076;0.03;geom;нижняя пластина;nB0;nB2;iron;plate;0;0;-1;
+corrector;T1r1;steel_1008;0.002376;0.085;geom;полюс T1: участок корня 1 [сечение подобрано по контрасту насыщения];nT1;s1T1;iron;pole_root_outer;0;1;2;
+corrector;T1r2;steel_1008;0.002376;0.085;geom;полюс T1: участок корня 2 [сечение подобрано по контрасту насыщения];s1T1;mT1;iron;pole_root_outer;0;2;1;
+corrector;T1t;steel_1008;0.00162;0.024;geom;полюс T1: наконечник;mT1;pT1;iron;pole_tip_outer;0;1;1;
+corrector;T0r1;steel_1008;0.002376;0.085;geom;полюс T0: участок корня 1 [сечение подобрано по контрасту насыщения];nT0;s1T0;iron;pole_root_center;0;0;2;
+corrector;T0r2;steel_1008;0.002376;0.085;geom;полюс T0: участок корня 2 [сечение подобрано по контрасту насыщения];s1T0;mT0;iron;pole_root_center;0;2;0;
+corrector;T0t;steel_1008;0.00162;0.02;geom;полюс T0: наконечник;mT0;pT0;iron;pole_tip_center;0;0;0;
+corrector;T2r1;steel_1008;0.002376;0.085;geom;полюс T2: участок корня 1 [сечение подобрано по контрасту насыщения];nT2;s1T2;iron;pole_root_outer;0;-1;2;
+corrector;T2r2;steel_1008;0.002376;0.085;geom;полюс T2: участок корня 2 [сечение подобрано по контрасту насыщения];s1T2;mT2;iron;pole_root_outer;0;2;-1;
+corrector;T2t;steel_1008;0.00162;0.024;geom;полюс T2: наконечник;mT2;pT2;iron;pole_tip_outer;0;-1;-1;
+corrector;B1r1;steel_1008;0.002376;0.085;geom;полюс B1: участок корня 1 [сечение подобрано по контрасту насыщения];nB1;s1B1;iron;pole_root_outer;0;1;2;
+corrector;B1r2;steel_1008;0.002376;0.085;geom;полюс B1: участок корня 2 [сечение подобрано по контрасту насыщения];s1B1;mB1;iron;pole_root_outer;0;2;1;
+corrector;B1t;steel_1008;0.00162;0.024;geom;полюс B1: наконечник;mB1;pB1;iron;pole_tip_outer;0;1;1;
+corrector;B0r1;steel_1008;0.002376;0.085;geom;полюс B0: участок корня 1 [сечение подобрано по контрасту насыщения];nB0;s1B0;iron;pole_root_center;0;0;2;
+corrector;B0r2;steel_1008;0.002376;0.085;geom;полюс B0: участок корня 2 [сечение подобрано по контрасту насыщения];s1B0;mB0;iron;pole_root_center;0;2;0;
+corrector;B0t;steel_1008;0.00162;0.02;geom;полюс B0: наконечник;mB0;pB0;iron;pole_tip_center;0;0;0;
+corrector;B2r1;steel_1008;0.002376;0.085;geom;полюс B2: участок корня 1 [сечение подобрано по контрасту насыщения];nB2;s1B2;iron;pole_root_outer;0;-1;2;
+corrector;B2r2;steel_1008;0.002376;0.085;geom;полюс B2: участок корня 2 [сечение подобрано по контрасту насыщения];s1B2;mB2;iron;pole_root_outer;0;2;-1;
+corrector;B2t;steel_1008;0.00162;0.024;geom;полюс B2: наконечник;mB2;pB2;iron;pole_tip_outer;0;-1;-1;
+corrector;lk_s1T1_T0;air;0.00918;0.015;geom;утечка между боками полюсов, уровень s1;s1T1;s1T0;gap;ipole_adj;0;2;2;
+corrector;lk_s1T1_T2;air;0.00459;0.045;geom;утечка между боками полюсов, уровень s1;s1T1;s1T2;gap;ipole_far;0;2;2;
+corrector;lk_s1T0_T2;air;0.00918;0.015;geom;утечка между боками полюсов, уровень s1;s1T0;s1T2;gap;ipole_adj;0;2;2;
+corrector;lk_mT1_T0;air;0.00918;0.015;geom;утечка между боками полюсов, уровень m;mT1;mT0;gap;ipole_adj;0;1;0;
+corrector;lk_mT1_T2;air;0.00459;0.045;geom;утечка между боками полюсов, уровень m;mT1;mT2;gap;ipole_far;0;1;-1;
+corrector;lk_mT0_T2;air;0.00918;0.015;geom;утечка между боками полюсов, уровень m;mT0;mT2;gap;ipole_adj;0;0;-1;
+corrector;lk_s1B1_B0;air;0.00918;0.015;geom;утечка между боками полюсов, уровень s1;s1B1;s1B0;gap;ipole_adj;0;2;2;
+corrector;lk_s1B1_B2;air;0.00459;0.045;geom;утечка между боками полюсов, уровень s1;s1B1;s1B2;gap;ipole_far;0;2;2;
+corrector;lk_s1B0_B2;air;0.00918;0.015;geom;утечка между боками полюсов, уровень s1;s1B0;s1B2;gap;ipole_adj;0;2;2;
+corrector;lk_mB1_B0;air;0.00918;0.015;geom;утечка между боками полюсов, уровень m;mB1;mB0;gap;ipole_adj;0;1;0;
+corrector;lk_mB1_B2;air;0.00459;0.045;geom;утечка между боками полюсов, уровень m;mB1;mB2;gap;ipole_far;0;1;-1;
+corrector;lk_mB0_B2;air;0.00918;0.015;geom;утечка между боками полюсов, уровень m;mB0;mB2;gap;ipole_adj;0;0;-1;
+corrector;g_T1_T0;air;0.002592;0.015;geom;апертура;pT1;pT0;gap;tip_row_adj;0;1;0;
+corrector;g_T1_T2;air;0.000648;0.045;geom;апертура;pT1;pT2;gap;tip_row_far;0;1;-1;
+corrector;g_T1_B1;air;0.003388;0.025;geom;апертура;pT1;pB1;gap;gap_straight_o;0;1;1;
+corrector;g_T1_B0;air;0.00226504;0.0390512;geom;апертура;pT1;pB0;gap;gap_diag_near;0;1;0;
+corrector;g_T1_B2;air;0.00172996;0.065;geom;апертура;pT1;pB2;gap;gap_diag_far;0;1;-1;
+corrector;g_T0_T2;air;0.002592;0.015;geom;апертура;pT0;pT2;gap;tip_row_adj;0;0;-1;
+corrector;g_T0_B1;air;0.00226504;0.0390512;geom;апертура;pT0;pB1;gap;gap_diag_near;0;0;1;
+corrector;g_T0_B0;air;0.00402515;0.033;geom;апертура;pT0;pB0;gap;gap_straight_c;0;0;0;
+corrector;g_T0_B2;air;0.00226504;0.0390512;geom;апертура;pT0;pB2;gap;gap_diag_near;0;0;-1;
+corrector;g_T2_B1;air;0.00172996;0.065;geom;апертура;pT2;pB1;gap;gap_diag_far;0;-1;1;
+corrector;g_T2_B0;air;0.00226504;0.0390512;geom;апертура;pT2;pB0;gap;gap_diag_near;0;-1;0;
+corrector;g_T2_B2;air;0.003388;0.025;geom;апертура;pT2;pB2;gap;gap_straight_o;0;-1;-1;
+corrector;g_B1_B0;air;0.002592;0.015;geom;апертура;pB1;pB0;gap;tip_row_adj;0;1;0;
+corrector;g_B1_B2;air;0.000648;0.045;geom;апертура;pB1;pB2;gap;tip_row_far;0;1;-1;
+corrector;g_B0_B2;air;0.002592;0.015;geom;апертура;pB0;pB2;gap;tip_row_adj;0;0;-1;
+corrector;w_cT_cB;air;0.00729;0.413;geom;окно магнита;cT;cB;gap;win_straight;0;2;2;
