@@ -39,13 +39,25 @@ REGISTRY = sm.REGISTRY
 
 # ───────────────────────────── измерение по картам ─────────────────────────────
 
-def harmonic_complex(path, n, r=R_PROBE):
-    """КОМПЛЕКСНАЯ гармоника n поля карты (нужна фаза: по ней восстанавливается ЗНАК вклада)."""
+def harmonic_complex(path, n, r=R_PROBE, integrate=True):
+    """КОМПЛЕКСНАЯ гармоника n карты. По умолчанию — ИНТЕГРАЛ вдоль пучка (это и есть кик).
+
+    Гармоника в одном срезе смещена: эффективная длина поля разная у разных обмоток (у корректора
+    160 мм у c1/c3/main против 176 мм у c2/c4 — они дальше от ярма), и сравнение по центральному
+    сечению вносит систематику до 9%. Карта — половина магнита, поэтому интеграл удваивается."""
     h, B = load(path)
-    ix = _body_slice(h, B)
-    by, bz = _circle(h, B, ix, r, nth=NTH)
-    sp = np.fft.fft(by + 1j * bz) / NTH
-    return sp[0] if n == 1 else sp[-(n - 1)]
+    if not integrate:
+        by, bz = _circle(h, B, _body_slice(h, B), r, nth=NTH)
+        sp = np.fft.fft(by + 1j * bz) / NTH
+        return sp[0] if n == 1 else sp[-(n - 1)]
+    xs = np.linspace(h["mnx"], h["mxx"], h["nx"])
+    vals = []
+    for ix in range(h["nx"]):
+        by, bz = _circle(h, B, ix, r, nth=NTH)
+        sp = np.fft.fft(by + 1j * bz) / NTH
+        vals.append(sp[0] if n == 1 else sp[-(n - 1)])
+    v = np.array(vals)
+    return complex(2.0 * np.trapezoid(v.real, xs), 2.0 * np.trapezoid(v.imag, xs))
 
 
 CACHE = os.path.join("workspace", "results", "saturation_model", "harmonics_cache.json")
@@ -80,7 +92,7 @@ def read_maps(element, order=1):
                 pass
         if not cur:
             continue
-        key = f"{r['map_id']}|{order}"
+        key = f"{r['map_id']}|{order}|int"
         if key in cache:
             h = complex(cache[key][0], cache[key][1])
         else:
