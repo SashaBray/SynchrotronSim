@@ -73,7 +73,10 @@ def jobs(element=None, path=REQUEST):
 
 
 def build_script(element, todo, grid, out_path):
-    """Скрипт для интерпретатора AEDT. Внутри доступен только oDesktop — библиотек не подключаем."""
+    """Скрипт для интерпретатора AEDT. Внутри доступен только oDesktop — библиотек не подключаем.
+
+    Проект НЕ сохраняем и в конце возвращаем току прежнее значение: расчёт не должен менять
+    состояние чужого проекта на диске."""
     d = DESIGN[element]
     lines = [
         "# -*- coding: utf-8 -*-",
@@ -81,11 +84,15 @@ def build_script(element, todo, grid, out_path):
         "import os",
         "import ScriptEnv",
         'ScriptEnv.Initialize("Ansoft.ElectronicsDesktop")',
-        f'oProject = oDesktop.SetActiveProject("{d["project"]}")',
+        # ГОТЧА: SetActiveProject не возвращает None для незагруженного проекта, а БРОСАЕТ
+        # исключение. В пакетном режиме открыт вообще ничего не бывает, поэтому открываем сами.
+        f'oProject = oDesktop.OpenProject(r"{os.path.join(PROJECTS, d["project"])}.aedt")',
         "if oProject is None:",
-        f'    oProject = oDesktop.OpenProject(r"{os.path.join(PROJECTS, d["project"])}.aedt")',
+        f'    oProject = oDesktop.SetActiveProject("{d["project"]}")',
         f'oDesign = oProject.SetActiveDesign("{d["design"]}")',
         'oModule = oDesign.GetModule("FieldsReporter")',
+        f'OLD = oDesign.GetVariableValue("{d["var"]}")',
+        'oDesktop.AddMessage("", "", 0, "исходное значение тока: " + str(OLD))',
         "",
         f"LO = {grid['lo']!r}",
         f"HI = {grid['hi']!r}",
@@ -108,7 +115,10 @@ def build_script(element, todo, grid, out_path):
             "    False, \"Cartesian\", [0, 0, 0], False)",
             "",
         ]
-    lines += ['oDesktop.AddMessage("", "", 0, "=== все точки пройдены ===")']
+    lines += [
+        f'oDesign.SetVariableValue("{d["var"]}", OLD)',          # вернуть как было
+        'oDesktop.AddMessage("", "", 0, "=== все точки пройдены ===")',
+    ]
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     open(out_path, "w", encoding="utf-8", newline="\n").write("\n".join(lines) + "\n")
     return out_path
@@ -156,6 +166,59 @@ def measure(element, order=2):
     return rows, bad
 
 
+def compare_maps(a_path, b_path):
+    """Численное сравнение двух карт: шапка, форма массива и расхождение поля."""
+    import numpy as np
+    from field_quality import load
+    ha, A = load(a_path)
+    hb, B = load(b_path)
+    head = [open(p, encoding="utf-8", errors="ignore").readline().rstrip("\n")
+            for p in (a_path, b_path)]
+    if A.shape != B.shape:
+        return dict(header_same=head[0] == head[1], shape_same=False,
+                    shape=(A.shape, B.shape))
+    d = np.linalg.norm(A - B, axis=-1)
+    scale = float(np.linalg.norm(A, axis=-1).max())
+    return dict(header_same=head[0] == head[1], shape_same=True, shape=A.shape,
+                max_abs=float(d.max()), rms=float(np.sqrt((d ** 2).mean())),
+                max_rel=100.0 * float(d.max()) / scale if scale else float("nan"),
+                identical=bool(np.array_equal(A, B)), scale=scale)
+
+
+def cmd_repro(element, amp_turns, outdir):
+    """Пересчитать УЖЕ СНЯТУЮ карту в отдельный файл и сравнить с ней. Оригинал не трогаем."""
+    grid = reference_grid(element)
+    folder = os.path.dirname(grid["sample"])
+    orig = os.path.join(folder, f"{element}_{amp_turns}A.fld")
+    if not os.path.exists(orig):
+        raise SystemExit(f"нет исходной карты {orig}")
+    os.makedirs(outdir, exist_ok=True)
+    repro = os.path.join(os.path.abspath(outdir), f"{element}_{amp_turns}A__repro.fld")
+    job = [dict(element=element, amp_turns=amp_turns, name=os.path.basename(repro),
+                folder=outdir, target=repro, why="воспроизведение")]
+    sp = build_script(element, job, grid, os.path.join(outdir, f"aedt_repro_{element}.py"))
+    lock = os.path.join(PROJECTS, f"{DESIGN[element]['project']}.aedt.lock")
+    if os.path.exists(lock):
+        raise SystemExit(f"проект открыт в AEDT ({lock}) — закройте его")
+    print(f"  оригинал: {orig}")
+    print(f"  пересчёт: {repro}")
+    print(f"  скрипт:   {sp}\n  запуск AEDT…")
+    rc = subprocess.call([AEDT_EXE, "-ng", "-runscriptandexit", os.path.abspath(sp)])
+    print(f"  AEDT вернул {rc}")
+    if not os.path.exists(repro):
+        raise SystemExit("файл не появился — аргументы ExportOnGrid неверны либо расчёт не прошёл")
+    r = compare_maps(orig, repro)
+    print(f"\n  шапка совпала: {'да' if r['header_same'] else 'НЕТ'}")
+    if not r["shape_same"]:
+        print(f"  РАЗНАЯ ФОРМА МАССИВА: {r['shape']}")
+        return r
+    print(f"  форма массива: {r['shape']}, максимум |B| {r['scale']:.4f} Тл")
+    print(f"  бит-в-бит: {'ДА' if r['identical'] else 'нет'}")
+    print(f"  расхождение поля: макс {r['max_abs']:.3e} Тл ({r['max_rel']:.4f}% от максимума), "
+          f"СКО {r['rms']:.3e} Тл")
+    return r
+
+
 def verify(element, todo, grid):
     """Сверка шапок: новая карта обязана быть снята на ТОЙ ЖЕ сетке, что эталонная."""
     ok, bad, missing = [], [], []
@@ -180,10 +243,18 @@ def main(argv=None):
     ap.add_argument("--order", type=int, default=2, help="порядок гармоники для проверки")
     ap.add_argument("--limit", type=int, help="взять только первые N точек из оставшихся: "
                                              "первый прогон разумно делать на ОДНОЙ")
+    ap.add_argument("--repro", type=int, metavar="А·ВИТКОВ",
+                    help="пересчитать УЖЕ СНЯТУЮ карту и сравнить с ней (оригинал не трогается)")
     ap.add_argument("--outdir", default=os.path.join("workspace", "results", "aedt"))
     a = ap.parse_args(argv)
 
     els = [a.element] if a.element else sorted({j["element"] for j in jobs()})
+    if a.repro:
+        if len(els) != 1:
+            raise SystemExit("--repro требует --element")
+        print(f"=== {els[0]}: воспроизведение карты {a.repro} А·в")
+        cmd_repro(els[0], a.repro, a.outdir)
+        return 0
     for el in els:
         if el not in DESIGN:
             print(f"{el}: проект не описан в DESIGN — пропускаю"); continue
