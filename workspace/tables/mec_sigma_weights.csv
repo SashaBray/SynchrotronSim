@@ -1,0 +1,11 @@
+﻿element;order;kick_class;w;w_sigma;sense
+corrector;1;gap_diag_far;-0.5022478205;0.5712984646;c1=1|c2=1|c3=-1|c4=-1|main=-1
+corrector;1;gap_diag_near;13.18590341;-4.577428381;
+corrector;1;gap_straight_c;21.06740994;-8.257909056;
+corrector;1;gap_straight_o;0.6669572063;-0.5241286054;
+corrector;1;tip_row_adj;3.92382886;1.255087525;
+corrector;1;tip_row_far;-0.3239167011;0.358066515;
+DQ;1;gap_adjacent;132.2427693;79.87162917;I1=-1|I2=1|I3=1
+DQ;1;gap_opposite;4.571631962e-11;1.571490992e-12;
+DQ;2;gap_adjacent;144.2244423;-24.21706825;I1=-1|I2=-1|I3=-1
+DQ;2;gap_opposite;-6.235012506e-12;-4.872110373e-13;

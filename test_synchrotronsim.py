@@ -674,5 +674,54 @@ class TestGuiShell(unittest.TestCase):
             self.assertEqual(lf.read_bytes(), b"a;b\n1;2\n", "переводы строк исходного файла сохраняются")
 
 
+class TestMecSigma(unittest.TestCase):
+    """МЭС-σ: записанные веса, round-trip таблицы и ЗАКРЕПЛЁННАЯ точность в токе.
+
+    Точность фиксируется рубежами, а не точными числами: карты и реестр могут пополняться, но
+    ухудшение модели должно ронять тест. Метрика — ошибка ТОКА |λ−1|, а не процент по кику: в
+    насыщении отклик пологий и промах в кике на 1% означает промах в токе в 2.5–5 раз больший."""
+
+    LIMITS = {("corrector", 1): (20.0, 5.0),      # (одиночные, КОМБИНАЦИИ), % ошибки тока
+              ("DQ", 1): (22.0, 26.0),
+              ("DQ", 2): (6.0, 7.0)}
+
+    def _models(self):
+        import mec_sigma as ms
+        if not os.path.exists(ms.WEIGHTS):
+            self.skipTest("нет таблицы весов — запустите mec_sigma.py --fit")
+        return ms, ms.load()
+
+    def test_weights_table_roundtrip(self):
+        ms, M = self._models()
+        self.assertEqual(set(M), set(ms.MODELS))
+        for (el, order), (cir, w) in M.items():
+            self.assertEqual(len(w), 2 * len(cir.kick_classes))   # w и σ-половина
+            self.assertTrue(np.all(np.isfinite(w)))
+
+    def test_zero_current_gives_zero_kick(self):
+        """Точное физическое условие: без тока нет кика. Модель обязана его выполнять тождественно."""
+        ms, M = self._models()
+        for el, order in M:
+            cir = M[(el, order)][0]
+            k = ms.kick(el, order, {w: 0.0 for w in cir.coil_branches}, M)
+            self.assertLess(abs(k), 1e-30)
+
+    def test_current_accuracy_holds(self):
+        ms, M = self._models()
+        import branch_network as bn
+        for key, (lim_s, lim_c) in self.LIMITS.items():
+            el, order = key
+            maps = bn.read_maps(el, order)
+            got = {}
+            for lbl, grp in (("одиночные", [t for t in maps if len(t[0]) == 1]),
+                             ("комбинации", [t for t in maps if len(t[0]) > 1])):
+                e = [abs(ms.current_scale(el, order, c, m, M) - 1.0) * 100 for c, m, _, _ in grp]
+                e = [x for x in e if np.isfinite(x)]
+                got[lbl] = float(np.mean(e))
+            self.assertLess(got["одиночные"], lim_s, f"{el} n={order} одиночные")
+            self.assertLess(got["комбинации"], lim_c, f"{el} n={order} комбинации")
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")
