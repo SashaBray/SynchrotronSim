@@ -5,18 +5,22 @@
 нужен — используется тот же API, что стоит за «Record Script to File»; сигнатуры вызовов взяты из
 `gRPCFiles/API/aedt/**/*.proto` установленной версии, а не из документации по памяти.
 
-На каждую точку заказа: `SetVariableValue('current', ...)` → `Analyze('Setup1')` →
-`FieldsReporter.ExportOnGrid(...)`. Ток вынесен в переменную дизайна во всех проектах, поэтому
+На каждую точку заказа: выставить ток КАЖДОЙ обмотки (незадействованные — в ноль), `Analyze`,
+`FieldsReporter.ExportOnGrid`. Токи во всех проектах вынесены в переменные дизайна, поэтому
 геометрия не трогается вовсе.
 
-ГЛАВНАЯ ЗАЩИТА: сетка НЕ задаётся руками, а читается из шапки уже снятой карты того же элемента
-(`Grid Output Min: [...] Max: [...] Grid Size: [...]`), и после экспорта шапка новой карты
-сверяется с эталонной. Карты сравнимы только если сняты одинаково; несовпадение — это остановка,
-а не предупреждение.
+ТРИ ЗАЩИТЫ, и каждая понадобилась на практике:
+  1. Сетка не задаётся руками, а читается из шапки уже снятой карты того же элемента, и шапка
+     новой сверяется с эталонной.
+  2. `guard_material` сверяет САМУ КРИВУЮ намагничивания в проекте, а не имя материала: имя лжёт
+     (в QP_sh материал звался `steel_1008 _custom`, а содержал низконасыщающуюся кривую).
+  3. `--measure`: гармоника обязана расти с током. Экспорт до окончания расчёта даёт файл с
+     идеально правильной шапкой и полем от ПРЕЖНЕГО решения — формальные сверки такое не ловят.
 
-    py -3.14 ansys_maps.py --plan                 # что будет сделано, без запуска
-    py -3.14 ansys_maps.py --script               # только собрать скрипт для AEDT
-    py -3.14 ansys_maps.py --run --element QP_sh  # собрать и запустить (СЧИТАЕТ, берёт лицензию)
+    py -3.14 ansys_maps.py --plan                  # что будет сделано, без запуска
+    py -3.14 ansys_maps.py --element OP --run      # собрать и запустить (СЧИТАЕТ, берёт лицензию)
+    py -3.14 ansys_maps.py --element OP --measure  # физическая проверка снятого
+    py -3.14 ansys_maps.py --element OP --register # завести в реестр карт
 """
 from __future__ import annotations
 
@@ -28,7 +32,7 @@ import re
 import subprocess
 import sys
 
-REQUEST = os.path.join("workspace", "tables", "map_request_quadrupoles.csv")
+REQUEST = os.path.join("workspace", "tables", "map_request.csv")
 AEDT_EXE = r"C:\Program Files\ANSYS Inc\v252\AnsysEM\ansysedt.exe"
 PROJECTS = r"C:\Sasha\Work\ansys_projects"
 KD = r"C:\Sasha\Work\SILA\ansis approximations\KD"
@@ -37,55 +41,139 @@ KD = r"C:\Sasha\Work\SILA\ansis approximations\KD"
 # и карта становится несопоставимой с серией. Менять нельзя.
 QUANTITY = "B_Vector"
 
-# Проект, дизайн, сетап и имя токовой переменной. Проверено по .aedt: во всех проектах ток задан
-# ДИЗАЙНОВОЙ переменной (без префикса $), через которую выражены все возбуждения.
+# Проект, дизайн, сетап и соответствие «обмотка → переменная дизайна». Проверено по .aedt: токи
+# везде заданы ДИЗАЙНОВЫМИ переменными (без префикса $), через которые выражены все возбуждения.
+# `bare` — стиль имени файла: у квадруполей `QP_sh_1647A.fld` без токена обмотки, у остальных
+# `OP_I1_100A.fld` и `SP_I1_1891A_I2_800A.fld`.
 DESIGN = {
-    "QP_sh": dict(project="QP_sh", design="Maxwell3DDesign1", setup="Setup1", var="current"),
-    "QP_L": dict(project="QP_L", design="Maxwell3DDesign1", setup="Setup1", var="current"),
+    "QP_sh": dict(project="QP_sh", vars={"I": "current"}, folder="qp_sh_steps", bare=True,
+                  turns={"I": 68}),
+    "QP_L": dict(project="QP_L", vars={"I": "current"}, folder="qp_L_steps", bare=True,
+                 turns={"I": 85}),
+    "OP": dict(project="OP", vars={"I1": "I"}, folder="op_step", bare=False,
+               turns={"I1": 34}),
+    "SP": dict(project="SP", vars={"I1": "I1", "I2": "I2"}, folder="SP_steps", bare=False,
+               turns={"I1": 41, "I2": 390}),
+    "DQ": dict(project="DQ", vars={"I1": "I1", "I2": "I2", "I3": "I_cor"}, folder="DQ_steps",
+               bare=False, turns={"I1": 53, "I2": 13, "I3": 90}),
+    "corrector": dict(project="corrector", folder="corrector_steps", bare=False,
+                      vars={"main": "I_main", "c1": "I_cor_1", "c2": "I_cor_2",
+                            "c3": "I_cor_3", "c4": "I_cor_4"},
+                      turns={"main": 622, "c1": 548, "c2": 548, "c3": 548, "c4": 548}),
 }
+for _d in DESIGN.values():
+    _d.setdefault("design", "Maxwell3DDesign1")
+    _d.setdefault("setup", "Setup1")
+
+ORDER_BY_ELEMENT = {"QP_sh": 2, "QP_L": 2, "SP": 3, "OP": 4, "DQ": 2, "corrector": 1}
 
 HDR = re.compile(r"Grid Output Min:\s*\[(.*?)\]\s*Max:\s*\[(.*?)\]\s*Grid Size:\s*\[(.*?)\]")
+BH_BLOCK = re.compile(r"Points\[\d+:\s*([0-9eE.,+\-\s]+)\]")
 
+
+# ───────────────────────────── имена и папки ─────────────────────────────
+
+def folder_of(element):
+    return os.path.join(KD, element, DESIGN[element]["folder"])
+
+
+def order_of(element):
+    """Обмотки в порядке, в котором они идут в имени файла и в скрипте."""
+    return list(DESIGN[element]["vars"])
+
+
+def map_name(element, currents):
+    """Имя файла по набору токов: `SP_I1_1891A_I2_800A.fld`, у квадруполей `QP_sh_1647A.fld`."""
+    used = [(w, currents[w]) for w in order_of(element) if currents.get(w)]
+    if DESIGN[element]["bare"]:
+        return f"{element}_{int(used[0][1])}A.fld"
+    return element + "".join(f"_{w}_{int(v)}A" for w, v in used) + ".fld"
+
+
+def parse_name(element, fname):
+    """Обратный разбор имени в набор токов; None, если имя не наше."""
+    base = os.path.basename(fname)
+    if not base.startswith(element + "_") or not base.endswith(".fld"):
+        return None
+    body = base[len(element) + 1:-4]
+    if DESIGN[element]["bare"]:
+        m = re.fullmatch(r"(-?\d+)A", body)
+        return {order_of(element)[0]: int(m.group(1))} if m else None
+    # Разбор ПО ТОКЕНАМ, а не регуляркой: в имени `main_0A_c1_c2_c3_c4_1808A` один ток относится
+    # сразу к четырём обмоткам, а регулярка `(имя)_(число)A` вдобавок затягивала подчёркивание в
+    # имя обмотки (`_I2` вместо `I2`) и молча отбрасывала все комбинации.
+    known, out, pend = set(order_of(element)), {}, []
+    for tok in body.split("_"):
+        m = re.fullmatch(r"(-?\d+)A", tok)
+        if m:
+            if not pend:
+                return None
+            for w in pend:
+                out[w] = int(m.group(1))
+            pend = []
+        elif tok in known:
+            pend.append(tok)
+        else:
+            return None
+    return out if out and not pend else None
+
+
+def excitation(element, currents):
+    """Строка возбуждения в конвенции реестра: `I1=1891;I2=800`."""
+    return ";".join(f"{w}={int(currents[w])}" for w in order_of(element) if currents.get(w))
+
+
+def map_id(element, currents):
+    used = [w for w in order_of(element) if currents.get(w)]
+    return f"{element}.{'+'.join(used)}." + "+".join(str(int(currents[w])) for w in used)
+
+
+# ───────────────────────────── сетка и заказ ─────────────────────────────
 
 def reference_grid(element):
     """Сетка и эталонная шапка — из уже снятой карты этого элемента. Руками не задаём."""
-    pats = [os.path.join(KD, element, d, f"{element}_*.fld")
-            for d in (f"{element.lower()}_steps", f"qp_{element.split('_')[-1]}_steps", "")]
-    for p in pats:
-        for f in sorted(glob.glob(p)):
-            with open(f, encoding="utf-8", errors="ignore") as fh:
-                head = fh.readline()
-            m = HDR.search(head)
-            if m:
-                return dict(sample=f, header=head.rstrip("\n"),
-                            lo=m.group(1).split(), hi=m.group(2).split(), step=m.group(3).split())
+    for f in sorted(glob.glob(os.path.join(folder_of(element), f"{element}_*.fld"))):
+        with open(f, encoding="utf-8", errors="ignore") as fh:
+            head = fh.readline()
+        m = HDR.search(head)
+        if m:
+            return dict(sample=f, header=head.rstrip("\n"),
+                        lo=m.group(1).split(), hi=m.group(2).split(), step=m.group(3).split())
     raise SystemExit(f"{element}: не нашёл ни одной снятой карты, не с чем сверить сетку")
 
 
 def jobs(element=None, path=REQUEST):
+    """Заказ: строки `элемент;возбуждение;назначение`, возбуждение вида `I1=1477;I2=800`."""
     if not os.path.exists(path):
         raise SystemExit(f"нет таблицы заказа {path}")
     out = []
-    for r in csv.DictReader(open(path, encoding="utf-8-sig"), delimiter=";"):
-        if element and r["элемент"] != element:
+    for r in csv.DictReader(open(path, encoding="utf-8"), delimiter=";"):
+        el = r["элемент"]
+        if element and el != element:
             continue
-        folder = os.path.join(KD, *r["папка"].split("/")[1:]).rstrip(os.sep)
-        out.append(dict(element=r["элемент"], amp_turns=int(r["ампер_витков"]),
-                        name=r["имя_файла"], folder=folder,
-                        target=os.path.join(folder, r["имя_файла"]), why=r["назначение"]))
+        cur = {}
+        for part in r["возбуждение"].split(";"):
+            if "=" in part:
+                w, v = part.split("=", 1)
+                cur[w.strip()] = int(float(v))
+        nm = map_name(el, cur)
+        out.append(dict(element=el, currents=cur, name=nm, folder=folder_of(el),
+                        target=os.path.join(folder_of(el), nm), why=r.get("назначение", "")))
     return out
 
+
+# ───────────────────────────── скрипт для AEDT ─────────────────────────────
 
 def build_script(element, todo, grid, out_path):
     """Скрипт для интерпретатора AEDT. Внутри доступен только oDesktop — библиотек не подключаем.
 
-    Проект НЕ сохраняем и в конце возвращаем току прежнее значение: расчёт не должен менять
-    состояние чужого проекта на диске."""
+    Проект НЕ сохраняем и в конце возвращаем токам прежние значения: расчёт не должен менять
+    состояние чужого проекта на диске. Незадействованные обмотки ЯВНО зануляются — иначе точка
+    унаследует ток от предыдущей."""
     d = DESIGN[element]
     lines = [
         "# -*- coding: utf-8 -*-",
         "# Сгенерировано ansys_maps.py. Запуск: ansysedt.exe -ng -runscriptandexit <этот файл>",
-        "import os",
         "import ScriptEnv",
         'ScriptEnv.Initialize("Ansoft.ElectronicsDesktop")',
         # ГОТЧА: SetActiveProject не возвращает None для незагруженного проекта, а БРОСАЕТ
@@ -95,8 +183,9 @@ def build_script(element, todo, grid, out_path):
         f'    oProject = oDesktop.SetActiveProject("{d["project"]}")',
         f'oDesign = oProject.SetActiveDesign("{d["design"]}")',
         'oModule = oDesign.GetModule("FieldsReporter")',
-        f'OLD = oDesign.GetVariableValue("{d["var"]}")',
-        'oDesktop.AddMessage("", "", 0, "исходное значение тока: " + str(OLD))',
+        f"VARS = {list(d['vars'].values())!r}",
+        "OLD = dict((v, oDesign.GetVariableValue(v)) for v in VARS)",
+        'oDesktop.AddMessage("", "", 0, "исходные токи: " + str(OLD))',
         "",
         f"LO = {grid['lo']!r}",
         f"HI = {grid['hi']!r}",
@@ -104,10 +193,12 @@ def build_script(element, todo, grid, out_path):
         "",
     ]
     for j in todo:
-        val = f"{j['amp_turns']}A"
+        vals = {d["vars"][w]: int(j["currents"].get(w, 0)) for w in order_of(element)}
+        var_list = ", ".join(f'"{v}:=", "{a}A"' for v, a in vals.items())
+        lines.append(f'oDesktop.AddMessage("", "", 0, "=== {j["name"]} ===")')
+        for v, a in vals.items():
+            lines.append(f'oDesign.SetVariableValue("{v}", "{a}A")')
         lines += [
-            f'oDesktop.AddMessage("", "", 0, "=== {j["name"]}: ток {val} ===")',
-            f'oDesign.SetVariableValue("{d["var"]}", "{val}")',
             f'oDesign.Analyze("{d["setup"]}", True)',
             'oModule.CalcStack("clear")',
             # Именованное выражение, а НЕ сырое EnterQty("B"): иначе величина в файле называется
@@ -117,14 +208,15 @@ def build_script(element, todo, grid, out_path):
             f'    r"{j["target"]}",',
             "    LO, HI, STEP,",
             f'    "{d["setup"]} : LastAdaptive",',
-            f'    ["{d["var"]}:=", "{val}"],',
+            f"    [{var_list}],",
             # exportoption=True — писать столбцы X, Y, Z. При False AEDT кладёт только компоненты
             # поля, файл выходит втрое короче и несопоставим с прежними картами.
             '    True, "Cartesian", [0, 0, 0], False)',
             "",
         ]
     lines += [
-        f'oDesign.SetVariableValue("{d["var"]}", OLD)',          # вернуть как было
+        "for v in VARS:",
+        "    oDesign.SetVariableValue(v, OLD[v])",          # вернуть как было
         'oDesktop.AddMessage("", "", 0, "=== все точки пройдены ===")',
     ]
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
@@ -132,21 +224,20 @@ def build_script(element, todo, grid, out_path):
     return out_path
 
 
-BH_BLOCK = re.compile(r"Points\[\d+:\s*([0-9eE.,+\-\s]+)\]")
-
+# ───────────────────────────── сверка материала ─────────────────────────────
 
 def project_bh(element):
     """Кривая намагничивания, ЛЕЖАЩАЯ В ПРОЕКТЕ прямо сейчас (а не та, что в имени материала).
 
-    ИМЯ МАТЕРИАЛА ЛЖЁТ. В QP_sh материал зовётся `steel_1008 _custom`, а содержит
+    ИМЯ МАТЕРИАЛА ЛЖЁТ: в QP_sh материал звался `steel_1008 _custom`, а содержал
     низконасыщающуюся кривую (B_max 1.70 Тл вместо 2.59) — остаток от опытов со сменой материала.
     Карты, снятые на ней, несопоставимы с производственной серией, и по имени этого не видно."""
     import numpy as np
     p = os.path.join(PROJECTS, f"{DESIGN[element]['project']}.aedt")
     txt = open(p, encoding="utf-8", errors="ignore").read()
-    # ГОТЧА: в проекте несколько материалов с кривыми (у QP_sh их четыре — библиотечные steel_1008,
-    # steel_1010, steel_stainless и правленый steel_1008 _custom). Брать ПЕРВЫЙ блок BHCoordinates
-    # нельзя: он библиотечный и к железу отношения не имеет. Ищем НАЗНАЧЕННЫЙ материал.
+    # ГОТЧА: в проекте НЕСКОЛЬКО материалов с кривыми (у QP_sh четыре — три библиотечных плюс
+    # правленый). Брать ПЕРВЫЙ блок BHCoordinates нельзя: он библиотечный и к железу отношения
+    # не имеет. Ищем кривую НАЗНАЧЕННОГО материала.
     assigned = [m for m in re.findall(r"MaterialValue='\"([^\"]+)\"'", txt)
                 if m.lower() not in ("copper", "vacuum", "air")]
     if not assigned:
@@ -166,11 +257,11 @@ def project_bh(element):
 
 
 def check_material(element, expected="workspace/materials/steel_1008_bh.csv", tol=1e-4):
-    """Сверка кривой проекта с ожидаемой. Возвращает (совпало, имя, B_max проекта, B_max файла)."""
+    """Сверка кривой проекта с ожидаемой: (совпало, имя, B_max проекта, B_max файла)."""
     import numpy as np
     name, bh = project_bh(element)
     if bh is None:
-        return None, None, None, None
+        return None, name, None, None
     ref = np.loadtxt(expected, delimiter=";", skiprows=1)
     same = (len(ref) == len(bh) and float(np.abs(ref - bh).max()) < tol)
     return same, name, float(bh[:, 1].max()), float(ref[:, 1].max())
@@ -180,10 +271,9 @@ def guard_material(element, expected="workspace/materials/steel_1008_bh.csv"):
     """Не считать, пока в проекте не та кривая намагничивания.
 
     Молча снятая серия на чужом материале несопоставима с прежними картами, а по ИМЕНИ материала
-    этого не видно: в QP_sh он зовётся `steel_1008 _custom`, а содержит низконасыщающуюся кривую
-    (B_max 1.70 против 2.59 Тл) — остаток от опытов со сменой материала. Поймали это тем, что
-    пересчёт уже снятой карты 6588 А·в дал кик на 36% слабее, при полном совпадении в линейном
-    режиме: геометрия и возбуждение те же, разошлось только насыщение."""
+    этого не видно. Поймали тем, что пересчёт уже снятой карты 6588 А·в дал кик на 36% слабее при
+    полном совпадении в линейном режиме: геометрия и возбуждение те же, разошлось только
+    насыщение."""
     same, name, bmax_p, bmax_r = check_material(element, expected)
     if same is None:
         print("  ВНИМАНИЕ: кривую из проекта прочитать не удалось — сверка материала пропущена")
@@ -200,12 +290,13 @@ def guard_material(element, expected="workspace/materials/steel_1008_bh.csv"):
     raise SystemExit("остановлено: несовпадение кривой намагничивания")
 
 
+# ───────────────────────────── проверка снятого ─────────────────────────────
+
 def probe(path, order=2, r=1e-3, nth=64):
     """Физическая проверка карты: максимум |B| и интегральная гармоника.
 
     Сверки шапки НЕ ДОСТАТОЧНО. Экспорт, сделанный до окончания расчёта или без пересчёта после
-    смены тока, даёт файл с идеально правильной шапкой и полем от ПРЕЖНЕГО решения. Поймали такое
-    на QP_sh_14500A: |B| в нём оказалось слабее, чем на карте 3294 А·в."""
+    смены тока, даёт файл с идеально правильной шапкой и полем от ПРЕЖНЕГО решения."""
     import numpy as np
     from field_quality import load, _circle
     h, B = load(path)
@@ -221,24 +312,32 @@ def probe(path, order=2, r=1e-3, nth=64):
     return mx, abs(c) / r ** (order - 1)
 
 
-def measure(element, order=2):
-    """Все снятые карты элемента по возрастанию тока. Кривая насыщения обязана РАСТИ: любое
-    падение при большем токе — испорченный экспорт, а не физика."""
-    folder = os.path.join(KD, element, f"{element.lower()}_steps")
-    if not os.path.isdir(folder):
-        folder = os.path.join(KD, element, f"qp_{element.split('_')[-1]}_steps")
+def measure(element, order=None, winding=None):
+    """Снятые карты элемента по возрастанию тока. Кривая насыщения обязана РАСТИ: падение при
+    большем токе — испорченный экспорт, а не физика.
+
+    Монотонность проверяется ТОЛЬКО по одиночным обмоткам: у комбинаций ток не одномерен, и
+    сравнивать их по сумме модулей бессмысленно."""
+    order = order or ORDER_BY_ELEMENT.get(element, 2)
     rows = []
-    for f in sorted(glob.glob(os.path.join(folder, f"{element}_*A.fld"))):
-        m = re.search(rf"{re.escape(element)}_(\d+)A\.fld$", os.path.basename(f))
-        if not m:
+    for f in sorted(glob.glob(os.path.join(folder_of(element), f"{element}_*.fld"))):
+        cur = parse_name(element, f)
+        if not cur:
+            continue
+        if winding and set(cur) != {winding}:
             continue
         mx, hm = probe(f, order)
-        rows.append((int(m.group(1)), os.path.basename(f), mx, hm))
+        rows.append((sum(abs(v) for v in cur.values()), os.path.basename(f), mx, hm, cur))
     rows.sort()
-    # Критерий — ГАРМОНИКА (то, что видит пучок), а не максимум |B|. Максимум сидит в железе, и при
-    # насыщении локальный пик законно смещается и слегка проседает: у QP_sh с 9882 на 13176 А·в
-    # max|B| падает 2.974 → 2.907, тогда как гармоника растёт 13.59 → 14.12. Это исправная карта.
-    bad = [r for i, r in enumerate(rows) if i and r[3] < rows[i - 1][3] * 0.99]
+    # Критерий — ГАРМОНИКА (то, что видит пучок), а не максимум |B|: максимум сидит в железе и при
+    # насыщении законно проседает (QP_sh 9882→13176: max|B| 2.974→2.907, гармоника растёт).
+    by_w = {}
+    for r in rows:
+        if len(r[4]) == 1:
+            by_w.setdefault(next(iter(r[4])), []).append(r)
+    bad = []
+    for seq in by_w.values():
+        bad += [r for i, r in enumerate(seq) if i and r[3] < seq[i - 1][3] * 0.99]
     return rows, bad
 
 
@@ -251,8 +350,7 @@ def compare_maps(a_path, b_path):
     head = [open(p, encoding="utf-8", errors="ignore").readline().rstrip("\n")
             for p in (a_path, b_path)]
     if A.shape != B.shape:
-        return dict(header_same=head[0] == head[1], shape_same=False,
-                    shape=(A.shape, B.shape))
+        return dict(header_same=head[0] == head[1], shape_same=False, shape=(A.shape, B.shape))
     d = np.linalg.norm(A - B, axis=-1)
     scale = float(np.linalg.norm(A, axis=-1).max())
     return dict(header_same=head[0] == head[1], shape_same=True, shape=A.shape,
@@ -261,25 +359,160 @@ def compare_maps(a_path, b_path):
                 identical=bool(np.array_equal(A, B)), scale=scale)
 
 
-def cmd_repro(element, amp_turns, outdir):
+def verify(element, todo, grid):
+    """Сверка шапок: новая карта обязана быть снята на ТОЙ ЖЕ сетке, что эталонная."""
+    ok, bad, missing = [], [], []
+    for j in todo:
+        if not os.path.exists(j["target"]):
+            missing.append(j["name"]); continue
+        with open(j["target"], encoding="utf-8", errors="ignore") as fh:
+            head = fh.readline().rstrip("\n")
+        (ok if head.strip() == grid["header"].strip() else bad).append((j["name"], head))
+    return ok, bad, missing
+
+
+# ───────────────────────────── регистрация ─────────────────────────────
+
+def cmd_register(element, material="workspace/materials/steel_1008_bh.csv"):
+    """Завести снятые карты в реестр: .fld → копия в fields_raw, .bin в fields_bin, строка в CSV.
+
+    Переконвертирует и УЖЕ зарегистрированные карты, если их .fld в KD новее .bin: после
+    `--recompute` файлы в KD обновились, а .bin остался прежним, и модель молча читала бы
+    старые данные."""
+    import shutil
+
+    from field_quality import load
+    from symmetrize_map import write_bin
+
+    reg_path = os.path.join("workspace", "tables", "field_maps.csv")
+    rows = list(csv.DictReader(open(reg_path, encoding="utf-8"), delimiter=";"))
+    cols = list(rows[0].keys())
+    have = {r["map_id"] for r in rows}
+    proto = next(r for r in rows if r["element"] == element)
+    added = reconv = 0
+    for f in sorted(glob.glob(os.path.join(folder_of(element), f"{element}_*.fld"))):
+        cur = parse_name(element, f)
+        if not cur:
+            continue
+        mid = map_id(element, cur)
+        raw = f"model/{element}/{mid}.fld"
+        bin_ = f"model/{element}/{mid}.bin"
+        raw_abs = os.path.join("workspace", "fields_raw", *raw.split("/"))
+        bin_abs = os.path.join("workspace", "fields_bin", *bin_.split("/"))
+        if not os.path.exists(bin_abs) or os.path.getmtime(f) > os.path.getmtime(bin_abs):
+            os.makedirs(os.path.dirname(raw_abs), exist_ok=True)
+            os.makedirs(os.path.dirname(bin_abs), exist_ok=True)
+            shutil.copy2(f, raw_abs)
+            h, B = load(f)
+            write_bin(h, B, bin_abs, nominal_arg=float(sum(abs(v) for v in cur.values())))
+            if mid in have:
+                reconv += 1
+                print(f"  переконвертирована {mid} (.fld новее .bin)")
+        if mid in have:
+            continue
+        turns = DESIGN[element]["turns"]
+        amps = ";".join(f"{w}={cur[w] / turns.get(w, 1):.2f}"
+                        for w in order_of(element) if cur.get(w))
+        r = {c: "" for c in cols}
+        r.update({"map_id": mid, "element": element,
+                  "winding": "+".join(w for w in order_of(element) if cur.get(w)),
+                  "device_type_id": proto["device_type_id"],
+                  "amp_turns": str(sum(abs(v) for v in cur.values())),
+                  "current_a": amps, "excitation": excitation(element, cur),
+                  "split": "test" if added % 3 == 2 else "train",
+                  "grid": proto["grid"], "material_curve": material,
+                  "raw_path": raw, "bin_path": bin_, "source_fld": f.replace(os.sep, "/"),
+                  "note": "автоматическое снятие"})
+        rows.append(r)
+        added += 1
+        print(f"  добавлена {mid}  ({excitation(element, cur)}, {r['split']})")
+    if added:
+        # БЕЗ BOM: read_registry открывает реестр как обычный utf-8, и с BOM первый столбец
+        # превращается в "\ufeffmap_id" — вся цепочка падает на KeyError('map_id').
+        with open(reg_path, "w", encoding="utf-8", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=cols, delimiter=";")
+            w.writeheader()
+            w.writerows(rows)
+    print(f"  итог: добавлено {added}, переконвертировано {reconv}, всего у {element} "
+          f"{sum(1 for r in rows if r['element'] == element)} карт")
+
+
+# ───────────────────────────── команды счёта ─────────────────────────────
+
+def cmd_recompute(element, outdir, backup="_original", everything=False):
+    """Пересчитать УЖЕ СНЯТЫЕ карты, отложив оригиналы в сторону.
+
+    Зачем: серия должна быть снята ОДНИМ состоянием проекта. Между прогонами разных дней сидит
+    систематический сдвиг ~2.6% (замерено на шести картах QP_sh), а это порядок всей достигнутой
+    точности. Равномерный масштаб модель поглощает, но неравномерность — нет."""
+    import numpy as np
+    grid = reference_grid(element)                       # ДО переноса: иначе не с чем сверять
+    folder = folder_of(element)
+    rows, _ = measure(element)
+    if not rows:
+        raise SystemExit(f"{element}: нечего пересчитывать")
+    if not everything:
+        newest = max(os.path.getmtime(os.path.join(folder, r[1])) for r in rows)
+        old = [r for r in rows if os.path.getmtime(os.path.join(folder, r[1])) < newest - 86400]
+        if old:
+            print(f"  из {len(rows)} карт пересчитываются {len(old)} из прежних прогонов "
+                  f"(остальные сняты в последние сутки и уже согласованы)")
+            rows = old
+    bak = os.path.join(folder, backup)
+    os.makedirs(bak, exist_ok=True)
+    todo = []
+    for _, nm, _, _, cur in rows:
+        src, dst = os.path.join(folder, nm), os.path.join(bak, nm)
+        if os.path.exists(dst) and os.path.exists(src):
+            os.remove(src)
+        elif os.path.exists(src):
+            os.replace(src, dst)
+        todo.append(dict(element=element, currents=cur, name=nm, folder=folder,
+                         target=src, why="пересчёт"))
+    print(f"  оригиналы отложены в {bak} ({len(todo)} шт)")
+    guard_material(element)
+    sp = build_script(element, todo, grid, os.path.join(outdir, f"aedt_recompute_{element}.py"))
+    print(f"  скрипт: {sp}\n  запуск AEDT ({len(todo)} точек)…")
+    rc = subprocess.call([AEDT_EXE, "-ng", "-runscriptandexit", os.path.abspath(sp)])
+    print(f"  AEDT вернул {rc}\n")
+    print(f"  {'карта':34} {'прежде':>10} {'теперь':>10} {'расхождение':>12}")
+    diffs = []
+    for j in todo:
+        old_f, new_f = os.path.join(bak, j["name"]), j["target"]
+        if not (os.path.exists(old_f) and os.path.exists(new_f)):
+            print(f"  {j['name']:34}   нет файла"); continue
+        _, ho = probe(old_f, ORDER_BY_ELEMENT.get(element, 2))
+        _, hn = probe(new_f, ORDER_BY_ELEMENT.get(element, 2))
+        d = 100.0 * (hn - ho) / ho if ho else float("nan")
+        diffs.append(d)
+        print(f"  {j['name']:34} {ho:10.5g} {hn:10.5g} {d:11.2f}%")
+    if diffs:
+        print(f"  разброс прогон-к-прогону: средний модуль {np.mean(np.abs(diffs)):.2f}%, "
+              f"максимум {np.max(np.abs(diffs)):.2f}%")
+    return diffs
+
+
+def cmd_repro(element, spec, outdir):
     """Пересчитать УЖЕ СНЯТУЮ карту в отдельный файл и сравнить с ней. Оригинал не трогаем."""
     grid = reference_grid(element)
-    folder = os.path.dirname(grid["sample"])
-    orig = os.path.join(folder, f"{element}_{amp_turns}A.fld")
+    cur = {}
+    for part in spec.split(";"):
+        if "=" in part:
+            w, v = part.split("=", 1)
+            cur[w.strip()] = int(float(v))
+        else:
+            cur[order_of(element)[0]] = int(float(part))
+    orig = os.path.join(folder_of(element), map_name(element, cur))
     if not os.path.exists(orig):
         raise SystemExit(f"нет исходной карты {orig}")
     os.makedirs(outdir, exist_ok=True)
-    repro = os.path.join(os.path.abspath(outdir), f"{element}_{amp_turns}A__repro.fld")
-    job = [dict(element=element, amp_turns=amp_turns, name=os.path.basename(repro),
-                folder=outdir, target=repro, why="воспроизведение")]
-    sp = build_script(element, job, grid, os.path.join(outdir, f"aedt_repro_{element}.py"))
-    lock = os.path.join(PROJECTS, f"{DESIGN[element]['project']}.aedt.lock")
-    if os.path.exists(lock):
-        raise SystemExit(f"проект открыт в AEDT ({lock}) — закройте его")
+    nm = map_name(element, cur).replace(".fld", "__repro.fld")
+    repro = os.path.join(os.path.abspath(outdir), nm)
+    job = [dict(element=element, currents=cur, name=nm, folder=outdir,
+                target=repro, why="воспроизведение")]
     guard_material(element)
-    print(f"  оригинал: {orig}")
-    print(f"  пересчёт: {repro}")
-    print(f"  скрипт:   {sp}\n  запуск AEDT…")
+    sp = build_script(element, job, grid, os.path.join(outdir, f"aedt_repro_{element}.py"))
+    print(f"  оригинал: {orig}\n  пересчёт: {repro}\n  скрипт:   {sp}\n  запуск AEDT…")
     rc = subprocess.call([AEDT_EXE, "-ng", "-runscriptandexit", os.path.abspath(sp)])
     print(f"  AEDT вернул {rc}")
     if not os.path.exists(repro):
@@ -296,239 +529,94 @@ def cmd_repro(element, amp_turns, outdir):
     return r
 
 
-TURNS = {"QP_sh": 68, "QP_L": 85, "SP": 41, "OP": 34, "DQ": 53}
-WINDING = {"QP_sh": "I", "QP_L": "I", "OP": "I1", "SP": "I1"}
-
-
-def cmd_register(element, material="workspace/materials/steel_1008_bh.csv"):
-    """Завести снятые карты в реестр: .fld → копия в fields_raw, .bin в fields_bin, строка в CSV.
-
-    Переконвертирует и УЖЕ зарегистрированные карты, если их .fld в KD новее, чем .bin: после
-    `--recompute` файлы в KD обновились, а .bin остался августовским, и модель молча читала бы
-    старые данные."""
-    import shutil
-
-    import numpy as np
-    from field_quality import load
-    from symmetrize_map import write_bin
-
-    reg_path = os.path.join("workspace", "tables", "field_maps.csv")
-    rows = list(csv.DictReader(open(reg_path, encoding="utf-8-sig"), delimiter=";"))
-    cols = list(rows[0].keys())
-    have = {r["map_id"]: r for r in rows}
-    proto = next(r for r in rows if r["element"] == element)
-    wd = WINDING.get(element, "I")
-    n = TURNS.get(element, 1)
-
-    grid = reference_grid(element)
-    folder = os.path.dirname(grid["sample"])
-    added = reconv = 0
-    for f in sorted(glob.glob(os.path.join(folder, f"{element}_*A.fld"))):
-        m = re.search(rf"{re.escape(element)}_(\d+)A\.fld$", os.path.basename(f))
-        if not m:
-            continue
-        at = int(m.group(1))
-        mid = f"{element}.{wd}.{at}"
-        raw = os.path.join("model", element, f"{mid}.fld")
-        bin_ = os.path.join("model", element, f"{mid}.bin")
-        raw_abs = os.path.join("workspace", "fields_raw", raw)
-        bin_abs = os.path.join("workspace", "fields_bin", bin_)
-        fresh = (not os.path.exists(bin_abs)
-                 or os.path.getmtime(f) > os.path.getmtime(bin_abs))
-        if fresh:
-            os.makedirs(os.path.dirname(raw_abs), exist_ok=True)
-            os.makedirs(os.path.dirname(bin_abs), exist_ok=True)
-            shutil.copy2(f, raw_abs)
-            h, B = load(f)
-            write_bin(h, B, bin_abs, nominal_arg=float(at))
-            if mid in have:
-                reconv += 1
-                print(f"  переконвертирована {mid} (.fld новее .bin)")
-        if mid in have:
-            continue
-        r = {c: "" for c in cols}
-        r.update({"map_id": mid, "element": element, "winding": wd,
-                  "device_type_id": proto["device_type_id"], "amp_turns": str(at),
-                  "current_a": f"{wd}={at / n:.2f}", "excitation": f"{wd}={at}",
-                  "split": "test" if added % 3 == 2 else "train",
-                  "grid": proto["grid"], "material_curve": material,
-                  "raw_path": raw.replace(os.sep, "/"), "bin_path": bin_.replace(os.sep, "/"),
-                  "source_fld": f.replace(os.sep, "/"),
-                  "note": "серия 2026-09-04, автоматическое снятие"})
-        rows.append(r)
-        added += 1
-        print(f"  добавлена {mid}  ({at} А·в = {at / n:.1f} А, {r['split']})")
-    if added:
-        # БЕЗ BOM: read_registry открывает реестр как обычный utf-8, и с BOM первый столбец
-        # превращается в "﻿map_id" — вся цепочка падает на KeyError('map_id').
-        with open(reg_path, "w", encoding="utf-8", newline="") as fh:
-            w = csv.DictWriter(fh, fieldnames=cols, delimiter=";")
-            w.writeheader()
-            w.writerows(rows)
-    print(f"  итог: добавлено {added}, переконвертировано {reconv}, всего у {element} "
-          f"{sum(1 for r in rows if r['element'] == element)} карт")
-
-
-def cmd_recompute(element, outdir, backup="_original", everything=False):
-    """Пересчитать УЖЕ СНЯТЫЕ карты, отложив оригиналы в сторону.
-
-    Зачем: серия должна быть снята ОДНИМ состоянием проекта. Между августовским прогоном и
-    сегодняшним сидит систематика ~2% от разброса адаптивной сетки — это порядок всей достигнутой
-    точности (у QP_sh модель даёт 1.2% по току), так что смешивать карты разных прогонов нельзя.
-
-    Оригиналы не затираются, а ПЕРЕЕЗЖАЮТ в подпапку: по ним потом меряется величина разброса
-    сразу на всех точках, а не на одной."""
-    grid = reference_grid(element)                       # ДО переноса: иначе не с чем сверять
-    folder = os.path.dirname(grid["sample"])
-    rows, _ = measure(element)
-    if not rows:
-        raise SystemExit(f"{element}: нечего пересчитывать")
-    # Пересчитывать имеет смысл только карты ИЗ ПРЕЖНИХ ПРОГОНОВ: снятые сегодня уже согласованы
-    # между собой. Отбор по времени файла — новее чем за сутки до самой свежей карты считаем
-    # «своими». `--all` заставляет пересчитать всё.
-    if not everything:
-        newest = max(os.path.getmtime(os.path.join(folder, nm)) for _, nm, _, _ in rows)
-        old = [r for r in rows if os.path.getmtime(os.path.join(folder, r[1])) < newest - 86400]
-        if old:
-            print(f"  из {len(rows)} карт пересчитываются {len(old)} из прежних прогонов "
-                  f"(остальные сняты в последние сутки и уже согласованы)")
-            rows = old
-    bak = os.path.join(folder, backup)
-    os.makedirs(bak, exist_ok=True)
-    todo = []
-    for ni, nm, _, _ in rows:
-        src = os.path.join(folder, nm)
-        dst = os.path.join(bak, nm)
-        if os.path.exists(dst):
-            os.remove(src) if os.path.exists(src) else None
-        elif os.path.exists(src):
-            os.replace(src, dst)
-        todo.append(dict(element=element, amp_turns=ni, name=nm, folder=folder,
-                         target=src, why="пересчёт"))
-    print(f"  оригиналы отложены в {bak} ({len(todo)} шт)")
-    guard_material(element)
-    sp = build_script(element, todo, grid, os.path.join(outdir, f"aedt_recompute_{element}.py"))
-    print(f"  скрипт: {sp}\n  запуск AEDT ({len(todo)} точек)…")
-    rc = subprocess.call([AEDT_EXE, "-ng", "-runscriptandexit", os.path.abspath(sp)])
-    print(f"  AEDT вернул {rc}\n")
-    print(f"  {'А·витков':>9} {'август':>10} {'сегодня':>10} {'расхождение':>12}")
-    import numpy as np
-    diffs = []
-    for j in todo:
-        old, new = os.path.join(bak, j["name"]), j["target"]
-        if not (os.path.exists(old) and os.path.exists(new)):
-            print(f"  {j['amp_turns']:9d}   нет файла"); continue
-        _, ho = probe(old)
-        _, hn = probe(new)
-        d = 100.0 * (hn - ho) / ho if ho else float("nan")
-        diffs.append(d)
-        print(f"  {j['amp_turns']:9d} {ho:10.5g} {hn:10.5g} {d:11.2f}%")
-    if diffs:
-        print(f"  разброс прогон-к-прогону: средний модуль {np.mean(np.abs(diffs)):.2f}%, "
-              f"максимум {np.max(np.abs(diffs)):.2f}%")
-    return diffs
-
-
-def verify(element, todo, grid):
-    """Сверка шапок: новая карта обязана быть снята на ТОЙ ЖЕ сетке, что эталонная."""
-    ok, bad, missing = [], [], []
-    for j in todo:
-        if not os.path.exists(j["target"]):
-            missing.append(j["name"]); continue
-        with open(j["target"], encoding="utf-8", errors="ignore") as fh:
-            head = fh.readline().rstrip("\n")
-        (ok if head.strip() == grid["header"].strip() else bad).append((j["name"], head))
-    return ok, bad, missing
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--element", help="только этот элемент (иначе все из таблицы)")
     ap.add_argument("--plan", action="store_true", help="показать план, ничего не делать")
     ap.add_argument("--script", action="store_true", help="собрать скрипт для AEDT, не запускать")
-    ap.add_argument("--run", action="store_true", help="собрать И ЗАПУСТИТЬ (считает, берёт лицензию)")
+    ap.add_argument("--run", action="store_true",
+                    help="собрать И ЗАПУСТИТЬ (считает, берёт лицензию)")
     ap.add_argument("--verify", action="store_true", help="сверить шапки уже снятых карт")
     ap.add_argument("--measure", action="store_true",
-                    help="физическая проверка снятых карт: |B| обязано расти с током")
-    ap.add_argument("--order", type=int, default=2, help="порядок гармоники для проверки")
-    ap.add_argument("--material", default="workspace/materials/steel_1008_bh.csv",
-                    help="кривая, на которой ДОЛЖНА сниматься серия")
-    ap.add_argument("--limit", type=int, help="взять только первые N точек из оставшихся: "
-                                             "первый прогон разумно делать на ОДНОЙ")
+                    help="физическая проверка снятых карт: гармоника обязана расти с током")
     ap.add_argument("--register", action="store_true",
                     help="завести снятые карты в реестр (.fld -> .bin -> строка в field_maps.csv)")
-    ap.add_argument("--all", action="store_true",
-                    help="с --recompute: пересчитать ВСЕ карты, а не только из прежних прогонов")
     ap.add_argument("--recompute", action="store_true",
                     help="пересчитать УЖЕ СНЯТЫЕ карты (оригиналы переезжают в подпапку)")
-    ap.add_argument("--repro", type=int, metavar="А·ВИТКОВ",
-                    help="пересчитать УЖЕ СНЯТУЮ карту и сравнить с ней (оригинал не трогается)")
+    ap.add_argument("--all", action="store_true",
+                    help="с --recompute: пересчитать ВСЕ карты, а не только из прежних прогонов")
+    ap.add_argument("--repro", metavar="ВОЗБУЖДЕНИЕ",
+                    help="пересчитать снятую карту и сравнить, напр. 3294 или I1=1891;I2=800")
+    ap.add_argument("--order", type=int, help="порядок гармоники для проверки")
+    ap.add_argument("--material", default="workspace/materials/steel_1008_bh.csv",
+                    help="кривая, на которой ДОЛЖНА сниматься серия")
+    ap.add_argument("--limit", type=int, help="взять только первые N точек из оставшихся")
+    ap.add_argument("--request", default=REQUEST, help="таблица заказа")
     ap.add_argument("--outdir", default=os.path.join("workspace", "results", "aedt"))
     a = ap.parse_args(argv)
 
-    els = [a.element] if a.element else sorted({j["element"] for j in jobs()})
-    if a.register:
-        for el in els:
+    if a.repro or a.recompute or a.register or a.measure:
+        if not a.element:
+            raise SystemExit("этот режим требует --element")
+        el = a.element
+        if a.repro:
+            cmd_repro(el, a.repro, a.outdir)
+        elif a.recompute:
+            print(f"=== {el}: пересчёт снятой серии одним состоянием проекта")
+            cmd_recompute(el, a.outdir, everything=a.all)
+        elif a.register:
             print(f"=== {el}: регистрация карт")
             cmd_register(el, a.material)
+        else:
+            rows, bad = measure(el, a.order)
+            print(f"=== {el}: снято {len(rows)} карт, гармоника порядка "
+                  f"{a.order or ORDER_BY_ELEMENT.get(el, 2)}")
+            print(f"  {'|ток|, А·в':>11} {'файл':40} {'макс |B|, Тл':>13} {'гармоника':>12}")
+            for row in rows:
+                flag = "  ← ПАДЕНИЕ ПРИ БОЛЬШЕМ ТОКЕ" if row in bad else ""
+                print(f"  {row[0]:11d} {row[1]:40} {row[2]:13.4f} {row[3]:12.5g}{flag}")
+            print(f"  подозрительных карт: {len(bad)}")
         return 0
-    if a.recompute:
-        if len(els) != 1:
-            raise SystemExit("--recompute требует --element")
-        print(f"=== {els[0]}: пересчёт всей снятой серии одним состоянием проекта")
-        cmd_recompute(els[0], a.outdir, everything=a.all)
-        return 0
-    if a.repro:
-        if len(els) != 1:
-            raise SystemExit("--repro требует --element")
-        print(f"=== {els[0]}: воспроизведение карты {a.repro} А·в")
-        cmd_repro(els[0], a.repro, a.outdir)
-        return 0
+
+    els = [a.element] if a.element else sorted({j["element"] for j in jobs(path=a.request)})
     for el in els:
         if el not in DESIGN:
             print(f"{el}: проект не описан в DESIGN — пропускаю"); continue
         grid = reference_grid(el)
-        todo = jobs(el)
-        done = [j for j in todo if os.path.exists(j["target"])]
+        todo = jobs(el, a.request)
         left = [j for j in todo if not os.path.exists(j["target"])]
-        print(f"\n=== {el}: заказано {len(todo)}, уже снято {len(done)}, осталось {len(left)}")
+        print(f"\n=== {el}: заказано {len(todo)}, уже снято {len(todo) - len(left)}, "
+              f"осталось {len(left)}")
         print(f"  сетка из эталона {os.path.basename(grid['sample'])}: "
-              f"min {' '.join(grid['lo'])}  max {' '.join(grid['hi'])}  шаг {' '.join(grid['step'])}")
-        if a.measure:
-            rows, bad = measure(el, a.order)
-            print(f"  {'А·витков':>9} {'файл':24} {'макс |B|, Тл':>13} {'гармоника':>12}")
-            for ni, nm, mx, hm in rows:
-                flag = "  ← ПАДЕНИЕ ПРИ БОЛЬШЕМ ТОКЕ" if (ni, nm, mx, hm) in bad else ""
-                print(f"  {ni:9d} {nm:24} {mx:13.4f} {hm:12.5g}{flag}")
-            print(f"  испорченных карт: {len(bad)}")
-            continue
+              f"min {' '.join(grid['lo'])}  max {' '.join(grid['hi'])}  "
+              f"шаг {' '.join(grid['step'])}")
         if a.verify:
             ok, bad, missing = verify(el, todo, grid)
-            print(f"  сверка шапок: совпало {len(ok)}, РАСХОЖДЕНИЙ {len(bad)}, нет файла {len(missing)}")
+            print(f"  сверка шапок: совпало {len(ok)}, РАСХОЖДЕНИЙ {len(bad)}, "
+                  f"нет файла {len(missing)}")
             for n, h in bad:
                 print(f"    ! {n}\n      {h}")
             continue
         if a.limit:
             left = left[:a.limit]
         for j in left:
-            print(f"  {j['amp_turns']:7d} А·в → {j['name']:24} {j['why']}")
+            print(f"  {excitation(el, j['currents']):26} → {j['name']:36} {j['why']}")
         if a.plan or not left:
             continue
         sp = build_script(el, left, grid, os.path.join(a.outdir, f"aedt_job_{el}.py"))
         print(f"  скрипт: {sp}")
         if not a.run:
             continue
-        if not os.path.exists(AEDT_EXE):
-            raise SystemExit(f"не найден {AEDT_EXE}")
         lock = os.path.join(PROJECTS, f"{DESIGN[el]['project']}.aedt.lock")
         if os.path.exists(lock):
-            raise SystemExit(f"проект открыт в AEDT ({lock}) — закройте его перед пакетным прогоном")
-        guard_material(el)
+            raise SystemExit(f"проект открыт в AEDT ({lock}) — закройте его перед прогоном")
+        guard_material(el, a.material)
         print(f"  запуск AEDT ({len(left)} точек, это надолго)…")
         rc = subprocess.call([AEDT_EXE, "-ng", "-runscriptandexit", os.path.abspath(sp)])
         print(f"  AEDT вернул {rc}")
         ok, bad, missing = verify(el, todo, grid)
-        print(f"  итог: снято {len(ok)}, расхождений шапки {len(bad)}, не появилось {len(missing)}")
+        print(f"  итог: снято {len(ok)}, расхождений шапки {len(bad)}, "
+              f"не появилось {len(missing)}")
     return 0
 
 
