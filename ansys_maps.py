@@ -296,6 +296,56 @@ def cmd_repro(element, amp_turns, outdir):
     return r
 
 
+def cmd_recompute(element, outdir, backup="_original"):
+    """Пересчитать УЖЕ СНЯТЫЕ карты, отложив оригиналы в сторону.
+
+    Зачем: серия должна быть снята ОДНИМ состоянием проекта. Между августовским прогоном и
+    сегодняшним сидит систематика ~2% от разброса адаптивной сетки — это порядок всей достигнутой
+    точности (у QP_sh модель даёт 1.2% по току), так что смешивать карты разных прогонов нельзя.
+
+    Оригиналы не затираются, а ПЕРЕЕЗЖАЮТ в подпапку: по ним потом меряется величина разброса
+    сразу на всех точках, а не на одной."""
+    grid = reference_grid(element)                       # ДО переноса: иначе не с чем сверять
+    folder = os.path.dirname(grid["sample"])
+    rows, _ = measure(element)
+    if not rows:
+        raise SystemExit(f"{element}: нечего пересчитывать")
+    bak = os.path.join(folder, backup)
+    os.makedirs(bak, exist_ok=True)
+    todo = []
+    for ni, nm, _, _ in rows:
+        src = os.path.join(folder, nm)
+        dst = os.path.join(bak, nm)
+        if os.path.exists(dst):
+            os.remove(src) if os.path.exists(src) else None
+        elif os.path.exists(src):
+            os.replace(src, dst)
+        todo.append(dict(element=element, amp_turns=ni, name=nm, folder=folder,
+                         target=src, why="пересчёт"))
+    print(f"  оригиналы отложены в {bak} ({len(todo)} шт)")
+    guard_material(element)
+    sp = build_script(element, todo, grid, os.path.join(outdir, f"aedt_recompute_{element}.py"))
+    print(f"  скрипт: {sp}\n  запуск AEDT ({len(todo)} точек)…")
+    rc = subprocess.call([AEDT_EXE, "-ng", "-runscriptandexit", os.path.abspath(sp)])
+    print(f"  AEDT вернул {rc}\n")
+    print(f"  {'А·витков':>9} {'август':>10} {'сегодня':>10} {'расхождение':>12}")
+    import numpy as np
+    diffs = []
+    for j in todo:
+        old, new = os.path.join(bak, j["name"]), j["target"]
+        if not (os.path.exists(old) and os.path.exists(new)):
+            print(f"  {j['amp_turns']:9d}   нет файла"); continue
+        _, ho = probe(old)
+        _, hn = probe(new)
+        d = 100.0 * (hn - ho) / ho if ho else float("nan")
+        diffs.append(d)
+        print(f"  {j['amp_turns']:9d} {ho:10.5g} {hn:10.5g} {d:11.2f}%")
+    if diffs:
+        print(f"  разброс прогон-к-прогону: средний модуль {np.mean(np.abs(diffs)):.2f}%, "
+              f"максимум {np.max(np.abs(diffs)):.2f}%")
+    return diffs
+
+
 def verify(element, todo, grid):
     """Сверка шапок: новая карта обязана быть снята на ТОЙ ЖЕ сетке, что эталонная."""
     ok, bad, missing = [], [], []
@@ -322,12 +372,20 @@ def main(argv=None):
                     help="кривая, на которой ДОЛЖНА сниматься серия")
     ap.add_argument("--limit", type=int, help="взять только первые N точек из оставшихся: "
                                              "первый прогон разумно делать на ОДНОЙ")
+    ap.add_argument("--recompute", action="store_true",
+                    help="пересчитать УЖЕ СНЯТЫЕ карты (оригиналы переезжают в подпапку)")
     ap.add_argument("--repro", type=int, metavar="А·ВИТКОВ",
                     help="пересчитать УЖЕ СНЯТУЮ карту и сравнить с ней (оригинал не трогается)")
     ap.add_argument("--outdir", default=os.path.join("workspace", "results", "aedt"))
     a = ap.parse_args(argv)
 
     els = [a.element] if a.element else sorted({j["element"] for j in jobs()})
+    if a.recompute:
+        if len(els) != 1:
+            raise SystemExit("--recompute требует --element")
+        print(f"=== {els[0]}: пересчёт всей снятой серии одним состоянием проекта")
+        cmd_recompute(els[0], a.outdir)
+        return 0
     if a.repro:
         if len(els) != 1:
             raise SystemExit("--repro требует --element")
