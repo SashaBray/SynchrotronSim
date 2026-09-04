@@ -75,24 +75,39 @@ def measured_points(order, k, ref):
     return pts
 
 
-def design_points(cir, p, w, k, key):
-    """Проектные точки, посчитанные ЭТОЙ моделью: ток, дающий проектный кик."""
-    from scipy.optimize import brentq
+def design_points(models, ks):
+    """Проектные точки — решение СИСТЕМЫ из двух уравнений (диполь И квадруполь) по I1 и I2.
+
+    Раньше на каждой поверхности отмечалась своя независимая точка, и они не совпадали: одной
+    обмоткой обе величины не получить. Проектный градиент от I1 при токе, дающем проектный изгиб,
+    выходит выше нужного, и вторая обмотка его гасит — это и есть смысл совмещённой функции."""
+    from scipy.optimize import fsolve
     import element_compare as ec
+    (c1, p1, w1, r1), (c2, p2, w2, r2) = models
+    k1, k2 = ks
     lc = {r["device_type_id"]: r for r in ec.mt._read("lattice_configs.csv")
           if str(r.get("lattice_id")) == "1"}
     out = []
-    for dev in ("DQ_I1_1A_L1000", "DQ_I1_1A_L400"):
-        val = (lc.get(dev, {}).get(key) or "").strip()
-        if not val:
+    for dev, guess in (("DQ_I1_1A_L1000", (150.0, 30.0)), ("DQ_I1_1A_L400", (95.0, -60.0))):
+        row = lc.get(dev, {})
+        B, G = (row.get("mat_B") or "").strip(), (row.get("mat_G") or "").strip()
+        if not B or not G:
             continue
-        target = abs(float(val)) / k
-        f = lambda x: abs(bn.predict(cir, {"I1": x}, p, w)) - target
-        try:
-            ni = brentq(f, 10.0, 400000.0, xtol=1e-4)
-        except ValueError:
+        B, G = float(B), float(G)
+
+        def eqs(x):
+            cur = {"I1": x[0] * TURNS["I1"], "I2": x[1] * TURNS["I2"]}
+            return [k1 * signed(c1, p1, w1, r1, cur) - B,
+                    k2 * signed(c2, p2, w2, r2, cur) - G]
+
+        sol, _, ier, _ = fsolve(eqs, guess, full_output=True)
+        if ier != 1:
             continue
-        out.append((ni / TURNS["I1"], 0.0, k * abs(bn.predict(cir, {"I1": ni}, p, w)), dev))
+        cur = {"I1": sol[0] * TURNS["I1"], "I2": sol[1] * TURNS["I2"]}
+        out.append((sol[0], sol[1],
+                    k1 * signed(c1, p1, w1, r1, cur),
+                    k2 * signed(c2, p2, w2, r2, cur),
+                    dev.replace("DQ_I1_1A_", "")))
     return out
 
 
@@ -107,13 +122,18 @@ def build(path=OUT):
     i1_a = np.linspace(0.0, 300.0, N_GRID)          # ампер, с учётом витков
     i2_a = np.linspace(-140.0, 140.0, N_GRID)
 
+    models = []
+    for order in (1, 2):
+        cir, p, w = fit_order(order)
+        models.append((cir, p, w, bn.predict(cir, {"I1": 5000.0}, p, w)))
+    dp = design_points(models, (k1, k2))                # ОДНА точка на оба момента
+
     fig = make_subplots(rows=1, cols=2, specs=[[{"type": "surface"}, {"type": "surface"}]],
                         subplot_titles=("Дипольный момент mat_B, Тл",
                                         "Квадрупольный момент mat_G, Тл/м"))
     for col, (order, key, k, name) in enumerate(
             ((1, "B", k1, "диполь"), (2, "G", k2, "квадруполь")), start=1):
-        cir, p, w = fit_order(order)
-        ref = bn.predict(cir, {"I1": 5000.0}, p, w)     # опорное направление задаёт обмотка I1
+        cir, p, w, ref = models[order - 1]
         Z = surface(cir, p, w, k, ref, i1_a, i2_a)
         fig.add_trace(go.Surface(x=i1_a, y=i2_a, z=Z, colorscale="Viridis", showscale=False,
                                  opacity=0.92, name=name,
@@ -128,14 +148,15 @@ def build(path=OUT):
                 text=[q[3] for q in mp], hovertemplate="%{text}<br>I1 %{x:.1f} А, I2 %{y:.1f} А"
                                                        "<br>измерено %{z:.5g}<extra></extra>"),
                 row=1, col=col)
-        dp = design_points(cir, p, w, k, "mat_" + key)
         if dp:
+            zi = 2 if key == "B" else 3
             fig.add_trace(go.Scatter3d(
-                x=[q[0] for q in dp], y=[q[1] for q in dp], z=[q[2] for q in dp],
-                mode="markers+text", marker=dict(size=8, color="#e8a33d", symbol="diamond"),
-                text=[q[3].replace("DQ_I1_1A_", "") for q in dp], textposition="top center",
-                name="проектные точки", showlegend=(col == 1),
-                hovertemplate="%{text}<br>проектный ток I1 %{x:.1f} А<extra></extra>"),
+                x=[q[0] for q in dp], y=[q[1] for q in dp], z=[q[zi] for q in dp],
+                mode="markers+text", marker=dict(size=9, color="#e8a33d", symbol="diamond"),
+                text=[q[4] for q in dp], textposition="top center",
+                name="проектная точка (оба момента сразу)", showlegend=(col == 1),
+                hovertemplate="%{text}<br>I1 %{x:.1f} А, I2 %{y:.1f} А"
+                              "<br>%{z:.5g}<extra></extra>"),
                 row=1, col=col)
         fig.update_scenes(dict(xaxis_title="I1, А", yaxis_title="I2, А",
                                zaxis_title=f"mat_{key}"), row=1, col=col)
