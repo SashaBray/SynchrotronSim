@@ -53,21 +53,41 @@ def curve(element, key, winding=None):
     return sorted(out), d["records"][0].get("Leff")
 
 
-def harmonic_curve(element, order):
+def harmonic_curve(element, order, radius=8e-3):
     """Гармоника той же серии — независимая от траекторий проверка формы кривой.
 
-    Траекторный коэффициент это подгонка ОДНОГО мультиполя под реальные траектории. Когда
-    насыщение подмешивает высшие гармоники (у QP_sh доля 12-полюсной растёт с 1.05% до 1.40%),
-    один градиент их описать не может, и подгонка выходит заниженной — кривая ложно загибается
-    ВНИЗ. Гармоника меряется на фиксированной окружности и такого спада не показывает."""
-    import branch_network as bn
+    ВАЖНО, ГДЕ МЕРИТЬ. Сначала я сверялся с гармоникой на 8 мм и решил, что спад градиента у QP_sh
+    это артефакт подгонки. Вывод был неверен: на 8 мм поле держится, а У ОСИ, где летит пучок, оно
+    после 235 А действительно убывает на 1.7%. При глубоком насыщении наконечники полюсов
+    насыщаются, профиль поперёк апертуры уплощается, приосевая производная падает, а внешнее поле
+    остаётся. Отношение «8 мм / 1 мм», ровное 0.993–1.000 по всей серии, на верхних токах уходит
+    к 1.014.
+
+    Траекторный коэффициент при этом согласуется с ПРИОСЕВОЙ гармоникой до 0.1% на каждом токе,
+    так что сверять надо на радиусе пробы траекторий, а не на 8 мм."""
+    import numpy as np
+    from field_quality import load, _circle
     out = []
-    for cur, val, _, _ in bn.read_maps(element, order):
-        if len(cur) != 1:
+    for r in sm.read_registry():
+        if r["element"] != element or ";" in r["excitation"] or "+" in r["excitation"]:
             continue
-        ni = abs(next(iter(cur.values())))
-        if ni > 0:
-            out.append((ni, abs(val)))
+        try:
+            ni = abs(float(r["amp_turns"]))
+        except (TypeError, ValueError):
+            continue
+        p = os.path.join("workspace", "fields_bin", r["bin_path"])
+        if ni <= 0 or not os.path.exists(p):
+            continue
+        h, B = load(p)
+        xs = np.linspace(h["mnx"], h["mxx"], h["nx"])
+        v = []
+        for ix in range(h["nx"]):
+            by, bz = _circle(h, B, ix, radius, nth=64)
+            sp = np.fft.fft(by + 1j * bz) / 64
+            v.append(sp[0] if order == 1 else sp[-(order - 1)])
+        v = np.array(v)
+        c = complex(2 * np.trapezoid(v.real, xs), 2 * np.trapezoid(v.imag, xs))
+        out.append((ni, abs(c) / radius ** (order - 1)))
     return sorted(out)
 
 
@@ -132,7 +152,9 @@ def main(argv=None):
                 label=f"снятые карты ({len(pts)} шт)")
         # Независимая проверка формы: гармоника, приведённая к шкале коэффициента общим
         # множителем (он постоянен по серии с точностью 0.2%, кроме верхних токов).
-        hp = harmonic_curve(el, {"G": 2, "B": 1, "S": 3, "O": 4}[key])
+        # радиус пробы траекторий, а НЕ 8 мм: сверять надо там, где летит пучок
+        hp = harmonic_curve(el, {"G": 2, "B": 1, "S": 3, "O": 4}[key],
+                            radius=sm.PROBE_R.get(sm.KIND.get(el, "quad"), 1e-3))
         if hp:
             hx = np.array([p[0] for p in hp]) / n
             hy = np.array([p[1] for p in hp])
@@ -140,12 +162,12 @@ def main(argv=None):
             if common:
                 k_ = np.median([np.interp(hx[i], x, y) / hy[i] for i in common])
                 ax.plot(hx, k_ * hy, "--", color="#7a7a7a", lw=1.3, zorder=2,
-                        label="гармоника (приведена) — независимая проверка формы")
+                        label="гармоника у оси (приведена) — сходится с подгонкой")
         ceil = y.max()
         ax.axhline(ceil, color="#c0392b", ls="--", lw=1.2, zorder=2)
         falls = y.argmax() < len(y) - 1
-        ceil_txt = (f"потолок {ceil:.4f} при {x[y.argmax()]:.0f} А"
-                    + (" — спад дальше АРТЕФАКТ подгонки, не поле" if falls else ""))
+        ceil_txt = (f"максимум {ceil:.4f} при {x[y.argmax()]:.0f} А"
+                    + (" — дальше приосевое поле УБЫВАЕТ (перераспределение)" if falls else ""))
         colors = ["#e8a33d", "#4a9d5f", "#8e5ea8", "#1a7f8e", "#c0392b"]
         levels = sorted(design_levels(el, key).items(), key=lambda t: t[0][2])
         rows_txt = []
