@@ -53,6 +53,24 @@ def curve(element, key, winding=None):
     return sorted(out), d["records"][0].get("Leff")
 
 
+def harmonic_curve(element, order):
+    """Гармоника той же серии — независимая от траекторий проверка формы кривой.
+
+    Траекторный коэффициент это подгонка ОДНОГО мультиполя под реальные траектории. Когда
+    насыщение подмешивает высшие гармоники (у QP_sh доля 12-полюсной растёт с 1.05% до 1.40%),
+    один градиент их описать не может, и подгонка выходит заниженной — кривая ложно загибается
+    ВНИЗ. Гармоника меряется на фиксированной окружности и такого спада не показывает."""
+    import branch_network as bn
+    out = []
+    for cur, val, _, _ in bn.read_maps(element, order):
+        if len(cur) != 1:
+            continue
+        ni = abs(next(iter(cur.values())))
+        if ni > 0:
+            out.append((ni, abs(val)))
+    return sorted(out)
+
+
 def first_crossing(x, y, level):
     """Ток, при котором коэффициент ВПЕРВЫЕ достигает заданного уровня.
 
@@ -112,11 +130,22 @@ def main(argv=None):
         y = np.array([p[1] for p in pts])
         ax.plot(x, y, "-o", color="#1f4e79", ms=5, lw=1.6, zorder=3,
                 label=f"снятые карты ({len(pts)} шт)")
+        # Независимая проверка формы: гармоника, приведённая к шкале коэффициента общим
+        # множителем (он постоянен по серии с точностью 0.2%, кроме верхних токов).
+        hp = harmonic_curve(el, {"G": 2, "B": 1, "S": 3, "O": 4}[key])
+        if hp:
+            hx = np.array([p[0] for p in hp]) / n
+            hy = np.array([p[1] for p in hp])
+            common = [i for i, v in enumerate(hx) if np.any(np.isclose(x, v, rtol=1e-6))]
+            if common:
+                k_ = np.median([np.interp(hx[i], x, y) / hy[i] for i in common])
+                ax.plot(hx, k_ * hy, "--", color="#7a7a7a", lw=1.3, zorder=2,
+                        label="гармоника (приведена) — независимая проверка формы")
         ceil = y.max()
         ax.axhline(ceil, color="#c0392b", ls="--", lw=1.2, zorder=2)
         falls = y.argmax() < len(y) - 1
         ceil_txt = (f"потолок {ceil:.4f} при {x[y.argmax()]:.0f} А"
-                    + (" — дальше кривая идёт ВНИЗ" if falls else ""))
+                    + (" — спад дальше АРТЕФАКТ подгонки, не поле" if falls else ""))
         colors = ["#e8a33d", "#4a9d5f", "#8e5ea8", "#1a7f8e", "#c0392b"]
         levels = sorted(design_levels(el, key).items(), key=lambda t: t[0][2])
         rows_txt = []
