@@ -681,7 +681,7 @@ class TestMecSigma(unittest.TestCase):
     ухудшение модели должно ронять тест. Метрика — ошибка ТОКА |λ−1|, а не процент по кику: в
     насыщении отклик пологий и промах в кике на 1% означает промах в токе в 2.5–5 раз больший."""
 
-    LIMITS = {("corrector", 1): (20.0, 5.0),      # (одиночные, КОМБИНАЦИИ), % ошибки тока
+    LIMITS = {("corrector", 1): (9.0, 3.5),       # (одиночные, КОМБИНАЦИИ), % ошибки тока
               ("DQ", 1): (22.0, 26.0),
               ("DQ", 2): (6.0, 7.0)}
 
@@ -695,7 +695,8 @@ class TestMecSigma(unittest.TestCase):
         ms, M = self._models()
         self.assertEqual(set(M), set(ms.MODELS))
         for (el, order), (cir, w) in M.items():
-            self.assertEqual(len(w), 2 * len(cir.kick_classes))   # w и σ-половина
+            # длина вектора весов = 2 x число кик-классов ПОСЛЕ разделения по столбцу
+            self.assertEqual(len(w), 2 * len(ms.kick_names(cir)))
             self.assertTrue(np.all(np.isfinite(w)))
 
     def test_zero_current_gives_zero_kick(self):

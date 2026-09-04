@@ -30,27 +30,19 @@ from scipy.optimize import brentq
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import branch_network as bn
+import mec_sigma as ms
 import saturation_model as sm
 
 
+# Базис и веса берутся ИЗ mec_sigma — единственного источника модели. Своя копия здесь уже
+# один раз разошлась с продакшном: разделение кик-классов по столбцу полюса попало в mec_sigma,
+# а тут осталась старая версия, и сводка молча показывала прежние цифры.
 def state(cir, currents, p):
-    """Базис классов зазоров и скалярная доля насыщения σ — за одно решение цепи."""
-    lens, perms, secs = bn.unpack(p, cir)
-    phi, _ = cir.solve(currents, lens, perms, secs=secs)
-    b = np.array([sum(phi[x] * cir.direction(x) for x in cir.gaps if cir.sym[x] == c)
-                  for c in cir.kick_classes], dtype=complex)
-    num = den = 0.0
-    for x in cir.iron:
-        S = secs.get(cir.sym[x], 1.0)
-        f = abs(phi[x])
-        num += f * min(abs(phi[x]) / S / cir.Barr[-1], 1.0)
-        den += f
-    return b, (num / den if den else 0.0)
+    return ms.state(cir, currents, p)
 
 
 def basis(cir, currents, p, augment):
-    b, s = state(cir, currents, p)
-    return np.concatenate([b, s * b]) if augment else b
+    return ms.basis(cir, currents, augment, p)
 
 
 def fit_weights(cir, rows, p, augment, wts):

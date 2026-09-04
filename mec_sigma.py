@@ -9,14 +9,20 @@
     σ = Σ|Φ|·min(|Φ|/S/B_max, 1) / Σ|Φ|    потоко-взвешенная доля насыщения, 0 … 1
     кик = Σ_класс (w + σ·v) · Φ_класс      направление трубки — из координат наконечников
 
+Классы кика разделены по СТОЛБЦУ полюса (см. `kick_class`): кик есть интеграл вдоль пучка, а
+эффективная длина поля у столбцов разная. Без разделения пара c2/c4 стояла на 29% по току.
+
 Смысл поправки: с ростом возбуждения меняется не только величина поля, но и его ФОРМА, поэтому
 свёртка потоков в кик не может иметь постоянные веса. Веса при этом остаются ЛИНЕЙНЫМИ, так что
-обе половины (w и v) находятся точным МНК, а не поиском: свободных чисел 12 у корректора, 4 у DQ,
+обе половины (w и v) находятся точным МНК, а не поиском: свободных чисел 18 у корректора, 4 у DQ,
 и ни одного нелинейного — вся геометрия взята из чертежей.
 
-Точность в ТОКЕ (|λ−1|, см. `current_accuracy.py`), база → МЭС-σ:
-    корректор main         13.1% → 5.2%      комбинации 5.1% → 3.7%
-    DQ квадруполь           4.6% → 4.3%      DQ диполь 36.4% → 18.3%
+Точность в ТОКЕ (|λ−1|, см. `current_accuracy.py`) у корректора:
+    c2 29.9% → 1.8%   c4 29.2% → 2.1%   c3 14.8% → 4.7%   main 5.2% → 4.9%
+    КОМБИНАЦИИ (независимая проверка) 3.7% → 2.7%
+    c1 11.8% → 15.4% — ухудшение целиком на карте c1.12000, крайнем выбросе набора
+    (12000 А·в против 7000 у следующей); в рабочей области все точки c1 улучшились.
+    DQ квадруполь 4.3%, DQ диполь 18.3% — там разделения нет, имена узлов короче.
 
 Поправка работает там, где железо насыщается, и не трогает то, где насыщения нет.
 
@@ -42,13 +48,35 @@ MODELS = (("corrector", 1), ("DQ", 1), ("DQ", 2))
 _CACHE = {}
 
 
+def kick_class(cir, b):
+    """Класс кика с учётом СТОЛБЦА полюса — продольная степень свободы.
+
+    Кик есть интеграл вдоль пучка, а эффективная длина поля у столбцов разная: у корректора 160 мм
+    у c1/c3/main против 176 у c2/c4, которые дальше от ярма. Пока `gap_straight_o` объединял
+    g_T1_B1 (столбец 1) и g_T2_B2 (столбец 2) одним весом, эта разница поглотиться не могла, и пара
+    c2/c4 стояла на 29% по току против 12-15% у c1/c3. С разделением она ушла под 2.1%.
+
+    Столбец — третий символ имени узла-наконечника (pT1, pB2…). Где имена короче (DQ), разделения
+    не происходит и класс остаётся прежним."""
+    a_, c_ = cir.edge[b]
+    if len(a_) < 3 or len(c_) < 3:
+        return cir.sym[b]
+    return f"{cir.sym[b]}|{''.join(sorted({a_[2], c_[2]}))}"
+
+
+def kick_names(cir):
+    """Упорядоченный список кик-классов — общий для сборки базиса и чтения таблицы весов."""
+    return sorted({kick_class(cir, b) for b in cir.gaps if cir.sym[b] in cir.kick_classes})
+
+
 def state(cir, currents, p=None):
     """Базис классов зазоров и скалярная доля насыщения σ — за одно решение цепи."""
     p = np.zeros(1) if p is None else p
     lens, perms, secs = bn.unpack(p, cir)
     phi, _ = cir.solve(currents, lens, perms, secs=secs)
-    b = np.array([sum(phi[x] * cir.direction(x) for x in cir.gaps if cir.sym[x] == c)
-                  for c in cir.kick_classes], dtype=complex)
+    cls = {x: kick_class(cir, x) for x in cir.gaps if cir.sym[x] in cir.kick_classes}
+    b = np.array([sum(phi[x] * cir.direction(x) for x in cls if cls[x] == c)
+                  for c in kick_names(cir)], dtype=complex)
     num = den = 0.0
     for x in cir.iron:
         S = secs.get(cir.sym[x], 1.0)
@@ -113,8 +141,9 @@ def load(path=WEIGHTS):
     for key, rows in out.items():
         cir = bn.Circuit(key[0])
         by = {r["kick_class"]: r for r in rows}
-        w = np.array([float(by[c]["w"]) for c in cir.kick_classes]
-                     + [float(by[c]["w_sigma"]) for c in cir.kick_classes])
+        names = kick_names(cir)
+        w = np.array([float(by[c]["w"]) for c in names]
+                     + [float(by[c]["w_sigma"]) for c in names])
         for r in rows:
             if r["sense"]:
                 for kv in r["sense"].split("|"):
@@ -153,9 +182,10 @@ def cmd_fit(path=WEIGHTS):
     rows = []
     for el, order in MODELS:
         cir, w, maps = train(el, order)
-        n = len(cir.kick_classes)
+        names = kick_names(cir)
+        n = len(names)
         sense = "|".join(f"{k}={v:g}" for k, v in sorted(cir.sense.items()))
-        for i, c in enumerate(cir.kick_classes):
+        for i, c in enumerate(names):
             rows.append([el, order, c, f"{w[i]:.10g}", f"{w[n + i]:.10g}",
                          sense if i == 0 else ""])
         single = [t for t in maps if len(t[0]) == 1]
