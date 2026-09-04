@@ -296,7 +296,7 @@ def cmd_repro(element, amp_turns, outdir):
     return r
 
 
-def cmd_recompute(element, outdir, backup="_original"):
+def cmd_recompute(element, outdir, backup="_original", everything=False):
     """Пересчитать УЖЕ СНЯТЫЕ карты, отложив оригиналы в сторону.
 
     Зачем: серия должна быть снята ОДНИМ состоянием проекта. Между августовским прогоном и
@@ -310,6 +310,16 @@ def cmd_recompute(element, outdir, backup="_original"):
     rows, _ = measure(element)
     if not rows:
         raise SystemExit(f"{element}: нечего пересчитывать")
+    # Пересчитывать имеет смысл только карты ИЗ ПРЕЖНИХ ПРОГОНОВ: снятые сегодня уже согласованы
+    # между собой. Отбор по времени файла — новее чем за сутки до самой свежей карты считаем
+    # «своими». `--all` заставляет пересчитать всё.
+    if not everything:
+        newest = max(os.path.getmtime(os.path.join(folder, nm)) for _, nm, _, _ in rows)
+        old = [r for r in rows if os.path.getmtime(os.path.join(folder, r[1])) < newest - 86400]
+        if old:
+            print(f"  из {len(rows)} карт пересчитываются {len(old)} из прежних прогонов "
+                  f"(остальные сняты в последние сутки и уже согласованы)")
+            rows = old
     bak = os.path.join(folder, backup)
     os.makedirs(bak, exist_ok=True)
     todo = []
@@ -372,6 +382,8 @@ def main(argv=None):
                     help="кривая, на которой ДОЛЖНА сниматься серия")
     ap.add_argument("--limit", type=int, help="взять только первые N точек из оставшихся: "
                                              "первый прогон разумно делать на ОДНОЙ")
+    ap.add_argument("--all", action="store_true",
+                    help="с --recompute: пересчитать ВСЕ карты, а не только из прежних прогонов")
     ap.add_argument("--recompute", action="store_true",
                     help="пересчитать УЖЕ СНЯТЫЕ карты (оригиналы переезжают в подпапку)")
     ap.add_argument("--repro", type=int, metavar="А·ВИТКОВ",
@@ -384,7 +396,7 @@ def main(argv=None):
         if len(els) != 1:
             raise SystemExit("--recompute требует --element")
         print(f"=== {els[0]}: пересчёт всей снятой серии одним состоянием проекта")
-        cmd_recompute(els[0], a.outdir)
+        cmd_recompute(els[0], a.outdir, everything=a.all)
         return 0
     if a.repro:
         if len(els) != 1:
