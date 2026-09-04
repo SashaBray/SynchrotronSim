@@ -132,6 +132,74 @@ def build_script(element, todo, grid, out_path):
     return out_path
 
 
+BH_BLOCK = re.compile(r"Points\[\d+:\s*([0-9eE.,+\-\s]+)\]")
+
+
+def project_bh(element):
+    """Кривая намагничивания, ЛЕЖАЩАЯ В ПРОЕКТЕ прямо сейчас (а не та, что в имени материала).
+
+    ИМЯ МАТЕРИАЛА ЛЖЁТ. В QP_sh материал зовётся `steel_1008 _custom`, а содержит
+    низконасыщающуюся кривую (B_max 1.70 Тл вместо 2.59) — остаток от опытов со сменой материала.
+    Карты, снятые на ней, несопоставимы с производственной серией, и по имени этого не видно."""
+    import numpy as np
+    p = os.path.join(PROJECTS, f"{DESIGN[element]['project']}.aedt")
+    txt = open(p, encoding="utf-8", errors="ignore").read()
+    # ГОТЧА: в проекте несколько материалов с кривыми (у QP_sh их четыре — библиотечные steel_1008,
+    # steel_1010, steel_stainless и правленый steel_1008 _custom). Брать ПЕРВЫЙ блок BHCoordinates
+    # нельзя: он библиотечный и к железу отношения не имеет. Ищем НАЗНАЧЕННЫЙ материал.
+    assigned = [m for m in re.findall(r"MaterialValue='\"([^\"]+)\"'", txt)
+                if m.lower() not in ("copper", "vacuum", "air")]
+    if not assigned:
+        return None, None
+    name = max(set(assigned), key=assigned.count)      # тот, которым покрыто больше всего тел
+    i = txt.find(f"$begin '{name}'")
+    if i < 0:
+        return name, None
+    j = txt.find("$begin 'BHCoordinates'", i)
+    if j < 0 or j > txt.find(f"$end '{name}'", i):
+        return name, None
+    m = BH_BLOCK.search(txt, j)
+    if not m:
+        return name, None
+    v = np.array([float(x) for x in m.group(1).replace("\n", " ").split(",") if x.strip()])
+    return name, v.reshape(-1, 2)
+
+
+def check_material(element, expected="workspace/materials/steel_1008_bh.csv", tol=1e-4):
+    """Сверка кривой проекта с ожидаемой. Возвращает (совпало, имя, B_max проекта, B_max файла)."""
+    import numpy as np
+    name, bh = project_bh(element)
+    if bh is None:
+        return None, None, None, None
+    ref = np.loadtxt(expected, delimiter=";", skiprows=1)
+    same = (len(ref) == len(bh) and float(np.abs(ref - bh).max()) < tol)
+    return same, name, float(bh[:, 1].max()), float(ref[:, 1].max())
+
+
+def guard_material(element, expected="workspace/materials/steel_1008_bh.csv"):
+    """Не считать, пока в проекте не та кривая намагничивания.
+
+    Молча снятая серия на чужом материале несопоставима с прежними картами, а по ИМЕНИ материала
+    этого не видно: в QP_sh он зовётся `steel_1008 _custom`, а содержит низконасыщающуюся кривую
+    (B_max 1.70 против 2.59 Тл) — остаток от опытов со сменой материала. Поймали это тем, что
+    пересчёт уже снятой карты 6588 А·в дал кик на 36% слабее, при полном совпадении в линейном
+    режиме: геометрия и возбуждение те же, разошлось только насыщение."""
+    same, name, bmax_p, bmax_r = check_material(element, expected)
+    if same is None:
+        print("  ВНИМАНИЕ: кривую из проекта прочитать не удалось — сверка материала пропущена")
+        return
+    if same:
+        print(f"  материал: {name!r} совпал с {os.path.basename(expected)} "
+              f"(B_max {bmax_p:.4f} Тл)")
+        return
+    print("  МАТЕРИАЛ В ПРОЕКТЕ НЕ ТОТ:")
+    print(f"    в проекте: {name!r}, B_max {bmax_p:.4f} Тл")
+    print(f"    ожидается: {expected}, B_max {bmax_r:.4f} Тл")
+    print("    Имя материала может лгать — сверяется САМА КРИВАЯ. Восстановите её в AEDT")
+    print("    либо укажите через --material файл, на котором серия задумана.")
+    raise SystemExit("остановлено: несовпадение кривой намагничивания")
+
+
 def probe(path, order=2, r=1e-3, nth=64):
     """Физическая проверка карты: максимум |B| и интегральная гармоника.
 
@@ -208,6 +276,7 @@ def cmd_repro(element, amp_turns, outdir):
     lock = os.path.join(PROJECTS, f"{DESIGN[element]['project']}.aedt.lock")
     if os.path.exists(lock):
         raise SystemExit(f"проект открыт в AEDT ({lock}) — закройте его")
+    guard_material(element)
     print(f"  оригинал: {orig}")
     print(f"  пересчёт: {repro}")
     print(f"  скрипт:   {sp}\n  запуск AEDT…")
@@ -249,6 +318,8 @@ def main(argv=None):
     ap.add_argument("--measure", action="store_true",
                     help="физическая проверка снятых карт: |B| обязано расти с током")
     ap.add_argument("--order", type=int, default=2, help="порядок гармоники для проверки")
+    ap.add_argument("--material", default="workspace/materials/steel_1008_bh.csv",
+                    help="кривая, на которой ДОЛЖНА сниматься серия")
     ap.add_argument("--limit", type=int, help="взять только первые N точек из оставшихся: "
                                              "первый прогон разумно делать на ОДНОЙ")
     ap.add_argument("--repro", type=int, metavar="А·ВИТКОВ",
@@ -302,6 +373,7 @@ def main(argv=None):
         lock = os.path.join(PROJECTS, f"{DESIGN[el]['project']}.aedt.lock")
         if os.path.exists(lock):
             raise SystemExit(f"проект открыт в AEDT ({lock}) — закройте его перед пакетным прогоном")
+        guard_material(el)
         print(f"  запуск AEDT ({len(left)} точек, это надолго)…")
         rc = subprocess.call([AEDT_EXE, "-ng", "-runscriptandexit", os.path.abspath(sp)])
         print(f"  AEDT вернул {rc}")
