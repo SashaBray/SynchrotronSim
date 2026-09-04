@@ -131,6 +131,11 @@ class Circuit:
         self.gap_classes = sorted({self.sym[b] for b in self.gaps})
         self.mirror = g["mirror"]
         self.pos = g["pos"]                                 # поперечные положения концов ребра
+        self._node_xy = {}                                  # координаты узлов из БД, если заданы
+        for b_, ((ya, za), (yc, zc)) in (g.get("xy") or {}).items():
+            a_, c_ = self.edge[b_]
+            if a_.startswith("p"): self._node_xy[a_] = (ya, za)
+            if c_.startswith("p"): self._node_xy[c_] = (yc, zc)
         self.mirror_classes = sorted({self.sym[b] for b in self.gaps if self.mirror[b] != 0})
         # поле у пучка создают только ветви МЕЖДУ НАКОНЕЧНИКАМИ; рассеяние через окно влияет на цепь,
         # но собственного вклада в кик не даёт (оно далеко от пучка)
@@ -169,7 +174,12 @@ class Circuit:
     PITCH_MM, HALF_GAP_MM = 30.0, {"o": 12.5, "c": 16.5}
 
     def tip_xy(self, node):
-        """(y, z) наконечника в мм. None для узлов, не выходящих к апертуре."""
+        """(y, z) наконечника в мм. None для узлов, не выходящих к апертуре.
+
+        Если координаты заданы в БД (столбцы pos_*/z_*), берём их; иначе — правило по имени узла
+        (так устроен корректор, где наконечники расположены регулярно)."""
+        if node in self._node_xy:
+            return self._node_xy[node]
         if len(node) < 3 or node[0] != "p":
             return None
         y = self.PITCH_MM * {"1": 1.0, "0": 0.0, "2": -1.0}[node[2]]

@@ -69,7 +69,7 @@ def read_graph(branches=BRANCHES, members=MEMBERS):
     for r in _rows(branches):
         d = g.setdefault(r["element"], dict(branches=[], unwound=[], coils={}, turns={},
                                             material={}, geom={}, edge={}, kind={}, sym={},
-                                            mirror={}, pos={}, share={}))
+                                            mirror={}, pos={}, share={}, xy={}))
         d["branches"].append(r["branch"])
         d["material"][r["branch"]] = r["material"] or "steel_1008"
         d["edge"][r["branch"]] = ((r.get("node_from") or "").strip(), (r.get("node_to") or "").strip())
@@ -78,6 +78,12 @@ def read_graph(branches=BRANCHES, members=MEMBERS):
         d["mirror"][r["branch"]] = float((r.get("mirror") or "0").strip() or 0)
         d["pos"][r["branch"]] = (float((r.get("pos_from") or "0").strip() or 0),
                                  float((r.get("pos_to") or "0").strip() or 0))
+        # Координаты концов ребра в поперечной плоскости (мм от оси пучка), если заданы в БД:
+        # pos_* — горизонталь, z_* — вертикаль. Нужны для направлений трубок потока и мультиполей.
+        za, zb = (r.get("z_from") or "").strip(), (r.get("z_to") or "").strip()
+        if za or zb:
+            d["xy"][r["branch"]] = ((d["pos"][r["branch"]][0], float(za or 0)),
+                                    (d["pos"][r["branch"]][1], float(zb or 0)))
         S, L = (r.get("S_m2") or "").strip(), (r.get("len_m") or "").strip()
         if S and L:
             d["geom"][r["branch"]] = (float(S.replace(",", ".")), float(L.replace(",", ".")))
