@@ -178,6 +178,8 @@ def main(argv=None):
     ap.add_argument("--measure", action="store_true",
                     help="физическая проверка снятых карт: |B| обязано расти с током")
     ap.add_argument("--order", type=int, default=2, help="порядок гармоники для проверки")
+    ap.add_argument("--limit", type=int, help="взять только первые N точек из оставшихся: "
+                                             "первый прогон разумно делать на ОДНОЙ")
     ap.add_argument("--outdir", default=os.path.join("workspace", "results", "aedt"))
     a = ap.parse_args(argv)
 
@@ -206,6 +208,8 @@ def main(argv=None):
             for n, h in bad:
                 print(f"    ! {n}\n      {h}")
             continue
+        if a.limit:
+            left = left[:a.limit]
         for j in left:
             print(f"  {j['amp_turns']:7d} А·в → {j['name']:24} {j['why']}")
         if a.plan or not left:
