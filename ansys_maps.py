@@ -32,6 +32,10 @@ REQUEST = os.path.join("workspace", "tables", "map_request_quadrupoles.csv")
 AEDT_EXE = r"C:\Program Files\ANSYS Inc\v252\AnsysEM\ansysedt.exe"
 PROJECTS = r"C:\Sasha\Work\ansys_projects"
 KD = r"C:\Sasha\Work\SILA\ansis approximations\KD"
+# Именованное выражение калькулятора, которым сняты ВСЕ прежние карты — видно в их шапке:
+# `X, Y, Z, Vector data "B_Vector"`. Сырое EnterQty("B") даёт величину с именем "<Bx,By,Bz>",
+# и карта становится несопоставимой с серией. Менять нельзя.
+QUANTITY = "B_Vector"
 
 # Проект, дизайн, сетап и имя токовой переменной. Проверено по .aedt: во всех проектах ток задан
 # ДИЗАЙНОВОЙ переменной (без префикса $), через которую выражены все возбуждения.
@@ -105,14 +109,18 @@ def build_script(element, todo, grid, out_path):
             f'oDesktop.AddMessage("", "", 0, "=== {j["name"]}: ток {val} ===")',
             f'oDesign.SetVariableValue("{d["var"]}", "{val}")',
             f'oDesign.Analyze("{d["setup"]}", True)',
-            "oModule.CalcStack(\"clear\")",
-            'oModule.EnterQty("B")',
+            'oModule.CalcStack("clear")',
+            # Именованное выражение, а НЕ сырое EnterQty("B"): иначе величина в файле называется
+            # "<Bx,By,Bz>" вместо "B_Vector" и шапка расходится с прежними картами.
+            f'oModule.CopyNamedExprToStack("{QUANTITY}")',
             "oModule.ExportOnGrid(",
             f'    r"{j["target"]}",',
             "    LO, HI, STEP,",
             f'    "{d["setup"]} : LastAdaptive",',
             f'    ["{d["var"]}:=", "{val}"],',
-            "    False, \"Cartesian\", [0, 0, 0], False)",
+            # exportoption=True — писать столбцы X, Y, Z. При False AEDT кладёт только компоненты
+            # поля, файл выходит втрое короче и несопоставим с прежними картами.
+            '    True, "Cartesian", [0, 0, 0], False)',
             "",
         ]
     lines += [
