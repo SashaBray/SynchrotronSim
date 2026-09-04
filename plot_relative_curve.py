@@ -108,7 +108,9 @@ def bh(path):
     Hmin, Hmax, Bmax = H[ok][0], H[-1], B[-1]
 
     def g(x):
-        x = np.abs(np.asarray(x, float))
+        # ЗАЖИМ в ноль, а не складывание по модулю: при отрицательном сдвиге x₀ аргумент уходит
+        # ниже нуля, и abs() отражал бы кривую, порождая нефизичный всплеск вне области данных.
+        x = np.maximum(np.asarray(x, float), 0.0)
         out = np.empty_like(x)
         lo = x < Hmin
         hi = x > Hmax
@@ -120,26 +122,39 @@ def bh(path):
     return g
 
 
-def fit_scales(ni, g, Bf):
-    """Два масштаба: G(NI) ≈ β·B(α·NI). Подгонка по ОТНОСИТЕЛЬНОЙ невязке — иначе слабые токи,
-    где градиент на два порядка меньше, в подгонке не участвуют вовсе."""
+def model(q, ni, Bf, shifts):
+    """β·B(α·NI + x₀) + y₀. Без сдвигов x₀ = y₀ = 0."""
+    a, b = np.exp(q[0]), np.exp(q[1])
+    x0, y0 = (q[2], q[3]) if shifts else (0.0, 0.0)
+    return b * Bf(a * ni + x0) + y0
+
+
+def fit_scales(ni, g, Bf, shifts=False):
+    """Масштабы (и, по желанию, СДВИГИ) наложения кривой материала на кривую градиента.
+
+    Подгонка по ОТНОСИТЕЛЬНОЙ невязке — иначе слабые токи, где градиент на два порядка меньше,
+    в подгонке не участвуют вовсе. Сдвиги физически осмысленны: x₀ похож на коэрцитивную силу,
+    y₀ — на остаточную индукцию, хотя наша B(H) однозначна и гистерезиса не содержит."""
     def res(q):
-        a, b = np.exp(q)
-        return (b * Bf(a * ni) - g) / g
+        return (model(q, ni, Bf, shifts) - g) / g
 
     best = None
-    for s in range(40):
+    for s in range(60):
         rng = np.random.default_rng(s)
         q0 = [np.log(rng.lognormal(np.log(1.0), 2.0)),
               np.log(rng.lognormal(np.log(g.max() / 1.5), 1.0))]
+        if shifts:
+            q0 += [rng.normal(0, 30.0), rng.normal(0, 0.1 * g.max())]
         try:
-            r = least_squares(res, q0, xtol=1e-15, ftol=1e-15, max_nfev=20000)
+            r = least_squares(res, q0, xtol=1e-15, ftol=1e-15, max_nfev=40000)
         except Exception:
             continue
         if best is None or r.cost < best.cost:
             best = r
-    a, b = np.exp(best.x)
-    return float(a), float(b), float(np.sqrt(np.mean(res(best.x) ** 2)) * 100)
+    q = best.x
+    a, b = np.exp(q[0]), np.exp(q[1])
+    x0, y0 = (float(q[2]), float(q[3])) if shifts else (0.0, 0.0)
+    return float(a), float(b), x0, y0, float(np.sqrt(np.mean(res(q) ** 2)) * 100), q
 
 
 def main(argv=None):
@@ -158,27 +173,31 @@ def main(argv=None):
             ("низконасыщающийся", other, "workspace/materials/lowsat_custom_bh.csv", "#c0392b", "s")]
 
     fig, ax = plt.subplots(1, 2, figsize=(14.2, 5.6))
-    print(f"{'серия':20} {'α (по току)':>13} {'β (по величине)':>17} {'невязка наложения':>19}")
+    print(f"{'серия':20} {'α':>11} {'β':>11} {'x0':>11} {'y0':>11} "
+          f"{'со сдвигами':>10} {'без сдвигов':>14}")
     for name, pts, mat, col, mk in sets:
         if not pts:
             continue
         ni = np.array([p[0] for p in pts], float)
         g = np.array([p[1] for p in pts], float)
         Bf = bh(mat)
-        alpha, beta, err = fit_scales(ni, g, Bf)
-        print(f"{name:20} {alpha:13.6g} {beta:17.6g} {err:18.2f}%")
+        a2, b2, _, _, e2, _ = fit_scales(ni, g, Bf, shifts=False)
+        alpha, beta, x0, y0, err, q = fit_scales(ni, g, Bf, shifts=True)
+        print(f"{name:20} {alpha:11.5g} {beta:11.5g} {x0:11.5g} {y0:11.5g} "
+              f"{err:9.2f}% {e2:13.2f}%")
 
         # ── наложение: измеренный градиент и приведённая кривая материала
         ax[0].plot(ni, g, mk, color=col, ms=6, zorder=3, label=f"{name}: градиент по картам")
         xx = np.geomspace(ni.min(), ni.max(), 400)
-        ax[0].plot(xx, beta * Bf(alpha * xx), "-", color=col, lw=1.5, alpha=0.65, zorder=2,
-                   label=f"{name}: β·B(α·NI),  α={alpha:.4g}  β={beta:.4g}")
+        ax[0].plot(xx, model(q, xx, Bf, True), "-", color=col, lw=1.5, alpha=0.65, zorder=2,
+                   label=f"{name}: β·B(α·NI+x₀)+y₀,  α={alpha:.3g} β={beta:.3g} "
+                         f"x₀={x0:.3g} y₀={y0:.3g}")
 
         # ── отношение: что осталось после деления одной кривой на другую
         # По оси — ПРИВЕДЁННАЯ напряжённость α·NI, то есть глубина захода в кривую материала.
         # Сравнивать по току нельзя: серии покрывают разные диапазоны (сталь до 19000 А·в,
         # второй материал до 5500), и кривые оказались бы на разных участках.
-        ratio = g / (beta * Bf(alpha * ni))
+        ratio = g / model(q, ni, Bf, True)
         ax[1].plot(alpha * ni, ratio, "-" + mk, color=col, ms=6, lw=1.4,
                    label=f"{name}  (наложение ±{err:.1f}%)")
 
