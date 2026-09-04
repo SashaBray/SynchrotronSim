@@ -296,6 +296,79 @@ def cmd_repro(element, amp_turns, outdir):
     return r
 
 
+TURNS = {"QP_sh": 68, "QP_L": 85, "SP": 41, "OP": 34, "DQ": 53}
+WINDING = {"QP_sh": "I", "QP_L": "I", "OP": "I1", "SP": "I1"}
+
+
+def cmd_register(element, material="workspace/materials/steel_1008_bh.csv"):
+    """Завести снятые карты в реестр: .fld → копия в fields_raw, .bin в fields_bin, строка в CSV.
+
+    Переконвертирует и УЖЕ зарегистрированные карты, если их .fld в KD новее, чем .bin: после
+    `--recompute` файлы в KD обновились, а .bin остался августовским, и модель молча читала бы
+    старые данные."""
+    import shutil
+
+    import numpy as np
+    from field_quality import load
+    from symmetrize_map import write_bin
+
+    reg_path = os.path.join("workspace", "tables", "field_maps.csv")
+    rows = list(csv.DictReader(open(reg_path, encoding="utf-8-sig"), delimiter=";"))
+    cols = list(rows[0].keys())
+    have = {r["map_id"]: r for r in rows}
+    proto = next(r for r in rows if r["element"] == element)
+    wd = WINDING.get(element, "I")
+    n = TURNS.get(element, 1)
+
+    grid = reference_grid(element)
+    folder = os.path.dirname(grid["sample"])
+    added = reconv = 0
+    for f in sorted(glob.glob(os.path.join(folder, f"{element}_*A.fld"))):
+        m = re.search(rf"{re.escape(element)}_(\d+)A\.fld$", os.path.basename(f))
+        if not m:
+            continue
+        at = int(m.group(1))
+        mid = f"{element}.{wd}.{at}"
+        raw = os.path.join("model", element, f"{mid}.fld")
+        bin_ = os.path.join("model", element, f"{mid}.bin")
+        raw_abs = os.path.join("workspace", "fields_raw", raw)
+        bin_abs = os.path.join("workspace", "fields_bin", bin_)
+        fresh = (not os.path.exists(bin_abs)
+                 or os.path.getmtime(f) > os.path.getmtime(bin_abs))
+        if fresh:
+            os.makedirs(os.path.dirname(raw_abs), exist_ok=True)
+            os.makedirs(os.path.dirname(bin_abs), exist_ok=True)
+            shutil.copy2(f, raw_abs)
+            h, B = load(f)
+            write_bin(h, B, bin_abs, nominal_arg=float(at))
+            if mid in have:
+                reconv += 1
+                print(f"  переконвертирована {mid} (.fld новее .bin)")
+        if mid in have:
+            continue
+        r = {c: "" for c in cols}
+        r.update({"map_id": mid, "element": element, "winding": wd,
+                  "device_type_id": proto["device_type_id"], "amp_turns": str(at),
+                  "current_a": f"{wd}={at / n:.2f}", "excitation": f"{wd}={at}",
+                  "split": "test" if added % 3 == 2 else "train",
+                  "grid": proto["grid"], "material_curve": material,
+                  "raw_path": raw.replace(os.sep, "/"), "bin_path": bin_.replace(os.sep, "/"),
+                  "source_fld": f.replace(os.sep, "/"),
+                  "note": "серия 2026-09-04, автоматическое снятие"})
+        rows.append(r)
+        added += 1
+        print(f"  добавлена {mid}  ({at} А·в = {at / n:.1f} А, {r['split']})")
+    if added:
+        # БЕЗ BOM: read_registry открывает реестр как обычный utf-8, и с BOM первый столбец
+        # превращается в "﻿map_id" — вся цепочка падает на KeyError('map_id').
+        with open(reg_path, "w", encoding="utf-8", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=cols, delimiter=";")
+            w.writeheader()
+            w.writerows(rows)
+    print(f"  итог: добавлено {added}, переконвертировано {reconv}, всего у {element} "
+          f"{sum(1 for r in rows if r['element'] == element)} карт")
+
+
 def cmd_recompute(element, outdir, backup="_original", everything=False):
     """Пересчитать УЖЕ СНЯТЫЕ карты, отложив оригиналы в сторону.
 
@@ -382,6 +455,8 @@ def main(argv=None):
                     help="кривая, на которой ДОЛЖНА сниматься серия")
     ap.add_argument("--limit", type=int, help="взять только первые N точек из оставшихся: "
                                              "первый прогон разумно делать на ОДНОЙ")
+    ap.add_argument("--register", action="store_true",
+                    help="завести снятые карты в реестр (.fld -> .bin -> строка в field_maps.csv)")
     ap.add_argument("--all", action="store_true",
                     help="с --recompute: пересчитать ВСЕ карты, а не только из прежних прогонов")
     ap.add_argument("--recompute", action="store_true",
@@ -392,6 +467,11 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     els = [a.element] if a.element else sorted({j["element"] for j in jobs()})
+    if a.register:
+        for el in els:
+            print(f"=== {el}: регистрация карт")
+            cmd_register(el, a.material)
+        return 0
     if a.recompute:
         if len(els) != 1:
             raise SystemExit("--recompute требует --element")
