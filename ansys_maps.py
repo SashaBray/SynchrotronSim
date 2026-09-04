@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import filecmp
 import glob
 import os
 import re
@@ -482,7 +483,7 @@ def cmd_recompute(element, outdir, backup="_original", everything=False):
     rc = subprocess.call([AEDT_EXE, "-ng", "-runscriptandexit", os.path.abspath(sp)])
     print(f"  AEDT вернул {rc}\n")
     print(f"  {'карта':34} {'прежде':>10} {'теперь':>10} {'расхождение':>12}")
-    diffs = []
+    diffs, cached = [], []
     for j in todo:
         old_f, new_f = os.path.join(bak, j["name"]), j["target"]
         if not (os.path.exists(old_f) and os.path.exists(new_f)):
@@ -491,8 +492,20 @@ def cmd_recompute(element, outdir, backup="_original", everything=False):
         _, hn = probe(new_f, ORDER_BY_ELEMENT.get(element, 2))
         d = 100.0 * (hn - ho) / ho if ho else float("nan")
         diffs.append(d)
-        print(f"  {j['name']:34} {ho:10.5g} {hn:10.5g} {d:11.2f}%")
-    if diffs:
+        same = filecmp.cmp(old_f, new_f, shallow=False)
+        cached.append(same)
+        print(f"  {j['name']:34} {ho:10.5g} {hn:10.5g} {d:11.2f}%"
+              + ("   ← БАЙТ-В-БАЙТ: решение взято из кэша" if same else ""))
+    if cached and all(cached):
+        # Maxwell хранит решения по вариациям и на повторный Analyze отдаёт готовое, рапортуя
+        # «Normal completion». Пустой прогон выглядит как ИДЕАЛЬНЫЙ результат (разброс 0.00%),
+        # хотя означает, что не пересчитано ничего. Отличаем по времени: кэш ~35 с на точку
+        # против ~4 мин у настоящего счёта, и по побайтовому совпадению файлов.
+        print("  ПЕРЕСЧЁТА НЕ БЫЛО: все файлы совпали байт-в-байт, Maxwell отдал решения из кэша.")
+        print("  Это не «нулевой разброс», а отсутствие счёта. Зато отсюда следует, что проект")
+        print("  с тех пор НЕ МЕНЯЛСЯ (иначе решения были бы сброшены), и серия самосогласована.")
+        print("  Принудительный пересчёт: --fresh (удалит сохранённые решения вариаций).")
+    elif diffs:
         print(f"  разброс прогон-к-прогону: средний модуль {np.mean(np.abs(diffs)):.2f}%, "
               f"максимум {np.max(np.abs(diffs)):.2f}%")
     return diffs
