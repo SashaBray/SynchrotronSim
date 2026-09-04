@@ -152,9 +152,14 @@ def solve(element, targets, fix=None, lam=1e-3, models=None, seeds=8):
         cur = currents_of(x)
         out = []
         for k in keys:
-            pr = cal[k][0] * abs(ms.kick(element, ORDER[k], cur, models))
-            # Сравниваем МОДУЛИ: знак кика задаётся намоткой и в проектной величине не участвует.
-            out.append((pr - abs(targets[k])) / scale[k])
+            pr = cal[k][0] * ms.kick(element, ORDER[k], cur, models)
+            t = targets[k]
+            if isinstance(t, complex):
+                # ОБЕ поперечные составляющие: кик двумерен, и комбинация целей доопределяет
+                # задачу. Сравнение по модулю выбрасывало бы половину условия.
+                out += [(pr.real - t.real) / scale[k], (pr.imag - t.imag) / scale[k]]
+            else:
+                out.append((abs(pr) - abs(t)) / scale[k])
         # Штраф за ток: выбирает среди попадающих решений наименьшее по току.
         out += [np.sqrt(lam) * v for v in x]
         return np.array(out)
@@ -170,8 +175,9 @@ def solve(element, targets, fix=None, lam=1e-3, models=None, seeds=8):
         if best is None or r.cost < best.cost:
             best = r
     cur = currents_of(best.x)
-    got = {k: cal[k][0] * abs(ms.kick(element, ORDER[k], cur, models)) for k in keys}
-    err = {k: 100.0 * (got[k] - abs(targets[k])) / abs(targets[k]) for k in keys}
+    got = {k: cal[k][0] * ms.kick(element, ORDER[k], cur, models) for k in keys}
+    err = {k: 100.0 * abs(got[k] - targets[k]) / abs(targets[k]) if isinstance(targets[k], complex)
+           else 100.0 * (abs(got[k]) - abs(targets[k])) / abs(targets[k]) for k in keys}
     return cur, got, err, cal
 
 
@@ -186,10 +192,17 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if not a.target:
         raise SystemExit("нужен хотя бы один --target")
+    # Цель может быть задана МОДУЛЕМ (`B=1.2e-4`, направление свободно) либо ОБЕИМИ
+    # составляющими (`B=0,-1.2e-4`). Второй вид даёт два условия вместо одного и доопределяет
+    # задачу: у корректора обмотки бьют в разные стороны и вместе накрывают плоскость.
     targets = {}
     for t in a.target:
         k, v = t.split("=", 1)
-        targets[k.strip()] = float(v)
+        if "," in v:
+            re_, im_ = (float(x) for x in v.split(",", 1))
+            targets[k.strip()] = complex(re_, im_)
+        else:
+            targets[k.strip()] = float(v)
     fix = {}
     for t in a.fix:
         k, v = t.split("=", 1)
@@ -199,12 +212,14 @@ def main(argv=None):
     ws = windings(a.element, models)
     print(f"=== {a.element}: обмоток {len(ws)} {ws}, требуемых величин {len(targets)}")
     n_free = len(ws) - len(fix)
-    if n_free > len(targets):
-        print(f"  задача НЕДООПРЕДЕЛЕНА ({n_free} свободных обмоток на {len(targets)} величин): "
-              f"из континуума решений берётся наименьшее по току")
-    elif n_free < len(targets):
-        print(f"  задача ПЕРЕОПРЕДЕЛЕНА ({n_free} обмоток на {len(targets)} величин): "
-              f"точное попадание невозможно, ищется наилучшее приближение")
+    n_cond = sum(2 if isinstance(v, complex) else 1 for v in targets.values())
+    print(f"  свободных обмоток {n_free}, условий {n_cond} "
+          f"(комплексная цель даёт ДВА условия — обе поперечные составляющие)")
+    if n_free > n_cond:
+        print(f"  задача НЕДООПРЕДЕЛЕНА: из континуума решений берётся наименьшее по току")
+    elif n_free < n_cond:
+        print(f"  задача ПЕРЕОПРЕДЕЛЕНА: точное попадание невозможно, "
+              f"ищется наилучшее приближение")
     cur, got, err, cal = solve(a.element, targets, fix, a.lam, models)
     for k, (v, sp, n) in cal.items():
         print(f"  перевод гармоники в {k}: множитель {v:.5g} (разброс по {n} картам {sp:.1f}%)")

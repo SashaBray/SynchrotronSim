@@ -44,7 +44,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import branch_network as bn
 
 WEIGHTS = os.path.join("workspace", "tables", "mec_sigma_weights.csv")
-MODELS = (("corrector", 1), ("DQ", 1), ("DQ", 2))
+# Корректор описывается ДВУМЯ гармониками: боковые обмотки поодиночке дают квадруполь величиной
+# в половину своего диполя, и только в комбинациях эти вклады разделяются. Независимых ручек у
+# него четыре: вертикальный диполь (main), горизонтальный (c1-,c2+,c3+,c4-), нормальный
+# квадруполь (c1+,c2+,c3-,c4-) и скошенный (c1-,c2+,c3-,c4+), с силами 1.00/0.29/0.12/0.10.
+MODELS = (("corrector", 1), ("corrector", 2), ("DQ", 1), ("DQ", 2))
 _CACHE = {}
 
 
