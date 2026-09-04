@@ -30,6 +30,7 @@ from scipy.optimize import brentq
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import branch_network as bn
+import saturation_model as sm
 
 
 def state(cir, currents, p):
@@ -149,11 +150,68 @@ def run(element, order=1):
     return res
 
 
+def single_branch(element):
+    """Элементы БЕЗ графа (одно вырожденное ребро): закон NI = A·y + L·H(C·y).
+
+    Обратная задача здесь ЯВНАЯ — по измеренному коэффициенту ампер-витки считаются напрямую,
+    без поиска корня. Поэтому ошибка тока получается сразу и не зависит от обусловленности поиска."""
+    import json
+    d = json.load(open(os.path.join(sm.OUTDIR, f"{element}.json"), encoding="utf-8"))
+    Hof = sm._material()
+    out = {}
+    for wd, f in d["fits"].items():
+        key, A, C, L = f["coeff"], f["A"], f["C"], f["L"]
+        e = []
+        for r in d["records"]:
+            if r["winding"] != wd or not r["coeffs"] or key not in r["coeffs"]:
+                continue
+            ni = abs(float(r["amp_turns"]))
+            if ni <= 0:
+                continue
+            y = abs(r["coeffs"][key])
+            pred = A * y + L * float(np.atleast_1d(Hof(C * y))[0])
+            e.append(100.0 * abs(pred - ni) / ni)
+        if e:
+            out[wd] = (float(np.mean(e)), float(np.max(e)), len(e), key)
+    return out
+
+
+def library():
+    """Точность В ТОКЕ по всей библиотеке: МЭС-σ там, где есть граф, однобранчевый закон иначе."""
+    import mec_sigma as ms
+    print("=== точность В ТОКЕ по библиотеке (|λ−1|, %) ===")
+    print(f"  {'элемент':10} {'модель':12} {'обмотка':10} {'карт':>5} {'среднее':>9} {'макс':>8}")
+    M = ms.load()
+    for (el, order), (cir, w) in sorted(M.items()):
+        maps = bn.read_maps(el, order)
+        groups = {}
+        for cur, meas, _, mid in maps:
+            groups.setdefault("КОМБИНАЦИИ" if len(cur) > 1 else next(iter(cur)), []).append((cur, meas))
+        for k in sorted(groups, key=lambda k: (k == "КОМБИНАЦИИ", k)):
+            e = [100 * abs(ms.current_scale(el, order, c, m, M) - 1.0) for c, m in groups[k]]
+            e = [x for x in e if np.isfinite(x)]
+            print(f"  {el:10} {'МЭС-σ n=' + str(order):12} {k:10} {len(e):5d} "
+                  f"{np.mean(e):8.1f}% {np.max(e):7.1f}%")
+    for el in ("QP_sh", "QP_L", "SP", "OP"):
+        try:
+            res = single_branch(el)
+        except (OSError, KeyError, ValueError) as exc:
+            print(f"  {el:10} — нет данных ({exc})")
+            continue
+        for wd, (m, x, n, key) in sorted(res.items()):
+            print(f"  {el:10} {'одна ветвь':12} {wd + ' (' + key + ')':10} {n:5d} "
+                  f"{m:8.1f}% {x:7.1f}%")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("element", nargs="?", default="corrector")
     ap.add_argument("--order", type=int, default=1)
+    ap.add_argument("--library", action="store_true", help="сводка по всей библиотеке")
     a = ap.parse_args(argv)
+    if a.library:
+        library()
+        return 0
     run(a.element, a.order)
     return 0
 
