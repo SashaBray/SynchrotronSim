@@ -322,6 +322,41 @@ def mirror_sign(cir, b):
     return float(np.sign(a + c)) if (a + c) != 0 else float(np.sign(a - c))
 
 
+def tip_charges(cir, phi):
+    """Поток, отдаваемый КАЖДЫМ наконечником полюса в воздух (магнитный «заряд» наконечника).
+
+    Сумма по всем наконечникам тождественно нулевая — сколько потока вышло в зазор, столько и вошло."""
+    q = {}
+    for b in cir.gaps:
+        a_, c_ = cir.edge[b]
+        for n, sgn in ((a_, +1.0), (c_, -1.0)):
+            if cir.tip_xy(n) is not None:
+                q[n] = q.get(n, 0.0) + sgn * phi[b]
+    return q
+
+
+def multipole_basis(cir, currents, p, orders=(1,)):
+    """Мультиполи ИЗ ГЕОМЕТРИИ: наконечник с потоком q в точке ζ даёт вклад q/ζⁿ в гармонику n.
+
+    Это двумерное разложение поля точечного источника вокруг оси пучка. Никаких классов и свободных
+    направлений: положение наконечника задаёт и величину, и фазу вклада во ВСЕ гармоники сразу.
+    Свободным остаётся один масштаб на порядок — он вбирает в себя замену распределённого полюсного
+    башмака точечным зарядом."""
+    lens, perms, secs = unpack(p, cir)
+    phi, _ = cir.solve(currents, lens, perms, secs=secs)
+    q = tip_charges(cir, phi)
+    out = []
+    for n in orders:
+        acc = 0j
+        for node, qq in q.items():
+            y, z = cir.tip_xy(node)
+            zeta = complex(y, z) * 1e-3                     # координаты наконечников заданы в мм
+            if abs(zeta) > 1e-9:
+                acc += qq / zeta ** n
+        out.append(acc)
+    return np.array(out, dtype=complex)
+
+
 def gap_basis(cir, currents, p):
     """Базис линейной части: на класс воздушных ветвей — ОДИН вещественный вес.
 
