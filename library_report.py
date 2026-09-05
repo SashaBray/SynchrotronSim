@@ -478,6 +478,35 @@ def design_note(element):
     return txt
 
 
+def design_points(element):
+    """Проектные рабочие точки элемента: по строке на (исполнение, кик).
+
+    Ток называется, только если проектную точку несёт ОДНА обмотка. Если магнит выходит на неё
+    комбинацией (диполь-квадруполь: I1 и I2), в поле тока стоит None, а `by` перечисляет обмотки:
+    разложить проектный кик по обмоткам без математической модели нельзя."""
+    by = DESIGN_BY.get(element)
+    turns = winding_turns().get(element, {})
+    nom_w = nominal_by_winding(element)
+    alone = bool(by) and len(by) == 1
+    out = []
+    for L, levels in variants(element):
+        if not levels:
+            continue
+        pts_by_w = variant_kicks(element, L)
+        w = by[0] if by else None
+        x = y_of = None
+        if alone and w in pts_by_w:
+            pts = pts_by_w[w]
+            x = np.array([q[0] for q in pts]) / (turns.get(w) or 1)
+            y_of = lambda n: np.array([q[1][n][0] for q in pts])
+        nom = (nom_w.get(w) if w else None) or nom_w.get(None)
+        for n, dev, v, cnt in sorted(levels, key=lambda q: (q[0], q[2])):
+            cur = first_crossing(x, y_of(n), v) if y_of else None
+            out.append(dict(L=L, order=n, dev=dev, level=v, count=cnt, by=by, alone=alone,
+                            winding=w, nominal=nom, cur=cur))
+    return out
+
+
 def plot_winding(element, winding, pts, turns, L, levels, outdir, tag, alone=True):
     """Один график = одна обмотка одного ИСПОЛНЕНИЯ. На нём все кики, которые обмотка создаёт.
 
@@ -602,6 +631,57 @@ def build(out=OUT, figs=PNG):
     wt = winding_turns()
     t = _table(doc, ("Элемент", "Обозначение", "Карт поля", "Обмоток", "Обмотки"))
     for el in ELEMENTS:
+        c = t.add_row().cells
+        c[0].text, c[1].text = NAMES[el], el
+        c[2].text, c[3].text = str(reg.get(el, 0)), str(len(wt.get(el, {})))
+        c[4].text = ", ".join(sorted(wt.get(el, {})))
+
+    doc.add_heading("Сводная таблица проектных рабочих точек", level=1)
+    doc.add_paragraph(
+        "Ток — свойство МАГНИТА, а не обмотки, и назван один раз на исполнение. Он приведён там, "
+        "где проектную точку несёт одна обмотка; диполь-квадруполь выходит на неё комбинацией I1 "
+        "и I2, и без математической модели разложить его кик по обмоткам нельзя.")
+    t = _table(doc, ("Элемент", "Исполнение", "Кик", "Проектный кик", "Штук",
+                     "Обмотка", "Номинальный ток, А", "Проектный ток, А", "% номинала"))
+    for el in ELEMENTS:
+        for r in design_points(el):
+            c = t.add_row().cells
+            k = KICK_KEY[r["order"]]
+            cur = ("комбинацией " + " и ".join(r["by"]) if not r["alone"] else
+                   "не достигается" if r["cur"] is None else f"{r['cur']:.1f}")
+            pct = ("—" if not r["alone"] or r["cur"] is None or not r["nominal"]
+                   else f"{100 * r['cur'] / r['nominal']:.0f}%")
+            for i, v in enumerate((NAMES[el], f"{r['L']:.3f} м", f"∫{k}·dl, {INT_UNITS[k]}",
+                                   f"{r['level']:.5g}", str(r["count"]),
+                                   (" и ".join(r["by"]) if r["by"] and not r["alone"]
+                                    else r["winding"] or "—"),
+                                   f"{r['nominal']:.4g}" if r["nominal"] else "—", cur, pct)):
+                c[i].text = v
+    doc.add_paragraph(
+        "Проектный кик — интеграл гармоники вдоль элемента в физических единицах при 6 ГэВ; "
+        "проектный ток — ток одной катушки, при котором магнит его выдаёт. Корректоров в таблице "
+        "нет: они не оттюнены, проектной точки у них ещё не назначено.", style="List Bullet")
+
+    doc.add_heading("Сверка двух независимых способов", level=1)
+    doc.add_paragraph(
+        "Кики на графиках получены гармоническим разложением карт. Тот же кик можно получить "
+        "иначе — прогнать через карту пучок диффурным ядром и подобрать силу по траекториям. Ниже "
+        "сравнение обоих способов на самой сильной карте каждого элемента. Совпадение означает, "
+        "что систематики нет ни в разложении, ни в подгонке. Сравнивается НОРМАЛЬНАЯ компонента: "
+        "гармоника комплексна, и её модуль смешал бы нормальную часть со скошенной — у боковых "
+        "обмоток корректора это давало ложные 59% расхождения.")
+    t = _table(doc, ("Элемент", "Карта, А·в", "Кик", "Из гармоник", "Из траекторий",
+                     "Расхождение"))
+    for el in ELEMENTS:
+        cc = crosscheck(el, KEY[el])
+        if not cc:
+            continue
+        c = t.add_row().cells
+        for i, v in enumerate((NAMES[el], f"{cc['ni']:.0f}",
+                               f"∫{cc['key']}·dl, {INT_UNITS[cc['key']]}",
+                               f"{cc['harm']:.6g}", f"{cc['traj']:.6g}", f"{cc['diff']:+.2f}%")):
+            c[i].text = v
+    for el in ELEMENTS:
         doc.add_page_break()
         doc.add_heading(f"{NAMES[el]} ({el})", level=1)
 
@@ -645,7 +725,7 @@ def build(out=OUT, figs=PNG):
                     style="List Bullet")
 
         turns = winding_turns().get(el, {})
-        nom_w = nominal_by_winding(el)
+        dps = design_points(el)
         for L, levels in vs:
             pts_by_w = variant_kicks(el, L)
             if not pts_by_w:
@@ -660,26 +740,15 @@ def build(out=OUT, figs=PNG):
             if levels:
                 t = _table(doc, ("Кик", "Проектное значение", "Штук в кольце",
                                  "Ток обмотки, А"))
-                nom0 = nom_w.get(by[0]) or nom_w.get(None) if by else None
-                cur = {}
-                if alone and by[0] in pts_by_w:
-                    pts = pts_by_w[by[0]]
-                    xx = np.array([q[0] for q in pts]) / (turns.get(by[0]) or 1)
-                    for n, dev, v, cnt in levels:
-                        yy = np.array([q[1][n][0] for q in pts])
-                        cur[(n, v)] = first_crossing(xx, yy, v)
-                for n, dev, v, cnt in sorted(levels, key=lambda q: (q[0], q[2])):
+                for r in [q for q in dps if abs(q["L"] - L) < 1e-9]:
                     c = t.add_row().cells
-                    c[0].text = f"∫{KICK_KEY[n]}·dl, {INT_UNITS[KICK_KEY[n]]}"
-                    c[1].text = f"{v:.5g}"
-                    c[2].text = str(cnt)
-                    if not alone:
-                        c[3].text = "комбинацией " + " и ".join(by)
-                    else:
-                        xi = cur.get((n, v))
-                        c[3].text = ("не достигается" if xi is None else
-                                     f"{xi:.1f}" + (f"  ({100 * xi / nom0:.0f}% ном.)"
-                                                    if nom0 else ""))
+                    c[0].text = f"∫{KICK_KEY[r['order']]}·dl, {INT_UNITS[KICK_KEY[r['order']]]}"
+                    c[1].text = f"{r['level']:.5g}"
+                    c[2].text = str(r["count"])
+                    c[3].text = ("комбинацией " + " и ".join(by) if not alone else
+                                 "не достигается" if r["cur"] is None else
+                                 f"{r['cur']:.1f}" + (f"  ({100 * r['cur'] / r['nominal']:.0f}% "
+                                                      f"ном.)" if r["nominal"] else ""))
                 p = doc.add_paragraph()
                 if alone:
                     p.add_run(f"Проектную точку несёт обмотка {by[0]}").bold = True
