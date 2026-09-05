@@ -308,34 +308,168 @@ def crosscheck(element, key):
 
 # ───────────────────────────── графики ─────────────────────────────
 
-def plot_winding(element, winding, pts, turns, outdir):
-    """Один график = одна обмотка. На нём ВСЕ кики, которые она создаёт, каждый в своей шкале.
+VAR_CACHE = os.path.join("workspace", "results", "library_report_variants.json")
 
-    Что кик реален, решает не наше желание его увидеть, а `resolution`. Нарисовать шум под именем
-    октуполя хуже, чем не рисовать ничего: по такой кривой будут считать ток."""
+
+def _load_full(path):
+    """Карта из .bin, приведённая к ПОЛНОЙ: библиотека хранит половинки (X≥0)."""
+    from field_quality import load
+    import _qp_scale as qs
+    h, B = load(path)
+    if h["mnx"] >= -1e-9:
+        h, B = qs.mirror_full(h, B)
+    return h, B
+
+
+def _profile(h, B, order, radius, nth=64):
+    """Продольный профиль гармоники: (x, |b_n(x)|). Нормальная компонента (мнимая часть)."""
+    from field_quality import _circle
+    xs = h["mnx"] + np.arange(h["nx"]) * h["sx"]
+    v = []
+    for ix in range(h["nx"]):
+        by, bz = _circle(h, B, ix, radius, nth=nth)
+        sp = np.fft.fft(by + 1j * bz) / nth
+        v.append((sp[0] if order == 1 else sp[-(order - 1)]).imag)
+    return xs, np.abs(np.array(v)) / radius ** (order - 1)
+
+
+def _kicks(h, B, orders, nth=64):
+    """{порядок: (нормальный кик, скошенный кик)} на ПОЛНОЙ карте, каждый на своём радиусе пробы."""
+    from field_quality import _circle
+    xs = h["mnx"] + np.arange(h["nx"]) * h["sx"]
+    out = {}
+    for r in sorted({PLOT_RADIUS[n] for n in orders}):
+        acc = {n: [] for n in orders if PLOT_RADIUS[n] == r}
+        if not acc:
+            continue
+        for ix in range(h["nx"]):
+            by, bz = _circle(h, B, ix, r, nth=nth)
+            sp = np.fft.fft(by + 1j * bz) / nth
+            for n in acc:
+                acc[n].append(sp[0] if n == 1 else sp[-(n - 1)])
+        for n, a in acc.items():
+            v = np.array(a)
+            c = complex(np.trapezoid(v.real, xs), np.trapezoid(v.imag, xs))
+            out[n] = (abs(c.imag) / r ** (n - 1), abs(c.real) / r ** (n - 1))
+    return out
+
+
+def stretch(h, B, order, radius, L_target):
+    """Карта магнита ДРУГОЙ ДЛИНЫ: тело растягивается, фриндж сохраняется.
+
+    Это штатный гибридный ресайз проекта (`_qp_scale_hybrid.resize`, тот же, что у
+    `gen_synthetic_maps`): удлинить магнит — значит добавить прямого участка, а не растянуть его
+    целиком, потому что краевое поле определяется поперечником и от длины не зависит. Отсюда и
+    тождество L_eff = c_body·L_тела + L_фринджа.
+
+    Тело выделяется по профилю ВЕДУЩЕЙ гармоники (её интеграл и есть кик), а не по |B| в стороне
+    от оси, как в продакшн-эвристике: у наших карт та срывалась в запасной вариант «тело = вся
+    длина», и фриндж растягивался вместе с телом.
+
+    Разбиение считается ДЛЯ КАЖДОЙ КАРТЫ отдельно: в насыщении профиль заостряется, и общая на весь
+    ток длина тела дала бы у секступоля c_body=2.2 там, где должно быть 1."""
+    import _qp_scale_hybrid as hy
+    xs, p = _profile(h, B, order, radius)
+    mx = p.max()
+    if mx <= 0:
+        return None, None, None
+    Xb = float(xs[p >= 0.9 * mx].max())
+    L_body, L0 = 2 * Xb, float(np.trapezoid(p, xs) / mx)
+    L_fringe = L0 - L_body
+    if L_body <= 1e-6:
+        return None, None, None
+    cb = min(max((L_target - L_fringe) / L_body, 0.05), 20.0)
+    h2, B2 = hy.resize(h, B, cb, 1.0, Xb)
+    return h2, B2, cb
+
+
+def variant_kicks(element, L_target, orders=ORDERS):
+    """{обмотка: [(ампер-витки, {порядок: (норм, скью)})]} для магнита длины L_target.
+
+    Карты сняты с ОДНОЙ длины из семейства, а в решётке магнит стоит в нескольких. Кривые для
+    остальных длин получаются синтезом (`stretch`), иначе их проектный кик выглядит недостижимым —
+    просто потому, что сравнивался с более коротким магнитом."""
+    cache = {}
+    if os.path.exists(VAR_CACHE):
+        try:
+            cache = json.load(open(VAR_CACHE, encoding="utf-8"))
+        except (OSError, ValueError):
+            cache = {}
+    dirty = False
+    lead = ORDER_OF[KEY[element]]
+    data = collections.defaultdict(list)
+    for r in sm.read_registry():
+        if r["element"] != element or ";" in r["excitation"] or "+" in r["excitation"]:
+            continue
+        p = os.path.join("workspace", "fields_bin", r["bin_path"])
+        try:
+            ni = abs(float(r["amp_turns"]))
+        except (TypeError, ValueError):
+            continue
+        if ni <= 0 or not os.path.exists(p):
+            continue
+        ck = f"{r['map_id']}|{L_target:.4f}"
+        if ck not in cache:
+            h, B = _load_full(p)
+            h2, B2, cb = stretch(h, B, lead, PLOT_RADIUS[lead], L_target)
+            if h2 is None:
+                continue
+            k = _kicks(h2, B2, orders)
+            cache[ck] = {"cb": cb, "k": {str(n): list(v) for n, v in k.items()}}
+            dirty = True
+        e = cache[ck]
+        data[r["winding"]].append((ni, {int(n): tuple(v) for n, v in e["k"].items()}, e["cb"]))
+    if dirty:
+        os.makedirs(os.path.dirname(VAR_CACHE) or ".", exist_ok=True)
+        json.dump(cache, open(VAR_CACHE, "w", encoding="utf-8"))
+    return {w: sorted(v, key=lambda t: t[0]) for w, v in data.items()}
+
+
+def variants(element):
+    """Исполнения элемента: [(длина, [(устройство, кик, штук), …]), …], по возрастанию длины.
+
+    У корректора проектных киков в решётке нет (он не оттюнен) — тогда единственное «исполнение»
+    это длина снятых карт."""
+    by_len = collections.defaultdict(list)
+    for n in ORDERS:
+        for (dev, L, v), cnt in design_levels(element, KICK_KEY[n]).items():
+            by_len[round(L, 4)].append((n, dev, v, cnt))
+    if not by_len:
+        L = map_length(element, KEY[element])
+        return [(L, [])] if L else []
+    return sorted(by_len.items())
+
+
+def design_note(element):
+    """Что элемент создаёт ПО ПРОЕКТУ — по ненулевым коэффициентам решётки."""
+    kk = [ORDER_NAME[n] for n in ORDERS if design_levels(element, KICK_KEY[n])]
+    return " и ".join(kk) if kk else None
+
+
+def plot_winding(element, winding, pts, turns, L, levels, outdir, tag):
+    """Один график = одна обмотка одного ИСПОЛНЕНИЯ. На нём все кики, которые обмотка создаёт."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    res = {n: resolution(pts, n) for n in ORDERS}
+    native = element_spectra(element).get(winding)
+    res = {n: (resolution(native, n) if native else 0.0) for n in ORDERS}
     show = [n for n in ORDERS if res[n] <= RESOLVED]
     if not show:
         return None
     x = np.array([p[0] for p in pts]) / (turns or 1)
-    Lmap = map_length(element, KEY[element])
+    cb = float(np.mean([p[2] for p in pts]))
 
     fig, ax = plt.subplots(figsize=(9.0, 5.4))
     axes = {n: (ax if k == 0 else ax.twinx()) for k, n in enumerate(show)}
-    rows, notes = [], []
-    skew = {}
+    rows, notes, skew = [], [], {}
     for k, n in enumerate(show):
         a, col = axes[n], ORDER_COLOR[n]
-        y = np.array([p[1][PLOT_RADIUS[n]][n][0] for p in pts])
-        ys = np.array([p[1][PLOT_RADIUS[n]][n][1] for p in pts])
+        y = np.array([p[1][n][0] for p in pts])
+        ys = np.array([p[1][n][1] for p in pts])
         a.plot(x, y, "-o", color=col, ms=4.5, lw=1.6, zorder=3)
-        # Скошенная компонента — это ТОТ ЖЕ мультиполь, повёрнутый на пол-периода: он связывает
-        # плоскости, а не фокусирует в них. У чистых элементов её доли процента, у боковых обмоток
-        # корректора она сравнима с нормальной, и умолчать о ней значило бы соврать про кик.
+        # Скошенная компонента — тот же мультиполь, повёрнутый на пол-периода: он связывает
+        # плоскости, а не фокусирует в них. У боковых обмоток корректора она больше нормальной.
         skew[n] = 100 * float(np.mean(ys[len(ys) // 2:] / np.maximum(y[len(y) // 2:], 1e-30)))
         if skew[n] >= SKEW_SHOW:
             a.plot(x, ys, "--s", color=col, ms=3.5, lw=1.3, alpha=0.75, zorder=2)
@@ -345,23 +479,16 @@ def plot_winding(element, winding, pts, turns, outdir):
         if k > 1:
             a.spines["right"].set_position(("outward", 58 * (k - 1)))
         ymax = y.max()
-
-        for (dev, L, v), cnt in sorted(design_levels(element, KICK_KEY[n]).items(),
-                                       key=lambda t: t[0][2]):
-            same = Lmap and abs(L - Lmap) / Lmap <= 0.10
-            a.axhline(v, color=col, lw=1.0, alpha=0.75, ls="-" if same else ":", zorder=1)
+        for order, dev, v, cnt in sorted([q for q in levels if q[0] == n], key=lambda q: q[2]):
+            a.axhline(v, color=col, lw=1.0, alpha=0.8, zorder=1)
             xi = first_crossing(x, y, v)
             if xi is not None:
                 a.plot([xi], [v], "D", color=col, ms=7.5, zorder=4, mec="white", mew=0.9)
                 a.plot([xi, xi], [0, v], color=col, lw=0.9, ls="--", alpha=0.6, zorder=1)
-            rows.append(dict(order=n, dev=dev, L=L, level=v, count=cnt, cur=xi, same=same))
-            notes.append((col, f"{ORDER_NAME[n]}  {dev.replace(element + '_', '')}  {v:.4g}  →  "
-                               + (f"{xi:.1f} А" if xi is not None else "не достигается")
-                               + ("" if same else "  (магнит другой длины)")))
-            # Уровень чужой длины НЕ растягивает шкалу: он недостижим по построению, и из-за него
-            # настоящая кривая сплющивалась бы в нижнюю треть графика.
-            if same:
-                ymax = max(ymax, v)
+            rows.append(dict(order=n, dev=dev, level=v, count=cnt, cur=xi))
+            notes.append((col, f"{ORDER_NAME[n]}  {v:.4g}  →  "
+                               + (f"{xi:.1f} А" if xi is not None else "не достигается")))
+            ymax = max(ymax, v)
         a.set_ylim(0, max(ymax, ys.max() if skew[n] >= SKEW_SHOW else 0) * 1.15)
 
     for i, (col, txt) in enumerate(notes):
@@ -369,33 +496,20 @@ def plot_winding(element, winding, pts, turns, outdir):
                     color=col, family="monospace", va="top",
                     bbox=dict(fc="white", ec="none", alpha=0.8, pad=1.2))
 
-    ax.set_xlabel(f"ток обмотки, А   ({turns} витков на катушку)")
-    sub = [f"длина магнита в картах {Lmap:.3f} м"] if Lmap else []
+    sub = [f"L_eff = {L:.3f} м"
+           + ("" if abs(cb - 1) < 0.03 else f" (карта растянута ×{cb:.2f} по телу)")]
     if any(v >= SKEW_SHOW for v in skew.values()):
         sub.append("пунктир — скошенная компонента")
+    ax.set_xlabel(f"ток обмотки, А   ({turns} витков на катушку)")
     ax.set_title(f"{NAMES[element]} ({element}), обмотка {winding}: "
-                 + ", ".join(ORDER_NAME[n] for n in show)
-                 + ("\n" + ";  ".join(sub) if sub else ""), fontsize=11)
+                 + ", ".join(ORDER_NAME[n] for n in show) + "\n" + ";  ".join(sub), fontsize=11)
     ax.grid(alpha=0.25)
     fig.tight_layout()
     os.makedirs(outdir, exist_ok=True)
-    png = os.path.join(outdir, f"{element}_{winding}.png")
+    png = os.path.join(outdir, f"{element}_{tag}_{winding}.png")
     fig.savefig(png, dpi=150)
     plt.close(fig)
-    return dict(w=winding, png=png, npts=len(pts), show=show, res=res, rows=rows, Lmap=Lmap,
-                skew=skew)
-
-
-def plot_element(element, outdir):
-    """Все обмотки элемента: по графику на каждую."""
-    spec = element_spectra(element)
-    turns = winding_turns().get(element, {})
-    out = []
-    for w in sorted(spec, key=lambda z: (z != "main", z)):
-        r = plot_winding(element, w, spec[w], turns.get(w), outdir)
-        if r:
-            out.append(r)
-    return out
+    return dict(w=winding, png=png, npts=len(pts), show=show, rows=rows, skew=skew, cb=cb)
 
 
 # ───────────────────────────── документ ─────────────────────────────
@@ -448,33 +562,16 @@ def build(out=OUT, figs=PNG):
     wt = winding_turns()
     t = _table(doc, ("Элемент", "Обозначение", "Карт поля", "Обмоток", "Обмотки"))
     for el in ELEMENTS:
-        c = t.add_row().cells
-        c[0].text, c[1].text = NAMES[el], el
-        c[2].text, c[3].text = str(reg.get(el, 0)), str(len(wt.get(el, {})))
-        c[4].text = ", ".join(sorted(wt.get(el, {})))
-
-    doc.add_heading("Сверка двух независимых способов", level=1)
-    doc.add_paragraph(
-        "Кики на графиках получены гармоническим разложением карт. Тот же кик можно получить "
-        "иначе — прогнать через карту пучок диффурным ядром и подобрать силу по траекториям. Ниже "
-        "сравнение обоих способов на самой сильной карте каждого элемента. Совпадение означает, "
-        "что систематики нет ни в разложении, ни в подгонке. Сравнивается НОРМАЛЬНАЯ компонента: "
-        "гармоника комплексна, и её модуль смешал бы нормальную часть со скошенной — у боковых "
-        "обмоток корректора это давало ложные 59% расхождения.")
-    t = _table(doc, ("Элемент", "Карта, А·в", "Кик", "Из гармоник", "Из траекторий", "Расхождение"))
-    for el in ELEMENTS:
-        cc = crosscheck(el, KEY[el])
-        if not cc:
-            continue
-        c = t.add_row().cells
-        for i, v in enumerate((NAMES[el], f"{cc['ni']:.0f}",
-                               f"∫{cc['key']}·dl, {INT_UNITS[cc['key']]}",
-                               f"{cc['harm']:.6g}", f"{cc['traj']:.6g}", f"{cc['diff']:+.2f}%")):
-            c[i].text = v
-
-    for el in ELEMENTS:
         doc.add_page_break()
         doc.add_heading(f"{NAMES[el]} ({el})", level=1)
+
+        note = design_note(el)
+        p = doc.add_paragraph()
+        p.add_run("По проекту создаёт: ").bold = True
+        p.add_run(note + "." if note else
+                  "проектных киков в решётке нет — корректоры не оттюнены, рабочая точка им ещё "
+                  "не назначена. Приведена сама зависимость кика от тока, по которой ток и будет "
+                  "определяться, когда рабочая точка появится.")
 
         dv = devices(el)
         if dv:
@@ -486,92 +583,95 @@ def build(out=OUT, figs=PNG):
                                        d["inom"], d["leff"])):
                     c[i].text = str(v)
 
-        res = plot_element(el, figs)
-        if not res:
-            continue
-
-        Lmap = res[0]["Lmap"]
+        Lmap = map_length(el, KEY[el])
+        vs = variants(el)
         if Lmap:
             q = doc.add_paragraph()
-            q.add_run("Длина магнита в картах: ").bold = True
-            q.add_run(f"{Lmap:.3f} м (по форме поля: удвоенный интеграл продольного профиля, "
-                      f"делённый на его максимум). ")
+            q.add_run("Карты сняты с магнита длиной ").bold = True
+            q.add_run(f"{Lmap:.3f} м (по форме поля: интеграл продольного профиля, делённый на "
+                      f"максимум). ")
+            if len(vs) > 1:
+                q.add_run(
+                    "В решётке этот магнит стоит в нескольких длинах. Кривые для остальных "
+                    "исполнений получены штатным синтезом карт: тело магнита растягивается или "
+                    "сжимается, а краевое поле сохраняется — оно определяется поперечником и от "
+                    "длины не зависит. Коэффициент растяжения тела указан в заголовке графика.")
             fam = sorted({round(float(d["leff"]), 4) for d in dv if d["leff"]})
-            near = [f for f in fam if abs(f - Lmap) / Lmap <= 0.10]
-            if near:
-                q.add_run("Совпадает с проектной длиной исполнения "
-                          + ", ".join(f"{f:.3f}" for f in near) + " м.")
-            elif fam:
-                q.add_run("Проектные длины исполнений: " + ", ".join(f"{f:.3f}" for f in fam)
-                          + " м — ни одна не совпала, рабочие точки ниже условны.").italic = True
-            if len(fam) > 1:
+            if fam and all(abs(f - Lmap) / Lmap > 0.10 for f in fam):
                 doc.add_paragraph(
-                    "В решётке этот магнит стоит в нескольких длинах, а карты сняты только с "
-                    "одной. Уровни исполнений другой длины показаны пунктиром и помечены в "
-                    "таблице: их кик наш магнит не обязан достигать — он просто другой длины.",
+                    f"Расхождение с паспортом: в базе у этого элемента L_eff = "
+                    + ", ".join(f"{f:.3f}" for f in fam)
+                    + f" м, а поле карты даёт {Lmap:.3f} м. Числа ниже опираются на поле.",
                     style="List Bullet")
 
-        t = _table(doc, ("Обмотка", "Карт") + tuple(ORDER_NAME[n] for n in ORDERS))
-        for r in res:
-            c = t.add_row().cells
-            c[0].text, c[1].text = r["w"], str(r["npts"])
-            for i, n in enumerate(ORDERS):
-                c[2 + i].text = (f"{r['res'][n]:.0f}%"
-                                 + (" — на графике" if n in r["show"] else " — не разрешается"))
-        doc.add_paragraph(
-            "Разброс кика по радиусу пробы, % от медианы (по верхней половине токов). Настоящая "
-            "гармоника, поделённая на r^(n−1), от радиуса не зависит; шум зависит. На графики "
-            f"вынесены кики с разбросом не более {RESOLVED:.0f}%.", style="List Bullet")
-
+        turns = winding_turns().get(el, {})
         nom_w = nominal_by_winding(el)
-        for r in res:
-            doc.add_heading(f"Обмотка {r['w']}", level=2)
-            doc.add_picture(r["png"], width=Cm(16.5))
-            doc.add_paragraph(
-                f"Карт: {r['npts']}. Создаёт: " + ", ".join(ORDER_NAME[n] for n in r["show"])
-                + ("." if len(r["show"]) == len(ORDERS) else
-                   ". Не разрешаются в картах: "
-                   + ", ".join(ORDER_NAME[n] for n in ORDERS if n not in r["show"]) + "."))
-            sk = [n for n in r["show"] if r["skew"][n] >= SKEW_SHOW]
-            if sk:
-                doc.add_paragraph(
-                    "Скошенная компонента (тот же мультиполь, повёрнутый на пол-периода — он "
-                    "связывает плоскости, а не фокусирует в них): "
-                    + ", ".join(
-                        f"{ORDER_NAME[n]} — "
-                        + (f"в {r['skew'][n] / 100:.1f} раза БОЛЬШЕ нормальной"
-                           if r["skew"][n] > 100 else f"{r['skew'][n]:.0f}% от нормальной")
-                        for n in sk)
-                    + ". На графике пунктиром.")
-            if not r["rows"]:
-                doc.add_paragraph("Проектного кика для этой обмотки в решётке нет.")
+        for L, levels in vs:
+            pts_by_w = variant_kicks(el, L)
+            if not pts_by_w:
                 continue
-            t = _table(doc, ("Кик", "Исполнение", "Проектная L_eff, м", "Проектный кик",
-                             "Штук в кольце", "Карты этой длины", "Ток обмотки, А"))
-            nom = nom_w.get(r["w"]) or nom_w.get(None)
-            for q in r["rows"]:
-                c = t.add_row().cells
-                cur = ("не достигается" if q["cur"] is None else
-                       f"{q['cur']:.1f}" + (f"  ({100 * q['cur'] / nom:.0f}% ном.)" if nom else ""))
-                for i, v in enumerate((
-                        f"∫{KICK_KEY[q['order']]}·dl, {INT_UNITS[KICK_KEY[q['order']]]}",
-                        q["dev"].replace(el + "_", ""), f"{q['L']:.4f}", f"{q['level']:.5g}",
-                        str(q["count"]), "да" if q["same"] else "нет", cur)):
-                    c[i].text = v
+            devs = sorted({d for _, d, _, _ in levels})
+            head = f"Исполнение L_eff = {L:.3f} м"
+            if devs:
+                head += "  (" + ", ".join(d.replace(el + "_", "") for d in devs) + ")"
+            doc.add_heading(head, level=2)
+            if levels:
+                t = _table(doc, ("Кик", "Проектное значение", "Штук в кольце"))
+                for n, dev, v, cnt in sorted(levels, key=lambda q: (q[0], q[2])):
+                    c = t.add_row().cells
+                    c[0].text = f"∫{KICK_KEY[n]}·dl, {INT_UNITS[KICK_KEY[n]]}"
+                    c[1].text = f"{v:.5g}"
+                    c[2].text = str(cnt)
+
+            for w in sorted(pts_by_w, key=lambda z: (z != "main", z)):
+                r = plot_winding(el, w, pts_by_w[w], turns.get(w), L, levels, figs,
+                                 f"L{round(L * 1000)}")
+                if not r:
+                    continue
+                doc.add_heading(f"Обмотка {w}", level=3)
+                doc.add_picture(r["png"], width=Cm(16.5))
+                doc.add_paragraph(
+                    f"Карт: {r['npts']}. Создаёт: "
+                    + ", ".join(ORDER_NAME[n] for n in r["show"]) + ".")
+                sk = [n for n in r["show"] if r["skew"][n] >= SKEW_SHOW]
+                if sk:
+                    doc.add_paragraph(
+                        "Скошенная компонента (тот же мультиполь, повёрнутый на пол-периода — он "
+                        "связывает плоскости, а не фокусирует в них): "
+                        + ", ".join(
+                            f"{ORDER_NAME[n]} — "
+                            + (f"в {r['skew'][n] / 100:.1f} раза БОЛЬШЕ нормальной"
+                               if r["skew"][n] > 100 else f"{r['skew'][n]:.0f}% от нормальной")
+                            for n in sk)
+                        + ". На графике пунктиром.")
+                if not r["rows"]:
+                    continue
+                t = _table(doc, ("Кик", "Проектное значение", "Ток обмотки, А"))
+                nom = nom_w.get(w) or nom_w.get(None)
+                for q in r["rows"]:
+                    c = t.add_row().cells
+                    c[0].text = f"∫{KICK_KEY[q['order']]}·dl, {INT_UNITS[KICK_KEY[q['order']]]}"
+                    c[1].text = f"{q['level']:.5g}"
+                    c[2].text = ("не достигается" if q["cur"] is None else
+                                 f"{q['cur']:.1f}"
+                                 + (f"  ({100 * q['cur'] / nom:.0f}% ном.)" if nom else ""))
 
     doc.add_page_break()
     doc.add_heading("Оговорки", level=1)
     for s in (
-        "Длина магнита взята не из подгонки, а из ФОРМЫ поля: удвоенный интеграл продольного "
-        "профиля, делённый на его максимум (карты половинные — поле максимально в середине "
-        "магнита при x=0, вторую половину даёт симметрия). Так измеренная длина сходится с "
-        "проектной: длинный квадруполь 0.374 против проектных 0.3745, секступоль 0.164 против "
-        "0.166. Подгоночная эффективная длина из датасетов не использована: она определена плохо, "
-        "у октуполя оказалась на 39% ниже настоящей.",
-        "Показаны только кики, разрешимые в имеющихся картах. Поле мультиполя растёт как r^(n−1), "
-        "а шум карты от радиуса не зависит, поэтому слабая высокая гармоника у оси тонет. "
-        "Неразрешимый кик не значит нулевой — значит, что по этим картам его величину назвать "
-        "нельзя. Разброс по радиусу приведён таблицей, вывод проверяем.",
+        "Длина магнита взята не из подгонки, а из ФОРМЫ поля: интеграл продольного профиля, "
+        "делённый на его максимум. Так измеренная длина сходится с проектной: длинный квадруполь "
+        "0.374 против проектных 0.3745, диполь-квадруполь 0.403 против 0.400. Подгоночная "
+        "эффективная длина из датасетов не использована: она определена плохо, у октуполя "
+        "оказалась на 39% ниже настоящей.",
+        "Карты сняты с ОДНОЙ длины каждого семейства, а в решётке магнит стоит в нескольких. "
+        "Кривые остальных исполнений получены штатным синтезом карт (`gen_synthetic_maps`): тело "
+        "растягивается, краевое поле сохраняется, потому что определяется поперечником, а не "
+        "длиной. Синтез проверен на попадание в целевую длину — расхождение 0.2–1.2%.",
+        "На графиках показаны только кики, разрешимые в снятых картах. Поле мультиполя растёт как "
+        "r^(n−1), а шум карты от радиуса не зависит, поэтому слабая высокая гармоника у оси "
+        "тонет. Неразрешимый кик не значит нулевой — значит, что по этим картам его величину "
+        "назвать нельзя.",
         "Карты с несколькими одновременно запитанными обмотками в графики не входят: по ним "
         "нельзя сказать, какая обмотка какой кик создала. У корректора таких карт больше половины "
         "набора, и они используются отдельно — для проверки модели на комбинациях.",
