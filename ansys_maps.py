@@ -73,6 +73,16 @@ for _d in DESIGN.values():
 
 ORDER_BY_ELEMENT = {"QP_sh": 2, "QP_L": 2, "SP": 3, "OP": 4, "DQ": 2, "corrector": 1}
 
+
+def probe_radius(element):
+    """Радиус пробы по типу элемента — тот же, что у saturation_model.
+
+    Брать 1 мм для всех НЕЛЬЗЯ: поле мультиполя ∝ r^(n−1), и у октуполя на 1 мм сигнал лежит ПОД
+    шумовым полом карт. Сравнение двух таких карт даёт бессмыслицу — у OP получалось −12.7% и
+    +71.4% там, где на правильных 14 мм расхождение всего −1.1% и +0.2%."""
+    import saturation_model as sm
+    return sm.PROBE_R.get(sm.KIND.get(element, "quad"), 1e-3)
+
 HDR = re.compile(r"Grid Output Min:\s*\[(.*?)\]\s*Max:\s*\[(.*?)\]\s*Grid Size:\s*\[(.*?)\]")
 BH_BLOCK = re.compile(r"Points\[\d+:\s*([0-9eE.,+\-\s]+)\]")
 
@@ -170,7 +180,7 @@ def jobs(element=None, path=REQUEST):
 
 # ───────────────────────────── скрипт для AEDT ─────────────────────────────
 
-def build_script(element, todo, grid, out_path):
+def build_script(element, todo, grid, out_path, reset=False):
     """Скрипт для интерпретатора AEDT. Внутри доступен только oDesktop — библиотек не подключаем.
 
     Проект НЕ сохраняем и в конце возвращаем токам прежние значения: расчёт не должен менять
@@ -189,6 +199,10 @@ def build_script(element, todo, grid, out_path):
         f'    oProject = oDesktop.SetActiveProject("{d["project"]}")',
         f'oDesign = oProject.SetActiveDesign("{d["design"]}")',
         'oModule = oDesign.GetModule("FieldsReporter")',
+        # Сброс сохранённых решений: без него Analyze молча отдаёт готовое, рапортуя «Normal
+        # completion», и проверка воспроизводимости вырождается в тавтологию — ровно так впустую
+        # прошёл первый пересчёт QP_L.
+        *(['oDesign.DeleteFullVariation("All", False)'] if reset else []),
         f"VARS = {list(d['vars'].values())!r}",
         "OLD = dict((v, oDesign.GetVariableValue(v)) for v in VARS)",
         'oDesktop.AddMessage("", "", 0, "исходные токи: " + str(OLD))',
@@ -333,7 +347,7 @@ def measure(element, order=None, winding=None):
             continue
         if winding and set(cur) != {winding}:
             continue
-        mx, hm = probe(f, order)
+        mx, hm = probe(f, order, probe_radius(element))
         rows.append((sum(abs(v) for v in cur.values()), os.path.basename(f), mx, hm, cur))
     rows.sort()
     # Критерий — ГАРМОНИКА (то, что видит пучок), а не максимум |B|: максимум сидит в железе и при
@@ -511,6 +525,55 @@ def cmd_recompute(element, outdir, backup="_original", everything=False):
     return diffs
 
 
+def cmd_reproduce(element, outdir, count=2, material="workspace/materials/steel_1008_bh.csv"):
+    """Проверка ВОСПРОИЗВОДИМОСТИ: пересчитать самые старые карты и сверить с тем, что на диске.
+
+    Оригиналы НЕ трогаются — пересчёт идёт в отдельную папку. Решения принудительно сбрасываются
+    (`DeleteFullVariation`), иначе Maxwell молча отдаст готовое и проверка выродится в тавтологию:
+    именно так впустую прошёл первый пересчёт QP_L.
+
+    Смысл: если проект не менялся с тех пор, как снимались старые карты, они обязаны воспроизвестись
+    точно. Так проверен DQ (0.00% на трёх картах). Если не воспроизводятся — в проекте что-то
+    поправили, и карты разных дат смешивать нельзя. У QP_sh расхождение оказалось до 3.5%, и
+    виновата была СЕТКА."""
+    import numpy as np
+    grid = reference_grid(element)
+    folder = folder_of(element)
+    rows, _ = measure(element)
+    singles = [r for r in rows if len(r[4]) == 1]
+    if not singles:
+        raise SystemExit(f"{element}: нет одиночных карт")
+    oldest = sorted(singles, key=lambda r: os.path.getmtime(os.path.join(folder, r[1])))[:count]
+    os.makedirs(outdir, exist_ok=True)
+    todo = [dict(element=element, currents=cur, name=nm, folder=outdir,
+                 target=os.path.join(os.path.abspath(outdir), nm), why="воспроизводимость")
+            for _, nm, _, _, cur in oldest]
+    guard_material(element, material)
+    sp = build_script(element, todo, grid, os.path.join(outdir, f"aedt_reproduce_{element}.py"),
+                      reset=True)
+    print(f"  пересчитываются {len(todo)} самых старых карт, решения сбрасываются")
+    rc = subprocess.call([AEDT_EXE, "-ng", "-runscriptandexit", os.path.abspath(sp)])
+    print(f"  AEDT вернул {rc}")
+    order, R = ORDER_BY_ELEMENT.get(element, 2), probe_radius(element)
+    print(f"  проба на {R * 1e3:.0f} мм, гармоника порядка {order}")
+    print(f"  {'карта':34} {'на диске':>11} {'пересчёт':>11} {'расхождение':>13}")
+    d = []
+    for j in todo:
+        old = os.path.join(folder, j["name"])
+        if not os.path.exists(j["target"]):
+            print(f"  {j['name']:34}   файл не появился"); continue
+        _, ho = probe(old, order, R)
+        _, hn = probe(j["target"], order, R)
+        d.append(100.0 * (hn - ho) / ho if ho else float("nan"))
+        print(f"  {j['name']:34} {ho:11.6g} {hn:11.6g} {d[-1]:12.2f}%")
+    if d:
+        m = float(np.max(np.abs(d)))
+        print(f"  ИТОГ: максимум {m:.2f}% — "
+              + ("проект НЕ менялся, карты разных дат совместимы" if m < 1.5
+                 else "проект МЕНЯЛСЯ, карты разных дат смешивать нельзя"))
+    return d
+
+
 def cmd_repro(element, spec, outdir):
     """Пересчитать УЖЕ СНЯТУЮ карту в отдельный файл и сравнить с ней. Оригинал не трогаем."""
     grid = reference_grid(element)
@@ -564,6 +627,9 @@ def main(argv=None):
                     help="пересчитать УЖЕ СНЯТЫЕ карты (оригиналы переезжают в подпапку)")
     ap.add_argument("--all", action="store_true",
                     help="с --recompute: пересчитать ВСЕ карты, а не только из прежних прогонов")
+    ap.add_argument("--reproduce", type=int, nargs="?", const=2, metavar="N",
+                    help="проверить воспроизводимость: пересчитать N самых старых карт со сбросом "
+                         "решений и сверить с диском (оригиналы не трогаются)")
     ap.add_argument("--repro", metavar="ВОЗБУЖДЕНИЕ",
                     help="пересчитать снятую карту и сравнить, напр. 3294 или I1=1891;I2=800")
     ap.add_argument("--order", type=int, help="порядок гармоники для проверки")
@@ -574,11 +640,14 @@ def main(argv=None):
     ap.add_argument("--outdir", default=os.path.join("workspace", "results", "aedt"))
     a = ap.parse_args(argv)
 
-    if a.repro or a.recompute or a.register or a.measure:
+    if a.repro or a.recompute or a.register or a.measure or a.reproduce:
         if not a.element:
             raise SystemExit("этот режим требует --element")
         el = a.element
-        if a.repro:
+        if a.reproduce:
+            print(f"=== {el}: проверка воспроизводимости старых карт")
+            cmd_reproduce(el, os.path.join(a.outdir, f"reproduce_{el}"), a.reproduce, a.material)
+        elif a.repro:
             cmd_repro(el, a.repro, a.outdir)
         elif a.recompute:
             print(f"=== {el}: пересчёт снятой серии одним состоянием проекта")
