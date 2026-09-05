@@ -40,11 +40,23 @@ NAMES = {"QP_sh": "Квадруполь короткий", "QP_L": "Квадру
          "corrector": "Корректор"}
 ORDERS = (1, 2, 3, 4)
 ORDER_NAME = {1: "диполь", 2: "квадруполь", 3: "секступоль", 4: "октуполь"}
+ORDER_GEN = {1: "диполя", 2: "квадруполя", 3: "секступоля", 4: "октуполя"}
 KICK_KEY = {1: "B", 2: "G", 3: "S", 4: "O"}
 ORDER_OF = {v: k for k, v in KICK_KEY.items()}
 # Единицы ИНТЕГРАЛА гармоники по длине — это и есть кик. By ∝ b_n·r^(n−1), отсюда степени метра.
 INT_UNITS = {"B": "Тл·м", "G": "Тл", "S": "Тл/м", "O": "Тл/м²"}
 ORDER_COLOR = {1: "#1f4e79", 2: "#c0392b", 3: "#4a9d5f", 4: "#e8a33d"}
+# Какие кики элемент создаёт в рамках модели. У диполя-квадруполя это диполь, квадруполь и
+# секступоль: секступоль там несущий (через feed-down он и объясняет связь G с током), а октуполь
+# в модель не входит.
+EL_ORDERS = {"DQ": (1, 2, 3)}
+# Обмотки, которыми элемент ВЫХОДИТ НА ПРОЕКТНУЮ ТОЧКУ. Остальные по проекту обесточены.
+# Проектный ток — свойство МАГНИТА, а не обмотки: многообмоточный элемент не обязан и не может
+# обеспечить проектный кик каждой обмоткой по отдельности, он выходит на него КОМБИНАЦИЕЙ.
+# Поэтому ток называется один раз на магнит, и только когда его несёт ОДНА обмотка.
+DESIGN_BY = {"QP_sh": ("I",), "QP_L": ("I",), "OP": ("I1",),
+             "SP": ("I1",),            # I2 по проекту = 0
+             "DQ": ("I1", "I2")}       # I3 по проекту = 0; точка достигается комбинацией
 
 PROBE_SCAN = (1e-3, 3e-3, 5e-3, 8e-3, 11e-3, 14e-3)  # карты все ±50 мм, 14 мм внутри хор. поля
 PLOT_RADIUS = {1: 1e-3, 2: 5e-3, 3: 8e-3, 4: 14e-3}
@@ -383,7 +395,7 @@ def stretch(h, B, order, radius, L_target):
     return h2, B2, cb
 
 
-def variant_kicks(element, L_target, orders=ORDERS):
+def variant_kicks(element, L_target, orders=None):
     """{обмотка: [(ампер-витки, {порядок: (норм, скью)})]} для магнита длины L_target.
 
     Карты сняты с ОДНОЙ длины из семейства, а в решётке магнит стоит в нескольких. Кривые для
@@ -396,6 +408,7 @@ def variant_kicks(element, L_target, orders=ORDERS):
         except (OSError, ValueError):
             cache = {}
     dirty = False
+    orders = orders or orders_of(element)
     lead = ORDER_OF[KEY[element]]
     data = collections.defaultdict(list)
     for r in sm.read_registry():
@@ -440,21 +453,47 @@ def variants(element):
     return sorted(by_len.items())
 
 
+def orders_of(element):
+    """Порядки, рассматриваемые у этого элемента."""
+    return EL_ORDERS.get(element, ORDERS)
+
+
 def design_note(element):
-    """Что элемент создаёт ПО ПРОЕКТУ — по ненулевым коэффициентам решётки."""
-    kk = [ORDER_NAME[n] for n in ORDERS if design_levels(element, KICK_KEY[n])]
-    return " и ".join(kk) if kk else None
+    """Что элемент создаёт ПО ПРОЕКТУ.
+
+    По умолчанию — те кики, для которых в решётке задано ненулевое значение. У диполя-квадруполя
+    перечень задан явно (EL_ORDERS): секступоль там несущий — через feed-down он и объясняет связь
+    градиента с током, — хотя отдельного проектного значения у него в решётке нет."""
+    have = [n for n in ORDERS if design_levels(element, KICK_KEY[n])]
+    if not have:
+        return None
+    oo = EL_ORDERS.get(element)
+    if oo is None:
+        return " и ".join(ORDER_NAME[n] for n in have)
+    names = [ORDER_NAME[n] for n in oo]
+    txt = ", ".join(names[:-1]) + " и " + names[-1]
+    if len(have) < len(oo):
+        txt += ("; проектное значение в решётке задано для "
+                + " и ".join(ORDER_GEN[n] for n in have))
+    return txt
 
 
-def plot_winding(element, winding, pts, turns, L, levels, outdir, tag):
-    """Один график = одна обмотка одного ИСПОЛНЕНИЯ. На нём все кики, которые обмотка создаёт."""
+def plot_winding(element, winding, pts, turns, L, levels, outdir, tag, alone=True):
+    """Один график = одна обмотка одного ИСПОЛНЕНИЯ. На нём все кики, которые обмотка создаёт.
+
+    `levels` — проектные кики магнита; передаются только тем обмоткам, что по проекту участвуют.
+    `alone` — несёт ли эта обмотка проектную точку В ОДИНОЧКУ. Если нет (диполь-квадруполь выходит
+    на неё комбинацией I1 и I2), уровень рисуется, но ток НЕ называется: разложить проектный кик по
+    обмоткам без модели нельзя, а пересечение кривой одной обмотки означало бы, что остальные
+    обесточены, чего в проекте нет."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     native = element_spectra(element).get(winding)
-    res = {n: (resolution(native, n) if native else 0.0) for n in ORDERS}
-    show = [n for n in ORDERS if res[n] <= RESOLVED]
+    oo = orders_of(element)
+    res = {n: (resolution(native, n) if native else 0.0) for n in oo}
+    show = [n for n in oo if res[n] <= RESOLVED]
     if not show:
         return None
     x = np.array([p[0] for p in pts]) / (turns or 1)
@@ -481,13 +520,14 @@ def plot_winding(element, winding, pts, turns, L, levels, outdir, tag):
         ymax = y.max()
         for order, dev, v, cnt in sorted([q for q in levels if q[0] == n], key=lambda q: q[2]):
             a.axhline(v, color=col, lw=1.0, alpha=0.8, zorder=1)
-            xi = first_crossing(x, y, v)
+            xi = first_crossing(x, y, v) if alone else None
             if xi is not None:
                 a.plot([xi], [v], "D", color=col, ms=7.5, zorder=4, mec="white", mew=0.9)
                 a.plot([xi, xi], [0, v], color=col, lw=0.9, ls="--", alpha=0.6, zorder=1)
             rows.append(dict(order=n, dev=dev, level=v, count=cnt, cur=xi))
-            notes.append((col, f"{ORDER_NAME[n]}  {v:.4g}  →  "
-                               + (f"{xi:.1f} А" if xi is not None else "не достигается")))
+            notes.append((col, f"{ORDER_NAME[n]}  {v:.4g}"
+                               + (f"  →  {xi:.1f} А" if xi is not None
+                                  else ("  →  не достигается" if alone else "  — проектный уровень"))))
             ymax = max(ymax, v)
         a.set_ylim(0, max(ymax, ys.max() if skew[n] >= SKEW_SHOW else 0) * 1.15)
 
@@ -615,17 +655,50 @@ def build(out=OUT, figs=PNG):
             if devs:
                 head += "  (" + ", ".join(d.replace(el + "_", "") for d in devs) + ")"
             doc.add_heading(head, level=2)
+            by = DESIGN_BY.get(el, tuple(pts_by_w))
+            alone = len(by) == 1
             if levels:
-                t = _table(doc, ("Кик", "Проектное значение", "Штук в кольце"))
+                t = _table(doc, ("Кик", "Проектное значение", "Штук в кольце",
+                                 "Ток обмотки, А"))
+                nom0 = nom_w.get(by[0]) or nom_w.get(None) if by else None
+                cur = {}
+                if alone and by[0] in pts_by_w:
+                    pts = pts_by_w[by[0]]
+                    xx = np.array([q[0] for q in pts]) / (turns.get(by[0]) or 1)
+                    for n, dev, v, cnt in levels:
+                        yy = np.array([q[1][n][0] for q in pts])
+                        cur[(n, v)] = first_crossing(xx, yy, v)
                 for n, dev, v, cnt in sorted(levels, key=lambda q: (q[0], q[2])):
                     c = t.add_row().cells
                     c[0].text = f"∫{KICK_KEY[n]}·dl, {INT_UNITS[KICK_KEY[n]]}"
                     c[1].text = f"{v:.5g}"
                     c[2].text = str(cnt)
+                    if not alone:
+                        c[3].text = "комбинацией " + " и ".join(by)
+                    else:
+                        xi = cur.get((n, v))
+                        c[3].text = ("не достигается" if xi is None else
+                                     f"{xi:.1f}" + (f"  ({100 * xi / nom0:.0f}% ном.)"
+                                                    if nom0 else ""))
+                p = doc.add_paragraph()
+                if alone:
+                    p.add_run(f"Проектную точку несёт обмотка {by[0]}").bold = True
+                    p.add_run("; остальные обмотки по проекту обесточены. Ток указан один раз на "
+                              "магнит, по этой обмотке.")
+                else:
+                    p.add_run("Проектную точку магнит набирает КОМБИНАЦИЕЙ обмоток "
+                              + " и ".join(by)).bold = True
+                    p.add_run(
+                        f"; обмотка {', '.join(w for w in sorted(pts_by_w) if w not in by)} по "
+                        f"проекту обесточена. Разложить проектный кик по обмоткам без модели "
+                        f"нельзя, поэтому ток здесь не назван: пересечение кривой ОДНОЙ обмотки "
+                        f"означало бы, что остальные обесточены, чего в проекте нет. Графики ниже "
+                        f"показывают, что каждая обмотка создаёт сама по себе.")
 
             for w in sorted(pts_by_w, key=lambda z: (z != "main", z)):
-                r = plot_winding(el, w, pts_by_w[w], turns.get(w), L, levels, figs,
-                                 f"L{round(L * 1000)}")
+                r = plot_winding(el, w, pts_by_w[w], turns.get(w), L,
+                                 levels if w in by else [], figs,
+                                 f"L{round(L * 1000)}", alone=alone)
                 if not r:
                     continue
                 doc.add_heading(f"Обмотка {w}", level=3)
@@ -644,17 +717,9 @@ def build(out=OUT, figs=PNG):
                                if r["skew"][n] > 100 else f"{r['skew'][n]:.0f}% от нормальной")
                             for n in sk)
                         + ". На графике пунктиром.")
-                if not r["rows"]:
-                    continue
-                t = _table(doc, ("Кик", "Проектное значение", "Ток обмотки, А"))
-                nom = nom_w.get(w) or nom_w.get(None)
-                for q in r["rows"]:
-                    c = t.add_row().cells
-                    c[0].text = f"∫{KICK_KEY[q['order']]}·dl, {INT_UNITS[KICK_KEY[q['order']]]}"
-                    c[1].text = f"{q['level']:.5g}"
-                    c[2].text = ("не достигается" if q["cur"] is None else
-                                 f"{q['cur']:.1f}"
-                                 + (f"  ({100 * q['cur'] / nom:.0f}% ном.)" if nom else ""))
+                if w not in by and levels:
+                    doc.add_paragraph("По проекту эта обмотка обесточена; проектных уровней на "
+                                      "графике нет.", style="List Bullet")
 
     doc.add_page_break()
     doc.add_heading("Оговорки", level=1)
@@ -675,9 +740,11 @@ def build(out=OUT, figs=PNG):
         "Карты с несколькими одновременно запитанными обмотками в графики не входят: по ним "
         "нельзя сказать, какая обмотка какой кик создала. У корректора таких карт больше половины "
         "набора, и они используются отдельно — для проверки модели на комбинациях.",
-        "Ток указан для случая, когда проектный кик обеспечивает ОДНА обмотка; в кольце они "
-        "работают вместе. Поэтому у подстроечных обмоток (SP I2, DQ I3) процент от номинала "
-        "выходит много больше ста: в одиночку нести всю силу они не рассчитаны.",
+        "Проектный ток — свойство МАГНИТА, а не обмотки, и назван один раз на исполнение. "
+        "Многообмоточный элемент не обязан обеспечивать проектный кик каждой обмоткой по "
+        "отдельности: секступоль выходит на проектную точку обмоткой I1 при I2 = 0, а "
+        "диполь-квадруполь — комбинацией I1 и I2 при I3 = 0. Разложить его проектный кик по "
+        "обмоткам без математической модели нельзя, поэтому ток для него не назван.",
         "Кривые построены по снятым картам без сглаживания и интерполяции; точки — то, что "
         "посчитано.",
     ):
