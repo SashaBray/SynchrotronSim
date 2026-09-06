@@ -396,35 +396,37 @@ def run_fits(elements, Hof, segs, do_loo=True):
     return out
 
 
-def run_transfer(nseg, base="steel_1008_bh.csv", alt="lowsat_custom_bh.csv"):
-    """Перенос на другой материал: геометрия подобрана на одном, предсказание — на другом.
+def run_transfer(nseg=2, base="steel_1008_bh.csv", alt="lowsat_custom_bh.csv"):
+    """Перенос на ДРУГОЙ МАТЕРИАЛ: геометрия подобрана на одном, предсказание — на другом.
 
-    Это и есть проверка требования «менять материал»: `A`, `ℓᵢ`, `sᵢ` берутся с серии на стали и НЕ
-    подгоняются заново, меняется только `H`. Если ошибка на второй серии сравнима с ошибкой на
-    первой, материал в модели действительно отделён от геометрии."""
+    Это и есть проверка требования «менять материал». Параметры A, ℓᵢ, sᵢ и κ берутся с серии на
+    стали и НЕ подгоняются заново — меняется только H. Если ошибка на второй серии сравнима с
+    ошибкой на первой, материал в модели действительно отделён от геометрии; если нет, значит
+    что-то из «геометрии» на самом деле впитало в себя свойства стали."""
     Hb = material(os.path.join(MATERIALS, base))
     Ha = material(os.path.join(MATERIALS, alt))
     ser, _ = series("QP_sh")
     ni, y = ser["I"]
     ni_a, y_a = alt_series("QP_sh", LEAD["QP_sh"])
-    print(f"перенос QP_sh: {base} ({len(ni)} карт)  →  {alt} ({len(ni_a)} карт), участков {nseg}")
-    th, rms = fit(ni, y, Hb, nseg)
-    print(f"  геометрия подобрана на стали: ошибка тока {rms:.2f}%")
-    for nm, v, pct, b in describe(th, nseg, float(np.max(y)), Hb):
-        print(f"     {nm:10} МДС {v:11.1f} А·в ({pct:5.1f}%)"
+    m = ni <= ni_a.max() * 1.6            # сопоставимый диапазон: вторая серия кончается раньше
+    print(f"перенос QP_sh: {base} → {alt};  участков железа {nseg}")
+    print(f"  подгонка на {base}: {m.sum()} карт до {ni[m].max():.0f} А·в")
+    th, kap, rms, _ = fit_leak(ni[m], y[m], Hb, nseg)
+    print(f"  ошибка тока на своём материале: {rms:.2f}%   κ={kap:.3g}")
+    for nm, v, pct, b in describe(th, nseg, float(np.max(y[m])), Hb):
+        print(f"     {nm:10} МДС {v:10.0f} А·в ({pct:5.1f}%)"
               + (f", B = {b:.3f} Тл" if b is not None else ""))
-    pred = predict(th, y_a, Ha, nseg)
+    pred = mmf(th, y_a, Ha, nseg, kap)
     err = np.abs(pred - ni_a) / ni_a * 100
-    print(f"  предсказание на {alt} БЕЗ подгонки: ошибка тока {err.mean():.2f}% "
+    same = np.abs(mmf(th, y_a, Hb, nseg, kap) - ni_a) / ni_a * 100
+    print(f"\n  предсказание на {alt} БЕЗ подгонки: ошибка тока {err.mean():.2f}% "
           f"(медиана {np.median(err):.2f}%, максимум {err.max():.2f}%)")
-    print(f"     {'А·в факт':>10}{'А·в модель':>12}{'ошибка':>10}")
-    for a, b_, e in zip(ni_a, pred, err):
-        print(f"     {a:10.0f}{b_:12.0f}{e:9.1f}%")
-    # Контроль: та же геометрия, но материал НЕ подменён — насколько подмена вообще важна.
-    same = np.abs(predict(th, y_a, Hb, nseg) - ni_a) / ni_a * 100
-    print(f"  для сравнения, БЕЗ подмены материала: {same.mean():.2f}% — во столько раз подмена "
-          f"и важна ({same.mean() / max(err.mean(), 1e-9):.1f}×)")
-    return th
+    print(f"     {'А·в факт':>10}{'модель':>10}{'ошибка':>9}{'кик':>12}")
+    for a_, b_, e, yy in zip(ni_a, pred, err, y_a):
+        print(f"     {a_:10.0f}{b_:10.0f}{e:8.1f}%{yy:12.4g}")
+    print(f"  контроль — та же геометрия, но материал НЕ подменён: {same.mean():.2f}%; "
+          f"подмена улучшает в {same.mean() / max(err.mean(), 1e-9):.1f} раза")
+    return th, kap
 
 
 def main(argv=None):
