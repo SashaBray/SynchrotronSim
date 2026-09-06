@@ -376,6 +376,80 @@ def plot_fits(elements, Hof, nseg=2, out=os.path.join("workspace", "results",
     return out
 
 
+def plot_transfer(nseg=2, base="steel_1008_bh.csv", alt="lowsat_custom_bh.csv",
+                  out=os.path.join("workspace", "results", "material_transfer.png")):
+    """Перенос материала на графике: подгонка на одной стали, предсказание на другой.
+
+    Смысл рисунка в том, что синяя кривая — НЕ подгонка. Её параметры целиком взяты у красной,
+    заменена только кривая материала. Пунктир показывает, что было бы без замены."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    Hb, Ha = (material(os.path.join(MATERIALS, base)), material(os.path.join(MATERIALS, alt)))
+    ser, meta = series("QP_sh")
+    ni, y = ser["I"]
+    ni_a, y_a = alt_series("QP_sh", LEAD["QP_sh"])
+    tpc = meta["turns_per_coil"]["I"]
+    m = ni <= ni_a.max() * 1.6
+    th, kap, rms, _ = fit_leak(ni[m], y[m], Hb, nseg)
+    pred = mmf(th, y_a, Ha, nseg, kap)
+    ctrl = mmf(th, y_a, Hb, nseg, kap)
+
+    fig, ax = plt.subplots(1, 3, figsize=(15.2, 4.8))
+    g = np.geomspace(min(y[m].min(), y_a.min()) * 0.5, max(y[m].max(), y_a.max()) * 1.05, 400)
+    a = ax[0]
+    a.plot(ni[m] / tpc, y[m], "o", color="#c0392b", ms=6, zorder=5, label="сталь 1008, измерения")
+    a.plot(mmf(th, g, Hb, nseg, kap) / tpc, g, "-", color="#c0392b", lw=1.8,
+           label=f"модель, подогнана ({rms:.2f}%)")
+    a.plot(ni_a / tpc, y_a, "s", color="#1f4e79", ms=6, zorder=5,
+           label="низконасыщ., измерения")
+    a.plot(mmf(th, g, Ha, nseg, kap) / tpc, g, "-", color="#1f4e79", lw=1.8,
+           label=f"модель, ПРЕДСКАЗАНА ({np.mean(np.abs(pred - ni_a) / ni_a) * 100:.1f}%)")
+    a.plot(mmf(th, g, Hb, nseg, kap) / tpc, g, ":", color="#888", lw=1.6,
+           label="если материал не менять")
+    a.set_xlim(0, max(ni[m].max(), ni_a.max()) / tpc * 1.1)
+    a.set_ylim(0, max(y[m].max(), y_a.max()) * 1.15)
+    a.set_xlabel("ток обмотки, А")
+    a.set_ylabel("G, интеграл")
+    a.set_title("QP_sh: один магнит, два материала", fontsize=11)
+    a.grid(alpha=0.25)
+    a.legend(fontsize=8.5, loc="lower right")
+
+    a = ax[1]
+    a.axhline(0, color="#888", lw=1.0)
+    a.plot(ni_a / tpc, 100 * (pred - ni_a) / ni_a, "-s", color="#1f4e79", ms=6, lw=1.5,
+           label="со сменой материала")
+    a.plot(ni_a / tpc, 100 * (ctrl - ni_a) / ni_a, "-o", color="#888", ms=5, lw=1.4, ls=":",
+           label="без смены (контроль)")
+    a.set_xlabel("ток обмотки, А")
+    a.set_ylabel("ошибка по току, %")
+    a.set_title("Ошибка предсказания на новом материале", fontsize=11)
+    a.grid(alpha=0.25)
+    a.legend(fontsize=9)
+
+    a = ax[2]
+    for nm, path, col in ((base, base, "#c0392b"), (alt, alt, "#1f4e79")):
+        d = np.loadtxt(os.path.join(MATERIALS, path), delimiter=";", skiprows=1)
+        a.plot(d[:, 0], d[:, 1], "-o", color=col, ms=3.5, lw=1.6, label=nm)
+    for i in range(nseg):                       # где по кривой работают участки железа
+        s = np.exp(th[2 + 2 * i])
+        a.axhline(float(np.max(y[m])) / s, color="#444", lw=1.0, ls="--")
+        a.annotate(f"железо {i + 1}: {np.max(y[m]) / s:.2f} Тл", xy=(1.2, np.max(y[m]) / s),
+                   fontsize=8, color="#444", va="bottom")
+    a.set_xscale("log")
+    a.set_xlabel("H, А/м")
+    a.set_ylabel("B, Тл")
+    a.set_title("Кривые материалов — единственное, что менялось", fontsize=11)
+    a.grid(alpha=0.25, which="both")
+    a.legend(fontsize=9, loc="lower right")
+
+    fig.tight_layout()
+    os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
+    fig.savefig(out, dpi=145)
+    plt.close(fig)
+    return out
+
+
 # ───────────────────────────── прогоны ─────────────────────────────
 
 def run_fits(elements, Hof, segs, do_loo=True):
