@@ -116,3 +116,6 @@ elegant_run/syla_gap.lte
 elegant_run/gap_track.*
 elegant_run/sp1_gap_elegant.txt
 workspace/tables/snapshot_closed/
+
+# кэш разложения карт (перестраивается build_kick_datasets.py, ~200 КБ машинного JSON)
+workspace/datasets/**/_harmonics_cache.json

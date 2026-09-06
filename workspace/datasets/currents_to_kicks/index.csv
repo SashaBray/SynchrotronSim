@@ -1,0 +1,7 @@
+element;kind;maps;singles;combos;windings;L_used_for_mat_m;rot_z_deg
+DQ;dq;39;32;7;I1,I2,I3;0.402792;180
+OP;oct;16;16;0;I1;0.0975027;0
+QP_L;quad;15;15;0;I;0.379551;0
+QP_sh;quad;21;21;0;I;0.227784;0
+SP;sext;28;26;2;I1,I2;0.164213;0
+corrector;kicker;56;23;33;c1,c2,c3,c4,main;0.161909;0
