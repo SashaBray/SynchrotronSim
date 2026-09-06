@@ -48,7 +48,7 @@ WEIGHTS = os.path.join("workspace", "tables", "mec_sigma_weights.csv")
 # в половину своего диполя, и только в комбинациях эти вклады разделяются. Независимых ручек у
 # него четыре: вертикальный диполь (main), горизонтальный (c1-,c2+,c3+,c4-), нормальный
 # квадруполь (c1+,c2+,c3-,c4-) и скошенный (c1-,c2+,c3-,c4+), с силами 1.00/0.29/0.12/0.10.
-MODELS = (("corrector", 1), ("corrector", 2), ("DQ", 1), ("DQ", 2))
+MODELS = (("corrector", 1), ("corrector", 2), ("DQ", 1), ("DQ", 2), ("DQ", 3))
 _CACHE = {}
 
 
@@ -95,26 +95,34 @@ def basis(cir, currents, augment=True, p=None):
     return np.concatenate([b, s * b]) if augment else b
 
 
-def fit_weights(cir, rows, augment=True, wts=None):
-    """Веса точным МНК: они линейны, искать их поиском незачем."""
+def fit_weights(cir, rows, augment=True, wts=None, lam_rel=1e-4, y_floor=0.05):
+    """Веса точным МНК: они линейны, искать их поиском незачем.
+
+    `lam_rel` — относительная регуляризация, `y_floor` — полка в знаменателе взвешивания (доля от
+    сильнейшей карты), чтобы слабые карты не получали неограниченный вес. Оба числа влияют на
+    РАЗНЫЕ элементы, и это стоит помнить, меняя их: у корректора результат к `lam_rel` нечувствителен
+    (18 весов, сетка стоит на полке), но обнуление `y_floor` разносит его комбинации по току 5.8% →
+    137%; у DQ наоборот — полка почти безразлична, а регуляризация была ГЛАВНЫМ ограничением
+    секступоля, держа его на 2.3% при пределе базиса 1.7%."""
     if wts is None:
         cnt = Counter(tuple(sorted(t[0])) for t in rows)
         wts = {k: 1.0 / np.sqrt(v) for k, v in cnt.items()}
     A = np.array([basis(cir, c, augment) for c, _, _, _ in rows])
     y = np.array([m for _, m, _, _ in rows], dtype=complex)
-    den = (np.abs(y) + 0.05 * float(np.max(np.abs(y)))) \
+    den = (np.abs(y) + y_floor * float(np.max(np.abs(y)))) \
         / np.array([wts[tuple(sorted(c))] for c, _, _, _ in rows])
     M = np.vstack([np.real(A) / den[:, None], np.imag(A) / den[:, None]])
     v = np.concatenate([np.real(y) / den, np.imag(y) / den])
     # Регуляризация: базисные векторы почти коллинеарны, без неё МНК находит гигантские
-    # взаимно сокращающиеся веса, при которых главная обмотка предсказывается нулём.
-    lam = 1e-3 * float(np.sqrt((M ** 2).sum() / M.shape[0]))
+    # взаимно сокращающиеся веса, при которых главная обмотка предсказывается нулём. Ниже 1e-5
+    # результат не меняется вовсе, так что запас до вырождения тут есть.
+    lam = lam_rel * float(np.sqrt((M ** 2).sum() / M.shape[0]))
     M = np.vstack([M, lam * np.eye(M.shape[1])])
     v = np.concatenate([v, np.zeros(M.shape[1])])
     return np.linalg.lstsq(M, v, rcond=None)[0]
 
 
-def train(element, order):
+def train(element, order, fit_kw=None):
     """Подгонка ТОЛЬКО на одиночных обмотках: комбинации остаются независимой проверкой."""
     cir = bn.Circuit(element)
     if cir.geom is None:
@@ -122,7 +130,7 @@ def train(element, order):
     maps = bn.read_maps(element, order)
     single = [t for t in maps if len(t[0]) == 1]
     bn.calibrate_senses(cir, single, np.zeros(1))
-    return cir, fit_weights(cir, single), maps
+    return cir, fit_weights(cir, single, **(fit_kw or {})), maps
 
 
 def save(rows, path=WEIGHTS):
