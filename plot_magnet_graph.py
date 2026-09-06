@@ -54,11 +54,14 @@ def node_positions(rows):
     return pos
 
 
-def draw(element, out=None, annotate=True):
+def draw(element, out=None, annotate=True, branches=None, members=None):
+    """Рисунок графа. Пути к таблицам можно передать явно — например, чтобы посмотреть вариант
+    топологии, не трогая базу. Подменять модульные константы для этого НЕЛЬЗЯ: они попадают в
+    значения по умолчанию при определении `load`, и подмена молча не срабатывает."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    rows, coils = load(element)
+    rows, coils = load(element, branches or BRANCHES, members or MEMBERS)
     if not rows:
         raise SystemExit(f"нет ветвей элемента {element} в {BRANCHES}")
     pos = node_positions(rows)
