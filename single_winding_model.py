@@ -634,6 +634,95 @@ def plot_graph_levels(elements, Hof, seeds=60,
     return out
 
 
+def best_fit(ni, y, Hof, nseries=2, tries=5, seeds=60):
+    """Лучшая из нескольких подгонок с разными зёрнами.
+
+    Ландшафт изрезан вырожденностями (ветви, несущие один и тот же поток, различимы только суммой),
+    и одиночный многостарт от прогона к прогону садится в разные минимумы — у QP_sh встречались и
+    6.6%, и 10.2% на одних данных. Поэтому берём лучшее из нескольких независимых прогонов."""
+    best = None
+    for s in range(tries):
+        par, rms = fit_graph(ni, y, Hof, nseries=nseries, seeds=seeds, rng0=s * 9173)
+        if best is None or rms < best[1]:
+            best = (par, rms)
+    return best
+
+
+MOMENT_ORDER = {"B": 1, "G": 2, "S": 3, "O": 4}
+MOMENT_UNIT = {"B": "Тл", "G": "Тл/м", "S": "Тл/м²", "O": "Тл/м³"}
+
+
+def coef_scale(element, dataset=DATA):
+    """Множитель «интеграл момента → физкоэффициент» для этого элемента.
+
+    Датасет хранит интеграл вдоль элемента (длина в него не входит). Привычная величина — сам
+    коэффициент, то есть интеграл, делённый на длину и на энергетический множитель, с (n−1)! по
+    соглашению столбцов mat_*."""
+    import math
+    meta = json.load(open(os.path.join(dataset, f"{element}.meta.json"), encoding="utf-8"))
+    n = MOMENT_ORDER[LEAD[element]]
+    return (math.factorial(n - 1) / (meta["L_used_for_mat_m"] * meta["energy_factor"]),
+            meta["L_used_for_mat_m"])
+
+
+def plot_model(elements, Hof, nseries=2, tries=5,
+               out=os.path.join("workspace", "results", "model_fit.png")):
+    """Измерения и модель «участки + ярмо» по обмоткам, с подобранной геометрией в подписи.
+
+    По вертикали — физкоэффициент в привычных единицах (у секступоля Тл/м²), а не интеграл: модель
+    подгоняется на интеграле, но читать её удобнее в том же виде, что и проектные значения."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    panels = []
+    for el in elements:
+        ser, meta = series(el)
+        for w, (ni, y) in ser.items():
+            panels.append((el, w, ni, y, meta))
+    n = len(panels)
+    fig, ax = plt.subplots(2, n, figsize=(5.0 * n, 7.8), squeeze=False)
+    for k, (el, w, ni, y, meta) in enumerate(panels):
+        tpc = meta["turns_per_coil"][w]
+        nom = meta["nominal_current_a"].get(w) or 0
+        par, rms = best_fit(ni, y, Hof, nseries, tries)
+        v = np.exp(par)
+        g = np.geomspace(y.min() * 0.5, y.max() * 1.02, 500)
+        a, b = ax[0][k], ax[1][k]
+        sc, Lm = coef_scale(el)
+        a.plot(ni / tpc, y * sc, "o", color="#111", ms=6, zorder=5, label="измерения")
+        a.plot(graph_mmf(par, g, Hof, nseries) / tpc, g * sc, "-", color="#1f4e79", lw=2.0,
+               label=f"модель «участки + ярмо» — {rms:.1f}%")
+        b.axhline(0, color="#888", lw=1.0)
+        b.plot(ni / tpc, 100 * (graph_mmf(par, y, Hof, nseries) - ni) / ni, "-o",
+               color="#1f4e79", ms=4.5, lw=1.4)
+        for c in (a, b):
+            if nom:
+                c.axvline(nom, color="#888", lw=1.0, ls="--")
+                c.annotate("номинал", xy=(nom, 0.02), xycoords=("data", "axes fraction"),
+                           fontsize=8, color="#666", rotation=90, va="bottom", ha="right")
+            c.grid(alpha=0.25)
+        ymax = float(np.max(y))
+        txt = (f"полюс  B={ymax / v[1]:.2f} Тл\n"
+               f"ярмо   B={ymax / v[5]:.2f} Тл\n"
+               + (f"участки B={ymax / v[7]:.2f} Тл\n" if nseries > 1 else "")
+               + f"утечка P={v[3]:.2e}")
+        a.annotate(txt, xy=(0.02, 0.97), xycoords="axes fraction", fontsize=8.5, va="top",
+                   family="monospace", bbox=dict(fc="white", ec="#ccc", alpha=0.9, pad=3))
+        a.set_xlim(0, ni.max() / tpc * 1.05)
+        a.set_ylim(0, ymax * sc * 1.15)
+        a.set_title(f"{el}, обмотка {w}   (L_eff = {Lm:.3f} м)", fontsize=11)
+        a.set_ylabel(f"{LEAD[el]}, {MOMENT_UNIT[LEAD[el]]}" if k == 0 else "")
+        a.legend(fontsize=9, loc="lower right")
+        b.set_xlabel("ток обмотки, А")
+        b.set_ylabel("ошибка по току, %" if k == 0 else "")
+    fig.suptitle("Модель магнитной цепи на кривой материала: измерения и подгонка", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
+    fig.savefig(out, dpi=145)
+    plt.close(fig)
+    return out
+
+
 def plot_transfer(nseg=2, base="steel_1008_bh.csv", alt="lowsat_custom_bh.csv",
                   out=os.path.join("workspace", "results", "material_transfer.png")):
     """Перенос материала на графике: подгонка на одной стали, предсказание на другой.
