@@ -702,6 +702,15 @@ class TestMecSigma(unittest.TestCase):
               ("DQ", 1): (22.0, 32.0),
               ("DQ", 2): (7.0, 8.0)}
 
+    # Предельное число НЕДОСТИЖИМЫХ карт (одиночные, комбинации): карты, на которых модель не
+    # дотягивается до измеренного кика ни при каком токе. Зафиксировано по состоянию на 2026-09-07.
+    #   У корректора недостижима ПОЛОВИНА одиночных карт (11 из 23) и две трети комбинаций: во
+    # всех случаях модель не дотягивается до измеренного кика даже при токе ×50, то есть её полка
+    # ниже измеренной. Это настоящий изъян модели на верхних токах, а не настройка решателя.
+    # Числа ниже — фиксация текущего положения, чтобы оно не ухудшалось незаметно; уменьшать их
+    # надо вслед за исправлением полки.
+    MISS = {("corrector", 1): (11, 21), ("DQ", 1): (4, 0), ("DQ", 2): (0, 0)}
+
     def _models(self):
         import mec_sigma as ms
         if not os.path.exists(ms.WEIGHTS):
@@ -733,11 +742,16 @@ class TestMecSigma(unittest.TestCase):
             got = {}
             for lbl, grp in (("одиночные", [t for t in maps if len(t[0]) == 1]),
                              ("комбинации", [t for t in maps if len(t[0]) > 1])):
-                e = [abs(ms.current_scale(el, order, c, m, M) - 1.0) * 100 for c, m, _, _ in grp]
-                e = [x for x in e if np.isfinite(x)]
-                got[lbl] = float(np.mean(e))
-            self.assertLess(got["одиночные"], lim_s, f"{el} n={order} одиночные")
-            self.assertLess(got["комбинации"], lim_c, f"{el} n={order} комбинации")
+                e, miss = ms.current_errors(el, order, grp, M)
+                got[lbl] = (float(np.mean(e)) if e else float("inf"), miss, len(grp))
+            for lbl, lim in (("одиночные", lim_s), ("комбинации", lim_c)):
+                val, miss, tot = got[lbl]
+                self.assertLess(val, lim, f"{el} n={order} {lbl} (по {tot - miss} картам из {tot})")
+                # Охват проверяется отдельно: среднее по остатку тем меньше, чем больше карт
+                # выброшено как недостижимые, поэтому без этого рубежа метрику можно улучшить
+                # УХУДШЕНИЕМ модели.
+                self.assertLessEqual(miss, self.MISS[(el, order)][lbl != "одиночные"],
+                                     f"{el} n={order} {lbl}: недостижимых карт {miss} из {tot}")
 
 
 
