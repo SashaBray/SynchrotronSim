@@ -123,15 +123,58 @@ def fit_weights(cir, rows, augment=True, wts=None, lam_rel=1e-4, y_floor=0.05):
     return np.linalg.lstsq(M, v, rcond=None)[0]
 
 
-def train(element, order, fit_kw=None):
-    """Подгонка ТОЛЬКО на одиночных обмотках: комбинации остаются независимой проверкой."""
+def train(element, order, fit_kw=None, senses=None):
+    """Подгонка ТОЛЬКО на одиночных обмотках: комбинации остаются независимой проверкой.
+
+    `senses` — готовые знаки намотки; без них они калибруются по этой же гармонике поодиночке."""
     cir = bn.Circuit(element)
     if cir.geom is None:
         raise SystemExit(f"{element}: геометрия задана не полностью — МЭС-σ требует чертежей")
     maps = bn.read_maps(element, order)
     single = [t for t in maps if len(t[0]) == 1]
-    bn.calibrate_senses(cir, single, np.zeros(1))
+    if senses:
+        cir.sense.update(senses)
+    else:
+        bn.calibrate_senses(cir, single, np.zeros(1))
     return cir, fit_weights(cir, single, **(fit_kw or {})), maps
+
+
+def joint_senses(element, orders, fit_kw=None, verbose=False):
+    """Знаки намотки, общие для ВСЕХ гармоник, перебором с точным МНК весов внутри.
+
+    Знак намотки — свойство магнита, а не гармоники: обмотка намотана в одну сторону. Пока он
+    калибровался внутри каждой гармоники отдельно (`calibrate_senses` смотрит только на знак
+    отклика по своей гармонике), получалось физически невозможное — у корректора `c2` выходила
+    «+» по диполю и «−» по квадруполю. Здесь набор знаков один на все кики: он подбирается
+    перебором, а веса при каждом наборе находятся точным МНК, потому что линейны (разделяемый МНК).
+
+    Перебор дёшев: потоки от гармоники НЕ зависят, поэтому одно решение цепи даёт базис сразу для
+    всех гармоник, и цена набора — по одному решению на карту.
+
+    Возврат: ({обмотка: ±1}, средняя относительная ошибка по кику на одиночных)."""
+    import itertools
+
+    cir = bn.Circuit(element)
+    wds = sorted(cir.coil_branches)
+    data = {n: [t for t in bn.read_maps(element, n) if len(t[0]) == 1] for n in orders}
+    best = None
+    for combo in itertools.product((1.0, -1.0), repeat=len(wds)):
+        if combo[0] < 0:
+            continue            # общий переворот всех знаков поглощается весами — половина лишняя
+        cir.sense.update(dict(zip(wds, combo)))
+        tot = []
+        for n in orders:
+            rows = data[n]
+            w = fit_weights(cir, rows, **(fit_kw or {}))
+            tot.append(float(np.mean([abs(complex(basis(cir, c) @ w) - m) / abs(m)
+                                      for c, m, _, _ in rows])))
+        score = float(np.mean(tot))
+        if verbose:
+            print("   " + " ".join(f"{k}{'+' if v > 0 else '−'}" for k, v in zip(wds, combo))
+                  + f"  {100 * score:6.2f}%  " + " ".join(f"{100 * t:5.1f}" for t in tot))
+        if best is None or score < best[1]:
+            best = (dict(zip(wds, combo)), score)
+    return best
 
 
 def save(rows, path=WEIGHTS):
@@ -192,9 +235,20 @@ def current_scale(element, order, currents, target, models=None):
 
 
 def cmd_fit(path=WEIGHTS):
+    # Знаки намотки — ОБЩИЕ на все гармоники элемента: обмотка намотана в одну сторону, и
+    # калибровать её отдельно по каждому кику значит позволять модели противоречить самой себе.
+    orders = {}
+    for el, order in MODELS:
+        orders.setdefault(el, []).append(order)
+    senses = {}
+    for el, ords in orders.items():
+        senses[el], sc = joint_senses(el, ords)
+        print(f"  {el}: общие знаки "
+              + " ".join(f"{k}{'+' if v > 0 else '−'}" for k, v in sorted(senses[el].items()))
+              + f", средняя ошибка по кику на одиночных {100 * sc:.1f}%")
     rows = []
     for el, order in MODELS:
-        cir, w, maps = train(el, order)
+        cir, w, maps = train(el, order, senses=senses[el])
         names = kick_names(cir)
         n = len(names)
         sense = "|".join(f"{k}={v:g}" for k, v in sorted(cir.sense.items()))
