@@ -547,7 +547,7 @@ def fit_graph(ni, y, Hof, nseries=2, seeds=60, rng0=0):
 
     ymax, nimean = float(np.max(y)), float(np.mean(ni))
     best = None
-    for n in range(1, nseries + 1):
+    for n in range(0 if nseries == 0 else 1, nseries + 1):
         starts = []
         if best is not None:
             starts.append(list(best[1]) + [best[1][4] - 3.0, best[1][5]])
@@ -576,6 +576,62 @@ def fit_graph(ni, y, Hof, nseries=2, seeds=60, rng0=0):
             if best is None or rms <= best[0] + 1e-9:
                 best = (rms, cur.x, n)
     return best[1], best[0]
+
+
+GRAPH_LEVELS = ((0, "простейший: сердечник + катушка + утечка", "#c0392b"),
+                (1, "+ ярмо отдельной ветвью", "#e8a33d"),
+                (2, "+ участки полюс–ярмо", "#1f4e79"))
+
+
+def plot_graph_levels(elements, Hof, seeds=60,
+                      out=os.path.join("workspace", "results", "graph_levels.png")):
+    """Насколько граф вообще нужно усложнять: измерения против трёх уровней подробности.
+
+    Простейший уровень (один сердечник, одна катушка, утечка на ней) приведён не для полноты: в нём
+    утечка ТОЖДЕСТВЕННО вырождается в сечение железа. Разность потенциалов на катушечной ветви там
+    равна падению на зазоре, то есть линейна по кику, поэтому поток полюса выходит строго
+    пропорционален кику: p = y·(1 + P·Rз/2). Утечка целиком поглощается заменой S → S/(1+P·Rз/2),
+    и граф вырождается в последовательную цепь. Плато он дать не может ни при каких параметрах."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    panels = []
+    for el in elements:
+        ser, meta = series(el)
+        for w, (ni, y) in ser.items():
+            panels.append((el, w, ni, y, meta))
+    n = len(panels)
+    fig, ax = plt.subplots(2, n, figsize=(4.6 * n, 7.8), squeeze=False)
+    for k, (el, w, ni, y, meta) in enumerate(panels):
+        tpc = meta["turns_per_coil"][w]
+        nom = meta["nominal_current_a"].get(w) or 0
+        g = np.geomspace(y.min() * 0.5, y.max() * 1.02, 400)
+        a, b = ax[0][k], ax[1][k]
+        a.plot(ni / tpc, y, "o", color="#111", ms=5.5, zorder=6, label="измерения")
+        b.axhline(0, color="#888", lw=1.0)
+        for ns, name, col in GRAPH_LEVELS:
+            par, rms = fit_graph(ni, y, Hof, nseries=ns, seeds=seeds)
+            a.plot(graph_mmf(par, g, Hof, ns) / tpc, g, "-", color=col, lw=1.8,
+                   label=f"{name} — {rms:.1f}%")
+            b.plot(ni / tpc, 100 * (graph_mmf(par, y, Hof, ns) - ni) / ni, "-o", color=col,
+                   ms=4, lw=1.3)
+        for c in (a, b):
+            if nom:
+                c.axvline(nom, color="#888", lw=1.0, ls="--")
+            c.grid(alpha=0.25)
+        a.set_xlim(0, ni.max() / tpc * 1.05)
+        a.set_ylim(0, y.max() * 1.15)
+        a.set_title(f"{el} {w}", fontsize=11)
+        a.set_ylabel("кик (интеграл момента)" if k == 0 else "")
+        a.legend(fontsize=8, loc="lower right")
+        b.set_xlabel("ток обмотки, А")
+        b.set_ylabel("ошибка по току, %" if k == 0 else "")
+    fig.suptitle("Насколько подробным должен быть граф магнита", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
+    fig.savefig(out, dpi=145)
+    plt.close(fig)
+    return out
 
 
 def plot_transfer(nseg=2, base="steel_1008_bh.csv", alt="lowsat_custom_bh.csv",
