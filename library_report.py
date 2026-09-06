@@ -1,16 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Word-отчёт по библиотеке элементов: паспорт, кики каждой обмотки, проектные рабочие точки.
+"""Word-отчёт: киковые моменты B/G/S/O от тока обмоток по элементам библиотеки.
 
-Устройство отчёта: на КАЖДУЮ ОБМОТКУ свой график, и на нём ВСЕ кики, которые эта обмотка создаёт —
-диполь, квадруполь, секступоль, октуполь. Обмотка редко создаёт одну чистую гармонику: боковая
-обмотка корректора даёт и диполь, и квадруполь, а диполь-квадруполь на то и combined-function.
+Устройство отчёта повторяет `element_compare_report`: вводный методический раздел, однородный раздел
+на КАЖДЫЙ элемент библиотеки (то есть на исполнение — `QP_L_1A_L295`, `QP_L_1A_L374`, … отдельными
+разделами), расшифровка моментов, проектные токи обмоток и сверка проекта с фактом. Терминология и
+таблицы берутся штатными функциями `element_compare`, поэтому совпадают дословно.
 
-По вертикали отложен КИК — интеграл гармоники вдоль элемента, а не коэффициент. Пучок чувствует
-именно интеграл; коэффициент получается делением его на эффективную длину, и это соглашение, а не
-измерение (см. `map_length`). Единицы физические, при проектной энергии 6 ГэВ.
-
-Кики берутся гармоническим разложением карт. Сверено с независимым способом — подгонкой по
-траекториям через диффурное ядро (`saturation_model`): совпадение 0.1–0.8%, см. `crosscheck`.
+Отличие — содержание разделов: вместо таблиц свипа и траекторий приведены ГРАФИКИ зависимости
+киковых моментов от тока обмотки, снятые по картам поля, и на них отмечен проектный ток обмотки.
 
     py -3.14 library_report.py
 """
@@ -18,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import collections
-import csv
 import json
 import math
 import os
@@ -32,296 +28,33 @@ import saturation_model as sm
 OUT = os.path.join("workspace", "results", "library_report.docx")
 PNG = os.path.join("workspace", "results", "library_report_figs")
 
-ELEMENTS = ["QP_sh", "QP_L", "SP", "OP", "DQ", "corrector"]
-KEY = {"QP_sh": "G", "QP_L": "G", "SP": "S", "OP": "O", "DQ": "G", "corrector": "B"}
-COLUMN = {"B": "mat_B", "G": "mat_G", "S": "mat_S", "O": "mat_O"}
-NAMES = {"QP_sh": "Квадруполь короткий", "QP_L": "Квадруполь длинный",
-         "SP": "Секступоль", "OP": "Октуполь", "DQ": "Диполь-квадруполь",
-         "corrector": "Корректор"}
-ORDERS = (1, 2, 3, 4)
-ORDER_NAME = {1: "диполь", 2: "квадруполь", 3: "секступоль", 4: "октуполь"}
-ORDER_GEN = {1: "диполя", 2: "квадруполя", 3: "секступоля", 4: "октуполя"}
-KICK_KEY = {1: "B", 2: "G", 3: "S", 4: "O"}
-ORDER_OF = {v: k for k, v in KICK_KEY.items()}
-# Единицы ИНТЕГРАЛА гармоники по длине — это и есть кик. By ∝ b_n·r^(n−1), отсюда степени метра.
-INT_UNITS = {"B": "Тл·м", "G": "Тл", "S": "Тл/м", "O": "Тл/м²"}
-ORDER_COLOR = {1: "#1f4e79", 2: "#c0392b", 3: "#4a9d5f", 4: "#e8a33d"}
-# Какие кики элемент создаёт в рамках модели. У диполя-квадруполя это диполь, квадруполь и
-# секступоль: секступоль там несущий (через feed-down он и объясняет связь G с током), а октуполь
-# в модель не входит.
-EL_ORDERS = {"DQ": (1, 2, 3)}
-# Обмотки, которыми элемент ВЫХОДИТ НА ПРОЕКТНУЮ ТОЧКУ. Остальные по проекту обесточены.
-# Проектный ток — свойство МАГНИТА, а не обмотки: многообмоточный элемент не обязан и не может
-# обеспечить проектный кик каждой обмоткой по отдельности, он выходит на него КОМБИНАЦИЕЙ.
-# Поэтому ток называется один раз на магнит, и только когда его несёт ОДНА обмотка.
-DESIGN_BY = {"QP_sh": ("I",), "QP_L": ("I",), "OP": ("I1",),
-             "SP": ("I1",),            # I2 по проекту = 0
-             "DQ": ("I1", "I2")}       # I3 по проекту = 0; точка достигается комбинацией
+# Киковый момент → (порядок мультиполя, компонента): 0 — нормальная, 1 — скью. Обозначения и порядок
+# те же, что в `element_compare.MULTIPOLES`.
+MOMENT = {"B": (1, 0), "Bv": (1, 1), "G": (2, 0), "Gv": (2, 1), "S": (3, 0), "O": (4, 0)}
+# Единицы ИНТЕГРАЛА момента по длине: By ∝ b_n·r^(n−1), отсюда степени метра.
+MOMENT_UNITS = {"B": "Тл·м", "Bv": "Тл·м", "G": "Тл", "Gv": "Тл", "S": "Тл/м", "O": "Тл/м²"}
+MOMENT_COLOR = {"B": "#1f4e79", "Bv": "#5b9bd5", "G": "#c0392b", "Gv": "#e07b6a",
+                "S": "#4a9d5f", "O": "#e8a33d"}
+ELEMENTS = ("QP_sh", "QP_L", "SP", "OP", "DQ", "corrector")   # элементы, у которых есть карты полей
+# Моменты, рассматриваемые у элементов данного вида. У диполя-квадруполя это B, G и S: секступоль
+# там несущий (через feed-down он и объясняет связь G с током), а октуполь в модель не входит.
+KIND_MOMENTS = {"dq": ("B", "G", "S")}
 
-PROBE_SCAN = (1e-3, 3e-3, 5e-3, 8e-3, 11e-3, 14e-3)  # карты все ±50 мм, 14 мм внутри хор. поля
+PROBE_SCAN = (1e-3, 3e-3, 5e-3, 8e-3, 11e-3, 14e-3)   # карты все ±50 мм, 14 мм внутри хорошего поля
 PLOT_RADIUS = {1: 1e-3, 2: 5e-3, 3: 8e-3, 4: 14e-3}
 # Радиусы, НА КОТОРЫХ проверяется устойчивость данного порядка. Проверять октуполь на 1 мм
-# бессмысленно: там он заведомо под шумовым полом, и настоящая гармоника отбраковалась бы вместе
-# с шумом — у секступоля SP, его ГЛАВНОЙ гармоники, так и выходило 56%.
+# бессмысленно: там он заведомо под шумовым полом, и настоящий момент отбраковался бы вместе с
+# шумом — у секступоля SP, его ГЛАВНОГО момента, так и выходило 56%.
 RES_RADII = {1: (1e-3, 3e-3, 5e-3, 8e-3), 2: (1e-3, 3e-3, 5e-3, 8e-3),
              3: (5e-3, 8e-3, 11e-3, 14e-3), 4: (8e-3, 11e-3, 14e-3)}
-RESOLVED = 25.0        # % разброса по радиусу пробы, выше которого гармоника считается шумом
-SKEW_SHOW = 5.0        # % от нормальной, начиная с которых скошенную компоненту стоит рисовать
+RESOLVED = 25.0        # % разброса по радиусу пробы, выше которого момент считается шумом
 
 SPEC_CACHE = os.path.join("workspace", "results", "library_report_spectra_ri.json")
+VAR_CACHE = os.path.join("workspace", "results", "library_report_variants.json")
 MAPLEN_CACHE = os.path.join("workspace", "results", "library_report_maplen.json")
 
 
-# ───────────────────────────── паспорт из БД ─────────────────────────────
-
-def hardware():
-    import matrix_tracker as mt
-    return mt._read("hardware_library.csv")
-
-
-def devices(element):
-    """Семейства устройств элемента с паспортом: витки, катушки, номинальный ток, длина."""
-    out = []
-    for r in hardware():
-        d = r["device_type_id"]
-        if not d.startswith(element) or not (r.get("nominal_current_a") or "").strip():
-            continue
-        out.append(dict(dev=d, turns=r.get("turns_per_coil", ""), coils=r.get("num_coils", ""),
-                        total=r.get("total_turns", ""), inom=r.get("nominal_current_a", ""),
-                        leff=r.get("eff_length", "")))
-    return sorted(out, key=lambda x: x["dev"])
-
-
-def winding_turns():
-    """{элемент: {обмотка: витков на катушку}} — из таблицы ветвей насыщения."""
-    out = collections.defaultdict(dict)
-    for r in csv.DictReader(open(os.path.join("workspace", "tables",
-                                              "saturation_branch_members.csv"),
-                                 encoding="utf-8-sig"), delimiter=";"):
-        if r.get("turns_per_coil"):
-            out[r["element"]][r["winding"]] = int(r["turns_per_coil"])
-    return out
-
-
-def nominal_by_winding(element):
-    """{обмотка: номинальный ток, А} — из имён устройств вида `SP_I1_1A_L166`.
-
-    У однообмоточных элементов обмотки в имени нет, и номинал ложится под ключ None."""
-    out = {}
-    for d in devices(element):
-        tok = d["dev"][len(element) + 1:].split("_")[0]
-        try:
-            out[tok if not tok.endswith("A") else None] = float(d["inom"].split()[0])
-        except (ValueError, IndexError):
-            pass
-    return out
-
-
-def energy_factor():
-    """Множитель «шкала трекера → физическая»: трекинг идёт на суррогатной энергии γ≈7, а карты
-    и паспорта — на проектных 6 ГэВ."""
-    import element_compare as ec
-    return ec.ENERGY_FACTOR
-
-
-def design_levels(element, key):
-    """Проектные кики решётки 1 в ФИЗИЧЕСКИХ единицах: {(устройство, L, ∫кик·dl): количество}.
-
-    В `lattice_configs` лежит коэффициент в шкале трекера. Физический кик получается умножением на
-    длину, на энергетический множитель и на (n−1)! — таково соглашение столбцов mat_*: у них
-    By ∝ mat_S·x²/2!, а у гармонического разложения By ∝ b₃·x²."""
-    col, n = COLUMN[key], ORDER_OF[key]
-    scale = energy_factor() / math.factorial(n - 1)
-    c = collections.Counter()
-    for r in csv.DictReader(open(os.path.join("workspace", "tables", "lattice_configs.csv"),
-                                 encoding="utf-8-sig"), delimiter=";"):
-        if str(r.get("lattice_id")) != "1" or not r.get("device_type_id", "").startswith(element):
-            continue
-        try:
-            v, L = abs(float(r.get(col) or 0)), float(r.get("eff_length") or 0)
-        except ValueError:
-            continue
-        if v > 1e-9 and L > 0:
-            c[(r["device_type_id"], round(L, 4), v * L * scale)] += 1
-    tot = sum(c.values()) or 1
-    return {k: m for k, m in c.items() if m >= max(3, 0.02 * tot)}
-
-
-def first_crossing(x, y, level):
-    """Ток, при котором кик ВПЕРВЫЕ достигает уровня. В насыщении кривая может быть немонотонна,
-    поэтому обычная интерполяция непригодна — берём первое пересечение."""
-    for i in range(1, len(y)):
-        if (y[i - 1] - level) * (y[i] - level) <= 0 and y[i] != y[i - 1]:
-            t = (level - y[i - 1]) / (y[i] - y[i - 1])
-            return float(x[i - 1] + t * (x[i] - x[i - 1]))
-    return None
-
-
-# ───────────────────────────── кики из карт ─────────────────────────────
-
-def spectrum(path, orders, radii, nth=64):
-    """Кики на НЕСКОЛЬКИХ радиусах пробы за одну загрузку карты: {радиус: {порядок: (норм, скью)}}.
-
-    Гармоника комплексна: (By + i·Bz) даёт нормальный мультиполь и повёрнутый на пол-периода
-    (скошенный). Брать МОДУЛЬ нельзя — он их смешивает: у боковых обмоток корректора скошенная
-    часть сравнима с нормальной, и модуль завышал дипольный кик на 59%. У чистых элементов
-    скошенная часть — доли процента, и разложение это подтверждает.
-
-    Множитель 2 при интеграле — потому что карты половинные: поле максимально при x=0 (середина
-    магнита) и спадает к дальнему концу, вторую половину даёт симметрия.
-
-    Несколько радиусов нужны не для полноты. Поле мультиполя ∝ r^(n−1), а шум карты аддитивен,
-    поэтому у слабой высокой гармоники сигнал у оси лежит ПОД шумовым полом. Настоящую гармонику
-    от шума отличает то, что после деления на r^(n−1) она НЕ ЗАВИСИТ от радиуса пробы."""
-    from field_quality import load, _circle
-    h, B = load(path)
-    xs = np.linspace(h["mnx"], h["mxx"], h["nx"])
-    out = {}
-    for r in radii:
-        acc = {n: [] for n in orders}
-        for ix in range(h["nx"]):
-            by, bz = _circle(h, B, ix, r, nth=nth)
-            sp = np.fft.fft(by + 1j * bz) / nth
-            for n in orders:
-                acc[n].append(sp[0] if n == 1 else sp[-(n - 1)])
-        out[r] = {}
-        for n in orders:
-            v = np.array(acc[n])
-            c = complex(2 * np.trapezoid(v.real, xs), 2 * np.trapezoid(v.imag, xs))
-            out[r][n] = (abs(c.imag) / r ** (n - 1), abs(c.real) / r ** (n - 1))
-    return out
-
-
-def element_spectra(element, orders=ORDERS, radii=PROBE_SCAN):
-    """{обмотка: [(ампер-витки, {радиус: {порядок: кик}})]} по ОДИНОЧНЫМ картам, с кэшем на диске.
-
-    Карты с несколькими одновременно запитанными обмотками пропускаются: по ним нельзя сказать,
-    какая обмотка какой кик создала, а вопрос отчёта именно такой."""
-    cache = {}
-    if os.path.exists(SPEC_CACHE):
-        try:
-            cache = json.load(open(SPEC_CACHE, encoding="utf-8"))
-        except (OSError, ValueError):
-            cache = {}
-    dirty = False
-    data = collections.defaultdict(list)
-    for r in sm.read_registry():
-        if r["element"] != element or ";" in r["excitation"] or "+" in r["excitation"]:
-            continue
-        p = os.path.join("workspace", "fields_bin", r["bin_path"])
-        try:
-            ni = abs(float(r["amp_turns"]))
-        except (TypeError, ValueError):
-            continue
-        if ni <= 0 or not os.path.exists(p):
-            continue
-        key = r["map_id"]
-        have = cache.setdefault(key, {})
-        # Досчитываем ТОЛЬКО недостающие радиусы: иначе добавление радиуса в скан либо молча
-        # оставляло бы старый набор, либо заставляло пересчитывать всю библиотеку заново.
-        need = [rr for rr in radii if f"{rr:.6f}" not in have]
-        if need:
-            s = spectrum(p, orders, need)
-            have.update({f"{rr:.6f}": {str(n): list(v) for n, v in d.items()}
-                         for rr, d in s.items()})
-            dirty = True
-        s = {float(rr): {int(n): tuple(v) for n, v in d.items()} for rr, d in have.items()}
-        data[r["winding"]].append((ni, s))
-    if dirty:
-        os.makedirs(os.path.dirname(SPEC_CACHE) or ".", exist_ok=True)
-        json.dump(cache, open(SPEC_CACHE, "w", encoding="utf-8"))
-    return {w: sorted(v, key=lambda t: t[0]) for w, v in data.items()}
-
-
-def resolution(pts, order, radii=None):
-    """Разброс кика по радиусу пробы, % от медианы — по верхней половине токов.
-
-    Настоящая гармоника даёт единицы процентов: поделённая на r^(n−1), она от радиуса не зависит.
-    Шум даёт десятки и сотни — у него такой зависимости нет. Радиусы берутся из RES_RADII: для
-    каждого порядка свои, те, на которых гармоника этого порядка вообще может быть измерена."""
-    radii = radii or RES_RADII[order]
-    top = pts[len(pts) // 2:]
-    sc = []
-    for ni, s in top:
-        v = np.array([s[r][order][0] for r in radii if r in s])
-        m = np.median(v)
-        if m > 0:
-            sc.append(100 * (v.max() - v.min()) / m)
-    return float(np.mean(sc)) if sc else float("nan")
-
-
-def map_length(element, key):
-    """Жёстко-краевая эффективная длина ИЗМЕРЕННОГО магнита: 2·∫c·dx / max c (карта половинная).
-
-    Это НЕ подгоночная L_eff из датасетов. Подгонка определяет только ПРОИЗВЕДЕНИЕ «коэффициент ×
-    длина» (оно сходится с интегралом карты до 0.8%), а как разделить его на сомножители — не
-    определяет вовсе: при смене сетки подгоночная длина QP_sh уехала на 13%, у OP она ниже
-    настоящей на 39%. Длина же, взятая из ФОРМЫ поля, попадает в проектную: QP_L 0.374 против
-    0.3745, DQ 0.367 против 0.400, SP 0.164 против 0.166."""
-    cache = {}
-    if os.path.exists(MAPLEN_CACHE):
-        try:
-            cache = json.load(open(MAPLEN_CACHE, encoding="utf-8"))
-        except (OSError, ValueError):
-            cache = {}
-    ck = f"{element}|{key}"
-    if ck in cache:
-        return cache[ck]
-    from field_quality import load, _circle
-    n = ORDER_OF[key]
-    r = PLOT_RADIUS[n]
-    reg = [x for x in sm.read_registry()
-           if x["element"] == element and ";" not in x["excitation"] and "+" not in x["excitation"]]
-    if not reg:
-        return None
-    # Средний ток: у самых слабых карт всё тонет в шуме, у самых сильных профиль уже искажён
-    # насыщением, и жёстко-краевая длина заметно расползается.
-    m = sorted(reg, key=lambda x: abs(float(x["amp_turns"] or 0)))[len(reg) // 2]
-    h, B = load(os.path.join("workspace", "fields_bin", m["bin_path"]))
-    xs = np.linspace(h["mnx"], h["mxx"], h["nx"])
-    v = []
-    for ix in range(h["nx"]):
-        by, bz = _circle(h, B, ix, r)
-        sp = np.fft.fft(by + 1j * bz) / 64
-        v.append(abs((sp[0] if n == 1 else sp[-(n - 1)]).imag))
-    v = np.array(v)
-    L = float(2 * np.trapezoid(v, xs) / v.max())
-    cache[ck] = L
-    os.makedirs(os.path.dirname(MAPLEN_CACHE) or ".", exist_ok=True)
-    json.dump(cache, open(MAPLEN_CACHE, "w", encoding="utf-8"))
-    return L
-
-
-def crosscheck(element, key):
-    """Сверка кика из гармоник с киком из подгонки траекторий на самой сильной карте элемента.
-
-    Два независимых способа: гармоническое разложение поля и прогон пучка диффурным ядром через ту
-    же карту. Совпадают — значит ни в разложении, ни в подгонке нет систематики."""
-    p = os.path.join(sm.OUTDIR, f"{element}.json")
-    if not os.path.exists(p):
-        return None
-    d = json.load(open(p, encoding="utf-8"))
-    rec = [x for x in d["records"]
-           if x["coeffs"] and key in x["coeffs"] and "+" not in (x["winding"] or "")]
-    if not rec:
-        return None
-    x = sorted(rec, key=lambda z: abs(float(z["amp_turns"])))[-1]
-    reg = {r["map_id"]: r for r in sm.read_registry() if r["element"] == element}
-    m = reg.get(x["map_id"])
-    if m is None:
-        return None
-    n = ORDER_OF[key]
-    r = PLOT_RADIUS[n]
-    harm = spectrum(os.path.join("workspace", "fields_bin", m["bin_path"]), (n,), (r,))[r][n][0]
-    traj = abs(x["coeffs"][key]) * x["Leff"] * energy_factor() / math.factorial(n - 1)
-    return dict(ni=abs(float(x["amp_turns"])), key=key, harm=harm, traj=traj,
-                diff=100 * (traj / harm - 1))
-
-
-# ───────────────────────────── графики ─────────────────────────────
-
-VAR_CACHE = os.path.join("workspace", "results", "library_report_variants.json")
-
+# ───────────────────────────── моменты из карт ─────────────────────────────
 
 def _load_full(path):
     """Карта из .bin, приведённая к ПОЛНОЙ: библиотека хранит половинки (X≥0)."""
@@ -334,7 +67,7 @@ def _load_full(path):
 
 
 def _profile(h, B, order, radius, nth=64):
-    """Продольный профиль гармоники: (x, |b_n(x)|). Нормальная компонента (мнимая часть)."""
+    """Продольный профиль момента: (x, |b_n(x)|), нормальная компонента."""
     from field_quality import _circle
     xs = h["mnx"] + np.arange(h["nx"]) * h["sx"]
     v = []
@@ -346,7 +79,11 @@ def _profile(h, B, order, radius, nth=64):
 
 
 def _kicks(h, B, orders, nth=64):
-    """{порядок: (нормальный кик, скошенный кик)} на ПОЛНОЙ карте, каждый на своём радиусе пробы."""
+    """{порядок: (нормальный, скью)} на ПОЛНОЙ карте, каждый порядок на своём радиусе пробы.
+
+    Момент комплексен: (By + i·Bz) даёт нормальный мультиполь и повёрнутый на пол-периода (скью).
+    Брать МОДУЛЬ нельзя — он их смешивает: у боковых обмоток корректора скью-часть больше
+    нормальной, и модуль завышал дипольный момент на 59%."""
     from field_quality import _circle
     xs = h["mnx"] + np.arange(h["nx"]) * h["sx"]
     out = {}
@@ -366,20 +103,130 @@ def _kicks(h, B, orders, nth=64):
     return out
 
 
+def spectrum(path, orders, radii, nth=64):
+    """Моменты на НЕСКОЛЬКИХ радиусах пробы за одну загрузку карты: {радиус: {порядок: (норм, скью)}}.
+
+    Несколько радиусов нужны не для полноты. Поле мультиполя ∝ r^(n−1), а шум карты аддитивен,
+    поэтому у слабого высокого момента сигнал у оси лежит ПОД шумовым полом. Настоящий момент от
+    шума отличает то, что после деления на r^(n−1) он НЕ ЗАВИСИТ от радиуса пробы."""
+    from field_quality import load, _circle
+    h, B = load(path)
+    xs = np.linspace(h["mnx"], h["mxx"], h["nx"])
+    out = {}
+    for r in radii:
+        acc = {n: [] for n in orders}
+        for ix in range(h["nx"]):
+            by, bz = _circle(h, B, ix, r, nth=nth)
+            sp = np.fft.fft(by + 1j * bz) / nth
+            for n in orders:
+                acc[n].append(sp[0] if n == 1 else sp[-(n - 1)])
+        out[r] = {}
+        for n in orders:
+            v = np.array(acc[n])
+            c = complex(2 * np.trapezoid(v.real, xs), 2 * np.trapezoid(v.imag, xs))
+            out[r][n] = (abs(c.imag) / r ** (n - 1), abs(c.real) / r ** (n - 1))
+    return out
+
+
+def element_spectra(element, orders=(1, 2, 3, 4), radii=PROBE_SCAN):
+    """{обмотка: [(ампер-витки, {радиус: {порядок: (норм, скью)}})]} по ОДИНОЧНЫМ картам, с кэшем.
+
+    Карты с несколькими одновременно запитанными обмотками пропускаются: по ним нельзя сказать,
+    какая обмотка какой момент создала."""
+    cache = {}
+    if os.path.exists(SPEC_CACHE):
+        try:
+            cache = json.load(open(SPEC_CACHE, encoding="utf-8"))
+        except (OSError, ValueError):
+            cache = {}
+    dirty = False
+    data = collections.defaultdict(list)
+    for r in sm.read_registry():
+        if r["element"] != element or ";" in r["excitation"] or "+" in r["excitation"]:
+            continue
+        p = os.path.join("workspace", "fields_bin", r["bin_path"])
+        try:
+            ni = abs(float(r["amp_turns"]))
+        except (TypeError, ValueError):
+            continue
+        if ni <= 0 or not os.path.exists(p):
+            continue
+        have = cache.setdefault(r["map_id"], {})
+        # Досчитываем ТОЛЬКО недостающие радиусы: иначе добавление радиуса в скан либо молча
+        # оставляло бы старый набор, либо заставляло пересчитывать всю библиотеку заново.
+        need = [rr for rr in radii if f"{rr:.6f}" not in have]
+        if need:
+            s = spectrum(p, orders, need)
+            have.update({f"{rr:.6f}": {str(n): list(v) for n, v in d.items()}
+                         for rr, d in s.items()})
+            dirty = True
+        s = {float(rr): {int(n): tuple(v) for n, v in d.items()} for rr, d in have.items()}
+        data[r["winding"]].append((ni, s))
+    if dirty:
+        os.makedirs(os.path.dirname(SPEC_CACHE) or ".", exist_ok=True)
+        json.dump(cache, open(SPEC_CACHE, "w", encoding="utf-8"))
+    return {w: sorted(v, key=lambda t: t[0]) for w, v in data.items()}
+
+
+def resolution(pts, order, radii=None):
+    """Разброс момента по радиусу пробы, % от медианы — по верхней половине токов.
+
+    Настоящий момент даёт единицы процентов: поделённый на r^(n−1), он от радиуса не зависит. Шум
+    даёт десятки и сотни. Радиусы берутся из RES_RADII: для каждого порядка свои, те, на которых
+    момент этого порядка вообще может быть измерен."""
+    radii = radii or RES_RADII[order]
+    top = pts[len(pts) // 2:]
+    sc = []
+    for ni, s in top:
+        v = np.array([s[r][order][0] for r in radii if r in s])
+        m = np.median(v)
+        if m > 0:
+            sc.append(100 * (v.max() - v.min()) / m)
+    return float(np.mean(sc)) if sc else float("nan")
+
+
+def map_length(element, order):
+    """Жёстко-краевая эффективная длина ИЗМЕРЕННОГО магнита: 2·∫c·dx / max c (карта половинная).
+
+    Это НЕ подгоночная L_eff из датасетов: подгонка определяет только ПРОИЗВЕДЕНИЕ «коэффициент ×
+    длина», а как разделить его на сомножители — не определяет (при смене сетки подгоночная длина
+    QP_sh уехала на 13% при неизменном произведении). Длина, взятая из ФОРМЫ поля, попадает в
+    проектную: QP_L 0.374 против 0.3745, DQ 0.403 против 0.400."""
+    cache = {}
+    if os.path.exists(MAPLEN_CACHE):
+        try:
+            cache = json.load(open(MAPLEN_CACHE, encoding="utf-8"))
+        except (OSError, ValueError):
+            cache = {}
+    ck = f"{element}|{order}"
+    if ck in cache:
+        return cache[ck]
+    reg = [x for x in sm.read_registry()
+           if x["element"] == element and ";" not in x["excitation"] and "+" not in x["excitation"]]
+    if not reg:
+        return None
+    # Средний ток: у самых слабых карт всё тонет в шуме, у самых сильных профиль искажён насыщением.
+    m = sorted(reg, key=lambda x: abs(float(x["amp_turns"] or 0)))[len(reg) // 2]
+    h, B = _load_full(os.path.join("workspace", "fields_bin", m["bin_path"]))
+    xs, p = _profile(h, B, order, PLOT_RADIUS[order])
+    L = float(np.trapezoid(p, xs) / p.max())
+    cache[ck] = L
+    os.makedirs(os.path.dirname(MAPLEN_CACHE) or ".", exist_ok=True)
+    json.dump(cache, open(MAPLEN_CACHE, "w", encoding="utf-8"))
+    return L
+
+
 def stretch(h, B, order, radius, L_target):
-    """Карта магнита ДРУГОЙ ДЛИНЫ: тело растягивается, фриндж сохраняется.
+    """Карта магнита ДРУГОЙ ДЛИНЫ: тело растягивается, краевое поле сохраняется.
 
-    Это штатный гибридный ресайз проекта (`_qp_scale_hybrid.resize`, тот же, что у
+    Штатный гибридный ресайз проекта (`_qp_scale_hybrid.resize`, тот же, что у
     `gen_synthetic_maps`): удлинить магнит — значит добавить прямого участка, а не растянуть его
-    целиком, потому что краевое поле определяется поперечником и от длины не зависит. Отсюда и
-    тождество L_eff = c_body·L_тела + L_фринджа.
+    целиком, потому что краевое поле определяется поперечником и от длины не зависит. Отсюда
+    тождество L_eff = c_body·L_тела + L_краевого.
 
-    Тело выделяется по профилю ВЕДУЩЕЙ гармоники (её интеграл и есть кик), а не по |B| в стороне
-    от оси, как в продакшн-эвристике: у наших карт та срывалась в запасной вариант «тело = вся
-    длина», и фриндж растягивался вместе с телом.
-
-    Разбиение считается ДЛЯ КАЖДОЙ КАРТЫ отдельно: в насыщении профиль заостряется, и общая на весь
-    ток длина тела дала бы у секступоля c_body=2.2 там, где должно быть 1."""
+    Тело выделяется по профилю ВЕДУЩЕГО момента (его интеграл и есть кик), а не по |B| в стороне от
+    оси, как в продакшн-эвристике: у наших карт та срывалась в запасной вариант «тело = вся длина».
+    Разбиение считается ДЛЯ КАЖДОЙ КАРТЫ отдельно: в насыщении профиль заостряется."""
     import _qp_scale_hybrid as hy
     xs, p = _profile(h, B, order, radius)
     mx = p.max()
@@ -387,20 +234,19 @@ def stretch(h, B, order, radius, L_target):
         return None, None, None
     Xb = float(xs[p >= 0.9 * mx].max())
     L_body, L0 = 2 * Xb, float(np.trapezoid(p, xs) / mx)
-    L_fringe = L0 - L_body
     if L_body <= 1e-6:
         return None, None, None
-    cb = min(max((L_target - L_fringe) / L_body, 0.05), 20.0)
+    cb = min(max((L_target - (L0 - L_body)) / L_body, 0.05), 20.0)
     h2, B2 = hy.resize(h, B, cb, 1.0, Xb)
     return h2, B2, cb
 
 
-def variant_kicks(element, L_target, orders=None):
-    """{обмотка: [(ампер-витки, {порядок: (норм, скью)})]} для магнита длины L_target.
+def variant_kicks(element, L_target, order_lead, orders=(1, 2, 3, 4)):
+    """{обмотка: [(ампер-витки, {порядок: (норм, скью)}, c_body)]} для магнита длины L_target.
 
-    Карты сняты с ОДНОЙ длины из семейства, а в решётке магнит стоит в нескольких. Кривые для
-    остальных длин получаются синтезом (`stretch`), иначе их проектный кик выглядит недостижимым —
-    просто потому, что сравнивался с более коротким магнитом."""
+    Карты сняты с ОДНОЙ длины из семейства, а в библиотеке магнит стоит в нескольких исполнениях.
+    Кривые для остальных длин получаются синтезом (`stretch`), иначе проектный момент выглядел бы
+    недостижимым просто потому, что сравнивался с более коротким магнитом."""
     cache = {}
     if os.path.exists(VAR_CACHE):
         try:
@@ -408,8 +254,6 @@ def variant_kicks(element, L_target, orders=None):
         except (OSError, ValueError):
             cache = {}
     dirty = False
-    orders = orders or orders_of(element)
-    lead = ORDER_OF[KEY[element]]
     data = collections.defaultdict(list)
     for r in sm.read_registry():
         if r["element"] != element or ";" in r["excitation"] or "+" in r["excitation"]:
@@ -424,7 +268,7 @@ def variant_kicks(element, L_target, orders=None):
         ck = f"{r['map_id']}|{L_target:.4f}"
         if ck not in cache:
             h, B = _load_full(p)
-            h2, B2, cb = stretch(h, B, lead, PLOT_RADIUS[lead], L_target)
+            h2, B2, cb = stretch(h, B, order_lead, PLOT_RADIUS[order_lead], L_target)
             if h2 is None:
                 continue
             k = _kicks(h2, B2, orders)
@@ -438,389 +282,285 @@ def variant_kicks(element, L_target, orders=None):
     return {w: sorted(v, key=lambda t: t[0]) for w, v in data.items()}
 
 
-def variants(element):
-    """Исполнения элемента: [(длина, [(устройство, кик, штук), …]), …], по возрастанию длины.
+# ───────────────────────── привязка к элементам отчёта ─────────────────────────
 
-    У корректора проектных киков в решётке нет (он не оттюнен) — тогда единственное «исполнение»
-    это длина снятых карт."""
-    by_len = collections.defaultdict(list)
-    for n in ORDERS:
-        for (dev, L, v), cnt in design_levels(element, KICK_KEY[n]).items():
-            by_len[round(L, 4)].append((n, dev, v, cnt))
-    if not by_len:
-        L = map_length(element, KEY[element])
-        return [(L, [])] if L else []
-    return sorted(by_len.items())
+def element_of(name):
+    """Имя элемента отчёта (`QP_L_1A_L295`) → элемент библиотеки карт (`QP_L`)."""
+    cand = [e for e in ELEMENTS if name.startswith(e)]
+    return max(cand, key=len) if cand else None
 
 
-def orders_of(element):
-    """Порядки, рассматриваемые у этого элемента."""
-    return EL_ORDERS.get(element, ORDERS)
+def lead_order(m):
+    """Порядок ВЕДУЩЕГО момента элемента — по нему выделяется тело магнита при синтезе длины."""
+    return max(MOMENT[mp][0] for mp in m["outputs"]) if m["outputs"] else 2
 
 
-def design_note(element):
-    """Что элемент создаёт ПО ПРОЕКТУ.
-
-    По умолчанию — те кики, для которых в решётке задано ненулевое значение. У диполя-квадруполя
-    перечень задан явно (EL_ORDERS): секступоль там несущий — через feed-down он и объясняет связь
-    градиента с током, — хотя отдельного проектного значения у него в решётке нет."""
-    have = [n for n in ORDERS if design_levels(element, KICK_KEY[n])]
-    if not have:
-        return None
-    oo = EL_ORDERS.get(element)
-    if oo is None:
-        return " и ".join(ORDER_NAME[n] for n in have)
-    names = [ORDER_NAME[n] for n in oo]
-    txt = ", ".join(names[:-1]) + " и " + names[-1]
-    if len(have) < len(oo):
-        txt += ("; проектное значение в решётке задано для "
-                + " и ".join(ORDER_GEN[n] for n in have))
-    return txt
-
-
-def design_points(element):
-    """Проектные рабочие точки элемента: по строке на (исполнение, кик).
-
-    Ток называется, только если проектную точку несёт ОДНА обмотка. Если магнит выходит на неё
-    комбинацией (диполь-квадруполь: I1 и I2), в поле тока стоит None, а `by` перечисляет обмотки:
-    разложить проектный кик по обмоткам без математической модели нельзя."""
-    by = DESIGN_BY.get(element)
-    turns = winding_turns().get(element, {})
-    nom_w = nominal_by_winding(element)
-    alone = bool(by) and len(by) == 1
-    out = []
-    for L, levels in variants(element):
-        if not levels:
+def design_currents(m, ec):
+    """{обмотка: (проектный ток, А; % номинала)} — те же числа, что в таблице «проектные токи
+    обмоток». Считаются обращением матрицы связи под проектные mat_* решётки (`_design_ivec`),
+    поэтому у многообмоточных элементов это КОМБИНАЦИЯ, а не ток одной обмотки."""
+    Ivec, ctrl, design = ec._design_ivec(m)
+    out = {}
+    if not ctrl:
+        return out, design
+    for j, lb in enumerate(m["labels"]):
+        dev = m["devs"][j]
+        tpc = ec.dev_tpc(dev)
+        if not tpc:
             continue
-        pts_by_w = variant_kicks(element, L)
-        w = by[0] if by else None
-        x = y_of = None
-        if alone and w in pts_by_w:
-            pts = pts_by_w[w]
-            x = np.array([q[0] for q in pts]) / (turns.get(w) or 1)
-            y_of = lambda n: np.array([q[1][n][0] for q in pts])
-        nom = (nom_w.get(w) if w else None) or nom_w.get(None)
-        for n, dev, v, cnt in sorted(levels, key=lambda q: (q[0], q[2])):
-            cur = first_crossing(x, y_of(n), v) if y_of else None
-            out.append(dict(L=L, order=n, dev=dev, level=v, count=cnt, by=by, alone=alone,
-                            winding=w, nominal=nom, cur=cur))
+        nom = ec.dev_nominal(dev)
+        cur = Ivec[j] * ec.ENERGY_FACTOR / tpc
+        out[lb] = (cur, (100.0 * abs(cur) / nom) if nom else None)
+    return out, design
+
+
+def curve_current(m, el, L, lead, design, pts_by_w, ec):
+    """{момент: (ток по матрице, ток по кривой карт)} — для ОДНООБМОТОЧНЫХ элементов.
+
+    Матрица связи линейна: она снята свипом в рабочей области и продолжена прямой. Кривая, снятая
+    по картам, содержит насыщение железа. Там, где проектная точка лежит на изгибе кривой, эти два
+    тока расходятся, и расхождение — прямая мера того, насколько линейная матрица недооценивает
+    нужный ток. У многообмоточных элементов вопрос не ставится: проектную точку они берут
+    комбинацией, и по кривой одной обмотки её не прочитать."""
+    if len(m["labels"]) != 1:
+        return {}
+    w = m["labels"][0]
+    pts = pts_by_w.get(w) or pts_by_w.get("I1" if w == "I" else "I")
+    tpc = ec.dev_tpc(m["devs"][0])
+    if not pts or not tpc:
+        return {}
+    x = np.array([q[0] for q in pts]) / tpc
+    out = {}
+    for mp in m["outputs"]:
+        d = abs(design.get(mp, 0.0))
+        if d < 1e-30:
+            continue
+        n, comp = MOMENT[mp]
+        y = np.array([q[1][n][comp] for q in pts])
+        tgt = d * L * ec.ENERGY_FACTOR / math.factorial(n - 1)
+        xi = None
+        for i in range(1, len(y)):
+            if (y[i - 1] - tgt) * (y[i] - tgt) <= 0 and y[i] != y[i - 1]:
+                xi = float(x[i - 1] + (tgt - y[i - 1]) / (y[i] - y[i - 1]) * (x[i] - x[i - 1]))
+                break
+        out[mp] = xi
     return out
 
 
-def plot_winding(element, winding, pts, turns, L, levels, outdir, tag, alone=True):
-    """Один график = одна обмотка одного ИСПОЛНЕНИЯ. На нём все кики, которые обмотка создаёт.
+# ───────────────────────────── графики ─────────────────────────────
 
-    `levels` — проектные кики магнита; передаются только тем обмоткам, что по проекту участвуют.
-    `alone` — несёт ли эта обмотка проектную точку В ОДИНОЧКУ. Если нет (диполь-квадруполь выходит
-    на неё комбинацией I1 и I2), уровень рисуется, но ток НЕ называется: разложить проектный кик по
-    обмоткам без модели нельзя, а пересечение кривой одной обмотки означало бы, что остальные
-    обесточены, чего в проекте нет."""
+def plot_winding(m, label, pts, turns, L, moments, design, outdir):
+    """График одной обмотки: киковые моменты от тока, вертикаль — проектный ток обмотки.
+
+    Показываются только моменты, РАЗРЕШИМЫЕ в снятых картах (`resolution`): нарисовать шум под
+    именем октуполя хуже, чем не рисовать ничего, — по такой кривой будут считать ток."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    native = element_spectra(element).get(winding)
-    oo = orders_of(element)
-    res = {n: (resolution(native, n) if native else 0.0) for n in oo}
-    show = [n for n in oo if res[n] <= RESOLVED]
-    if not show:
-        return None
     x = np.array([p[0] for p in pts]) / (turns or 1)
     cb = float(np.mean([p[2] for p in pts]))
-
     fig, ax = plt.subplots(figsize=(9.0, 5.4))
-    axes = {n: (ax if k == 0 else ax.twinx()) for k, n in enumerate(show)}
-    rows, notes, skew = [], [], {}
-    for k, n in enumerate(show):
-        a, col = axes[n], ORDER_COLOR[n]
-        y = np.array([p[1][n][0] for p in pts])
-        ys = np.array([p[1][n][1] for p in pts])
+    axes = {mp: (ax if k == 0 else ax.twinx()) for k, mp in enumerate(moments)}
+    for k, mp in enumerate(moments):
+        n, comp = MOMENT[mp]
+        a, col = axes[mp], MOMENT_COLOR[mp]
+        y = np.array([p[1][n][comp] for p in pts])
         a.plot(x, y, "-o", color=col, ms=4.5, lw=1.6, zorder=3)
-        # Скошенная компонента — тот же мультиполь, повёрнутый на пол-периода: он связывает
-        # плоскости, а не фокусирует в них. У боковых обмоток корректора она больше нормальной.
-        skew[n] = 100 * float(np.mean(ys[len(ys) // 2:] / np.maximum(y[len(y) // 2:], 1e-30)))
-        if skew[n] >= SKEW_SHOW:
-            a.plot(x, ys, "--s", color=col, ms=3.5, lw=1.3, alpha=0.75, zorder=2)
-        a.set_ylabel(f"∫{KICK_KEY[n]}·dl, {INT_UNITS[KICK_KEY[n]]}"
-                     f"   (проба {PLOT_RADIUS[n] * 1e3:.0f} мм)", color=col, fontsize=9)
+        a.set_ylabel(f"{mp}, {MOMENT_UNITS[mp]}   (проба {PLOT_RADIUS[n] * 1e3:.0f} мм)",
+                     color=col, fontsize=9)
         a.tick_params(axis="y", labelcolor=col, labelsize=8)
         if k > 1:
             a.spines["right"].set_position(("outward", 58 * (k - 1)))
-        ymax = y.max()
-        for order, dev, v, cnt in sorted([q for q in levels if q[0] == n], key=lambda q: q[2]):
-            a.axhline(v, color=col, lw=1.0, alpha=0.8, zorder=1)
-            xi = first_crossing(x, y, v) if alone else None
-            if xi is not None:
-                a.plot([xi], [v], "D", color=col, ms=7.5, zorder=4, mec="white", mew=0.9)
-                a.plot([xi, xi], [0, v], color=col, lw=0.9, ls="--", alpha=0.6, zorder=1)
-            rows.append(dict(order=n, dev=dev, level=v, count=cnt, cur=xi))
-            notes.append((col, f"{ORDER_NAME[n]}  {v:.4g}"
-                               + (f"  →  {xi:.1f} А" if xi is not None
-                                  else ("  →  не достигается" if alone else "  — проектный уровень"))))
-            ymax = max(ymax, v)
-        a.set_ylim(0, max(ymax, ys.max() if skew[n] >= SKEW_SHOW else 0) * 1.15)
+        a.set_ylim(0, y.max() * 1.15)
 
-    for i, (col, txt) in enumerate(notes):
-        ax.annotate(txt, xy=(0.015, 0.97 - 0.052 * i), xycoords="axes fraction", fontsize=8.5,
-                    color=col, family="monospace", va="top",
-                    bbox=dict(fc="white", ec="none", alpha=0.8, pad=1.2))
-
-    sub = [f"L_eff = {L:.3f} м"
-           + ("" if abs(cb - 1) < 0.03 else f" (карта растянута ×{cb:.2f} по телу)")]
-    if any(v >= SKEW_SHOW for v in skew.values()):
-        sub.append("пунктир — скошенная компонента")
-    ax.set_xlabel(f"ток обмотки, А   ({turns} витков на катушку)")
-    ax.set_title(f"{NAMES[element]} ({element}), обмотка {winding}: "
-                 + ", ".join(ORDER_NAME[n] for n in show) + "\n" + ";  ".join(sub), fontsize=11)
+    cur = design.get(label)
+    if cur and abs(cur[0]) > 1e-9:
+        ax.axvline(abs(cur[0]), color="#444", lw=1.4, ls="--", zorder=2)
+        ax.annotate(f"проектный ток {abs(cur[0]):.1f} А"
+                    + (f"  ({cur[1]:.0f}% номинала)" if cur[1] is not None else ""),
+                    xy=(0.015, 0.965), xycoords="axes fraction", fontsize=9, va="top",
+                    color="#222", bbox=dict(fc="white", ec="#bbb", alpha=0.9, pad=2.5))
+    sub = [f"L_eff = {L:.3f} м" + ("" if abs(cb - 1) < 0.03 else
+                                   f" (карта растянута ×{cb:.2f} по телу)")]
+    ax.set_xlabel(f"ток обмотки, А   ({turns} витк./катушку)")
+    ax.set_title(f"{m['name']} — обмотка {label}: моменты " + ", ".join(moments) + " от тока\n"
+                 + ";  ".join(sub), fontsize=11)
     ax.grid(alpha=0.25)
     fig.tight_layout()
     os.makedirs(outdir, exist_ok=True)
-    png = os.path.join(outdir, f"{element}_{tag}_{winding}.png")
+    png = os.path.join(outdir, f"{m['name']}_{label}.png")
     fig.savefig(png, dpi=150)
     plt.close(fig)
-    return dict(w=winding, png=png, npts=len(pts), show=show, rows=rows, skew=skew, cb=cb)
+    return png
 
 
 # ───────────────────────────── документ ─────────────────────────────
 
-def _table(doc, headers):
-    t = doc.add_table(rows=1, cols=len(headers))
-    t.style = "Light Grid Accent 1"
-    for i, h in enumerate(headers):
-        t.rows[0].cells[i].text = h
-    return t
+def _intro(doc):
+    """Вводный методический раздел — в терминах и стиле `element_compare_report`."""
+    doc.add_heading("Вводная информация по расчетам", level=1)
+    doc.add_paragraph(
+        "Отчёт показывает, как киковые моменты элементов библиотеки зависят от токов их обмоток. "
+        "Моменты получены гармоническим разложением трёхмерных карт магнитного поля, снятых для "
+        "каждой обмотки: поле раскладывается на окружности вокруг оси пучка, а гармоника порядка n "
+        "интегрируется вдоль элемента. Отложен именно ИНТЕГРАЛ момента по длине — его и чувствует "
+        "пучок; сам коэффициент получается делением интеграла на эффективную длину, и это "
+        "соглашение, а не измерение.")
+    doc.add_paragraph(
+        "Разложение сверено с независимым способом — подбором моментов по траекториям, тем самым, "
+        "которым получены матрицы связи: дифференциальное ядро SynchrotronSim интегрирует силу "
+        "Лоренца по карте, а моменты кика подбираются так, чтобы киковая траектория её "
+        "воспроизвела. На самых сильных картах шести элементов оба способа сходятся в пределах "
+        "0.72%.")
+    doc.add_paragraph(
+        "Разделы отчёта соответствуют элементам библиотеки, то есть исполнениям: длинный квадруполь "
+        "стоит в решётке в трёх длинах, и каждой отведён свой раздел. Карты полей сняты с одной "
+        "длины семейства, поэтому кривые остальных исполнений получены штатным синтезом карт "
+        "(`gen_synthetic_maps`): тело магнита растягивается или сжимается, а краевое поле "
+        "сохраняется, потому что определяется поперечником, а не длиной. Коэффициент растяжения "
+        "тела указан в заголовке графика; синтез проверен на попадание в целевую L_eff — "
+        "расхождение 0.2–1.2%.")
+    doc.add_paragraph(
+        "Токи и коэффициенты. Все токи в отчёте — физические токи питания обмоток (амперы при "
+        "проектной энергии 6 ГэВ). «Проектные токи обмоток» (таблица в конце каждого раздела) — это "
+        "токи питания, при которых элемент даёт ПРОЕКТНЫЕ мультипольные коэффициенты, заданные в "
+        "файле решётки .lte; они получены обращением матрицы связи под проектные коэффициенты. "
+        "Рядом приведены «ампер-витки на катушку» — возбуждение магнита, равное току обмотки, "
+        "умноженному на число витков в катушке. Именно эта величина задаётся при расчёте поля и "
+        "определяет состояние железа, поэтому она приведена явно: ток обмотки сам по себе о "
+        "насыщении ничего не говорит. У многообмоточных элементов проектный ток — это КОМБИНАЦИЯ: "
+        "элемент выходит на проектные моменты всеми обмотками сразу, а не каждой по отдельности.")
+    doc.add_paragraph(
+        "На графиках показаны только моменты, РАЗРЕШИМЫЕ в снятых картах. Поле мультиполя растёт "
+        "как r^(n−1), а шум карты от радиуса не зависит, поэтому слабый высокий момент у оси тонет. "
+        "Настоящий момент, поделённый на r^(n−1), от радиуса пробы не зависит; по этому признаку "
+        f"моменты и отбираются (допуск {RESOLVED:.0f}% разброса). Неразрешимый момент не значит "
+        "нулевой — значит, что по этим картам его величину назвать нельзя.")
 
 
 def build(out=OUT, figs=PNG):
     from docx import Document
-    from docx.shared import Cm
+    from docx.shared import Inches
+    import design_currents as dc
+    import element_compare as ec
+
+    mats = dc.load_coupling()
+    dc.attach_devices(mats, ec.LCROW)
+    for m in mats:                       # `I_c1` → `c1`: в таблицах исходного отчёта обмотки без префикса
+        if m.get("labels"):
+            m["labels"] = [dc._norm_label(l) for l in m["labels"]]
+    ec._tcap.n = 0                                   # сквозная нумерация таблиц — с начала
 
     doc = Document()
-    doc.add_heading("Библиотека магнитных элементов СИЛА: связь токов и киков", 0)
+    doc.add_heading("SynchrotronSim — киковые моменты от тока обмоток: расчёт по элементам", level=0)
+    _intro(doc)
 
-    p = doc.add_paragraph()
-    p.add_run("Что здесь. ").bold = True
-    p.add_run(
-        "На каждую ОБМОТКУ каждого элемента приведён свой график, и на нём все кики, которые эта "
-        "обмотка создаёт: диполь, квадруполь, секступоль, октуполь. Обмотка редко создаёт одну "
-        "чистую гармонику — боковая обмотка корректора даёт и диполь, и квадруполь, а "
-        "диполь-квадруполь на то и combined-function. Горизонтальными линиями отмечены проектные "
-        "кики из решётки, ромбом и вертикальной чертой — ток, при котором каждый достигается.")
+    stale = dc.staleness()
+    if stale:
+        doc.add_paragraph("Внимание: " + stale)
 
-    p = doc.add_paragraph()
-    p.add_run("Почему кик, а не коэффициент. ").bold = True
-    p.add_run(
-        "Пучок чувствует ИНТЕГРАЛ поля вдоль элемента — им и определяется угол поворота. "
-        "Коэффициент получается делением интеграла на эффективную длину, и это соглашение, а не "
-        "измерение. Подгонка траекторий определяет произведение «коэффициент × длина» с точностью "
-        "меньше процента, а как разделить его на сомножители — не определяет: при смене сетки "
-        "подгоночная длина короткого квадруполя сместилась на 13% при неизменном произведении. "
-        "Поэтому по вертикали отложен интеграл — он измеряется, и длина в нём не участвует.")
+    for m in mats:
+        doc.add_heading(f"{m['name']}  ({m['kind']}, "
+                        + ("PM, фикс. поле" if m.get("pm") else f"обмоток: {len(m['labels'])}")
+                        + ")", level=1)
+        if m["kind"] == "dq":
+            doc.add_paragraph("Ядро кика: диполь + квадруполь + секступоль (моменты "
+                              + ", ".join(m["outputs"]) + ")." if "S" in m["outputs"] else
+                              "Ядро кика: диполь + квадруполь (моменты "
+                              + ", ".join(m["outputs"]) + ").")
+        ec._moment_legend(doc, m["outputs"])
 
-    p = doc.add_paragraph()
-    p.add_run("Единицы. ").bold = True
-    p.add_run(
-        f"Физические, при проектной энергии 6 ГэВ. Кик порядка n — это ∫b_n·dl, где поле "
-        f"раскладывается как By ∝ b_n·r^(n−1): диполь в Тл·м, квадруполь в Тл, секступоль в Тл/м, "
-        f"октуполь в Тл/м². Коэффициенты решётки хранятся в шкале трекера (суррогатная энергия "
-        f"γ≈7) и здесь переведены в физические умножением на {energy_factor():.1f}. Ток по "
-        f"горизонтали — ток ОДНОЙ катушки: ампер-витки карты, делённые на число витков катушки.")
-
-    doc.add_heading("Сводка по библиотеке", level=1)
-    reg = collections.Counter(r["element"] for r in sm.read_registry())
-    wt = winding_turns()
-    t = _table(doc, ("Элемент", "Обозначение", "Карт поля", "Обмоток", "Обмотки"))
-    for el in ELEMENTS:
-        c = t.add_row().cells
-        c[0].text, c[1].text = NAMES[el], el
-        c[2].text, c[3].text = str(reg.get(el, 0)), str(len(wt.get(el, {})))
-        c[4].text = ", ".join(sorted(wt.get(el, {})))
-
-    doc.add_heading("Сводная таблица проектных рабочих точек", level=1)
-    doc.add_paragraph(
-        "Ток — свойство МАГНИТА, а не обмотки, и назван один раз на исполнение. Он приведён там, "
-        "где проектную точку несёт одна обмотка; диполь-квадруполь выходит на неё комбинацией I1 "
-        "и I2, и без математической модели разложить его кик по обмоткам нельзя.")
-    t = _table(doc, ("Элемент", "Исполнение", "Кик", "Проектный кик", "Штук",
-                     "Обмотка", "Номинальный ток, А", "Проектный ток, А", "% номинала"))
-    for el in ELEMENTS:
-        for r in design_points(el):
+        if m.get("pm"):
+            ec._tcap(doc, m["name"])
+            t = doc.add_table(rows=1, cols=len(m["outputs"])); t.style = "Light Grid Accent 1"
+            for j, mp in enumerate(m["outputs"]):
+                t.rows[0].cells[j].text = f"{mp}, {MOMENT_UNITS[mp]}"
             c = t.add_row().cells
-            k = KICK_KEY[r["order"]]
-            cur = ("комбинацией " + " и ".join(r["by"]) if not r["alone"] else
-                   "не достигается" if r["cur"] is None else f"{r['cur']:.1f}")
-            pct = ("—" if not r["alone"] or r["cur"] is None or not r["nominal"]
-                   else f"{100 * r['cur'] / r['nominal']:.0f}%")
-            for i, v in enumerate((NAMES[el], f"{r['L']:.3f} м", f"∫{k}·dl, {INT_UNITS[k]}",
-                                   f"{r['level']:.5g}", str(r["count"]),
-                                   (" и ".join(r["by"]) if r["by"] and not r["alone"]
-                                    else r["winding"] or "—"),
-                                   f"{r['nominal']:.4g}" if r["nominal"] else "—", cur, pct)):
-                c[i].text = v
-    doc.add_paragraph(
-        "Проектный кик — интеграл гармоники вдоль элемента в физических единицах при 6 ГэВ; "
-        "проектный ток — ток одной катушки, при котором магнит его выдаёт. Корректоров в таблице "
-        "нет: они не оттюнены, проектной точки у них ещё не назначено.", style="List Bullet")
-
-    doc.add_heading("Сверка двух независимых способов", level=1)
-    doc.add_paragraph(
-        "Кики на графиках получены гармоническим разложением карт. Тот же кик можно получить "
-        "иначе — прогнать через карту пучок диффурным ядром и подобрать силу по траекториям. Ниже "
-        "сравнение обоих способов на самой сильной карте каждого элемента. Совпадение означает, "
-        "что систематики нет ни в разложении, ни в подгонке. Сравнивается НОРМАЛЬНАЯ компонента: "
-        "гармоника комплексна, и её модуль смешал бы нормальную часть со скошенной — у боковых "
-        "обмоток корректора это давало ложные 59% расхождения.")
-    t = _table(doc, ("Элемент", "Карта, А·в", "Кик", "Из гармоник", "Из траекторий",
-                     "Расхождение"))
-    for el in ELEMENTS:
-        cc = crosscheck(el, KEY[el])
-        if not cc:
+            for j, mp in enumerate(m["outputs"]):
+                c[j].text = f"{m['fixed'][mp]:+.4e}"
+            doc.add_paragraph()
+            doc.add_paragraph("Постоянный магнит — обмоток и токов нет, карт поля по обмоткам не "
+                              "снимают; состав поля приведён в таблице выше.")
             continue
-        c = t.add_row().cells
-        for i, v in enumerate((NAMES[el], f"{cc['ni']:.0f}",
-                               f"∫{cc['key']}·dl, {INT_UNITS[cc['key']]}",
-                               f"{cc['harm']:.6g}", f"{cc['traj']:.6g}", f"{cc['diff']:+.2f}%")):
-            c[i].text = v
-    for el in ELEMENTS:
-        doc.add_page_break()
-        doc.add_heading(f"{NAMES[el]} ({el})", level=1)
 
-        note = design_note(el)
-        p = doc.add_paragraph()
-        p.add_run("По проекту создаёт: ").bold = True
-        p.add_run(note + "." if note else
-                  "проектных киков в решётке нет — корректоры не оттюнены, рабочая точка им ещё "
-                  "не назначена. Приведена сама зависимость кика от тока, по которой ток и будет "
-                  "определяться, когда рабочая точка появится.")
-
-        dv = devices(el)
-        if dv:
-            t = _table(doc, ("Исполнение", "Витков на катушку", "Катушек", "Всего витков",
-                             "Номинальный ток, А", "Проектная L_eff, м"))
-            for d in dv:
-                c = t.add_row().cells
-                for i, v in enumerate((d["dev"], d["turns"], d["coils"], d["total"],
-                                       d["inom"], d["leff"])):
-                    c[i].text = str(v)
-
-        Lmap = map_length(el, KEY[el])
-        vs = variants(el)
-        if Lmap:
-            q = doc.add_paragraph()
-            q.add_run("Карты сняты с магнита длиной ").bold = True
-            q.add_run(f"{Lmap:.3f} м (по форме поля: интеграл продольного профиля, делённый на "
-                      f"максимум). ")
-            if len(vs) > 1:
-                q.add_run(
-                    "В решётке этот магнит стоит в нескольких длинах. Кривые для остальных "
-                    "исполнений получены штатным синтезом карт: тело магнита растягивается или "
-                    "сжимается, а краевое поле сохраняется — оно определяется поперечником и от "
-                    "длины не зависит. Коэффициент растяжения тела указан в заголовке графика.")
-            fam = sorted({round(float(d["leff"]), 4) for d in dv if d["leff"]})
-            if fam and all(abs(f - Lmap) / Lmap > 0.10 for f in fam):
-                doc.add_paragraph(
-                    f"Расхождение с паспортом: в базе у этого элемента L_eff = "
-                    + ", ".join(f"{f:.3f}" for f in fam)
-                    + f" м, а поле карты даёт {Lmap:.3f} м. Числа ниже опираются на поле.",
-                    style="List Bullet")
-
-        turns = winding_turns().get(el, {})
-        dps = design_points(el)
-        for L, levels in vs:
-            pts_by_w = variant_kicks(el, L)
-            if not pts_by_w:
-                continue
-            devs = sorted({d for _, d, _, _ in levels})
-            head = f"Исполнение L_eff = {L:.3f} м"
-            if devs:
-                head += "  (" + ", ".join(d.replace(el + "_", "") for d in devs) + ")"
-            doc.add_heading(head, level=2)
-            by = DESIGN_BY.get(el, tuple(pts_by_w))
-            alone = len(by) == 1
-            if levels:
-                t = _table(doc, ("Кик", "Проектное значение", "Штук в кольце",
-                                 "Ток обмотки, А"))
-                for r in [q for q in dps if abs(q["L"] - L) < 1e-9]:
-                    c = t.add_row().cells
-                    c[0].text = f"∫{KICK_KEY[r['order']]}·dl, {INT_UNITS[KICK_KEY[r['order']]]}"
-                    c[1].text = f"{r['level']:.5g}"
-                    c[2].text = str(r["count"])
-                    c[3].text = ("комбинацией " + " и ".join(by) if not alone else
-                                 "не достигается" if r["cur"] is None else
-                                 f"{r['cur']:.1f}" + (f"  ({100 * r['cur'] / r['nominal']:.0f}% "
-                                                      f"ном.)" if r["nominal"] else ""))
-                p = doc.add_paragraph()
-                if alone:
-                    p.add_run(f"Проектную точку несёт обмотка {by[0]}").bold = True
-                    p.add_run("; остальные обмотки по проекту обесточены. Ток указан один раз на "
-                              "магнит, по этой обмотке.")
-                else:
-                    p.add_run("Проектную точку магнит набирает КОМБИНАЦИЕЙ обмоток "
-                              + " и ".join(by)).bold = True
-                    p.add_run(
-                        f"; обмотка {', '.join(w for w in sorted(pts_by_w) if w not in by)} по "
-                        f"проекту обесточена. Разложить проектный кик по обмоткам без модели "
-                        f"нельзя, поэтому ток здесь не назван: пересечение кривой ОДНОЙ обмотки "
-                        f"означало бы, что остальные обесточены, чего в проекте нет. Графики ниже "
-                        f"показывают, что каждая обмотка создаёт сама по себе.")
-
-            for w in sorted(pts_by_w, key=lambda z: (z != "main", z)):
-                r = plot_winding(el, w, pts_by_w[w], turns.get(w), L,
-                                 levels if w in by else [], figs,
-                                 f"L{round(L * 1000)}", alone=alone)
-                if not r:
+        el = element_of(m["name"])
+        cur_by_w, design = design_currents(m, ec)
+        by_curve = {}
+        if el:
+            lead = lead_order(m)
+            L = float(m["L"]) if m["L"] else map_length(el, lead)
+            pts_by_w = variant_kicks(el, L, lead)
+            by_curve = curve_current(m, el, L, lead, design, pts_by_w, ec)
+            native = element_spectra(el)
+            for j, lb in enumerate(m["labels"]):
+                w = lb
+                pts = pts_by_w.get(w) or pts_by_w.get("I1" if w == "I" else "I")
+                nat = native.get(w) or native.get("I1" if w == "I" else "I")
+                if not pts or not nat:
                     continue
-                doc.add_heading(f"Обмотка {w}", level=3)
-                doc.add_picture(r["png"], width=Cm(16.5))
+                allow = KIND_MOMENTS.get(m["kind"], tuple(MOMENT))
+                shown = [mp for mp in MOMENT
+                         if mp in allow and resolution(nat, MOMENT[mp][0]) <= RESOLVED
+                         and (MOMENT[mp][1] == 0 or mp in m["outputs"])]
+                if not shown:
+                    continue
+                png = plot_winding(m, lb, pts, ec.dev_tpc(m["devs"][j]), L, shown,
+                                   cur_by_w, figs)
+                doc.add_picture(png, width=Inches(6.3))
+            Lm = map_length(el, lead)
+            if Lm and abs(Lm - L) / L > 0.10:
                 doc.add_paragraph(
-                    f"Карт: {r['npts']}. Создаёт: "
-                    + ", ".join(ORDER_NAME[n] for n in r["show"]) + ".")
-                sk = [n for n in r["show"] if r["skew"][n] >= SKEW_SHOW]
-                if sk:
-                    doc.add_paragraph(
-                        "Скошенная компонента (тот же мультиполь, повёрнутый на пол-периода — он "
-                        "связывает плоскости, а не фокусирует в них): "
-                        + ", ".join(
-                            f"{ORDER_NAME[n]} — "
-                            + (f"в {r['skew'][n] / 100:.1f} раза БОЛЬШЕ нормальной"
-                               if r["skew"][n] > 100 else f"{r['skew'][n]:.0f}% от нормальной")
-                            for n in sk)
-                        + ". На графике пунктиром.")
-                if w not in by and levels:
-                    doc.add_paragraph("По проекту эта обмотка обесточена; проектных уровней на "
-                                      "графике нет.", style="List Bullet")
+                    f"Замечание по длине: L_eff элемента в базе {L:.3f} м, а продольный профиль "
+                    f"снятой карты даёт {Lm:.3f} м (интеграл профиля, делённый на максимум). Кривые "
+                    f"выше приведены к базовой L_eff синтезом, но само расхождение стоит проверить.")
+            doc.add_paragraph()
 
-    doc.add_page_break()
-    doc.add_heading("Оговорки", level=1)
-    for s in (
-        "Длина магнита взята не из подгонки, а из ФОРМЫ поля: интеграл продольного профиля, "
-        "делённый на его максимум. Так измеренная длина сходится с проектной: длинный квадруполь "
-        "0.374 против проектных 0.3745, диполь-квадруполь 0.403 против 0.400. Подгоночная "
-        "эффективная длина из датасетов не использована: она определена плохо, у октуполя "
-        "оказалась на 39% ниже настоящей.",
-        "Карты сняты с ОДНОЙ длины каждого семейства, а в решётке магнит стоит в нескольких. "
-        "Кривые остальных исполнений получены штатным синтезом карт (`gen_synthetic_maps`): тело "
-        "растягивается, краевое поле сохраняется, потому что определяется поперечником, а не "
-        "длиной. Синтез проверен на попадание в целевую длину — расхождение 0.2–1.2%.",
-        "На графиках показаны только кики, разрешимые в снятых картах. Поле мультиполя растёт как "
-        "r^(n−1), а шум карты от радиуса не зависит, поэтому слабая высокая гармоника у оси "
-        "тонет. Неразрешимый кик не значит нулевой — значит, что по этим картам его величину "
-        "назвать нельзя.",
-        "Карты с несколькими одновременно запитанными обмотками в графики не входят: по ним "
-        "нельзя сказать, какая обмотка какой кик создала. У корректора таких карт больше половины "
-        "набора, и они используются отдельно — для проверки модели на комбинациях.",
-        "Проектный ток — свойство МАГНИТА, а не обмотки, и назван один раз на исполнение. "
-        "Многообмоточный элемент не обязан обеспечивать проектный кик каждой обмоткой по "
-        "отдельности: секступоль выходит на проектную точку обмоткой I1 при I2 = 0, а "
-        "диполь-квадруполь — комбинацией I1 и I2 при I3 = 0. Разложить его проектный кик по "
-        "обмоткам без математической модели нельзя, поэтому ток для него не назван.",
-        "Кривые построены по снятым картам без сглаживания и интерполяции; точки — то, что "
-        "посчитано.",
-    ):
-        doc.add_paragraph(s, style="List Bullet")
+        ec._working_point_table(doc, m)
 
+        if cur_by_w:
+            over = [f"{lb} — {abs(v[0]):.1f} А ({v[1]:.0f}% номинала)"
+                    for lb, v in cur_by_w.items() if v[1] and v[1] > 100]
+            p = doc.add_paragraph()
+            p.add_run("Проектные токи. ").bold = True
+            p.add_run("Ток — свойство элемента, а не отдельной обмотки: приведённые значения "
+                      "получены обращением матрицы связи под проектные коэффициенты решётки, то "
+                      "есть это набор токов, который магнит держит одновременно. "
+                      + (("За номинал выходят: " + "; ".join(over) + ".") if over else
+                         "Все обмотки укладываются в номинальный ток."))
+            if by_curve:
+                lb = m["labels"][0]
+                Im = abs(cur_by_w.get(lb, (0.0, None))[0])
+                parts = []
+                for mp, xi in by_curve.items():
+                    if xi is None:
+                        parts.append(f"{mp} — проектное значение кривой не достигается")
+                    elif Im > 0:
+                        parts.append(f"{mp} — {xi:.1f} А ({100 * (xi / Im - 1):+.0f}% к матричному)")
+                q = doc.add_paragraph()
+                q.add_run("Матрица и кривая. ").bold = True
+                q.add_run(
+                    "Матрица связи линейна: она снята свипом в рабочей области и продолжена "
+                    "прямой. Кривая, снятая по картам, содержит насыщение железа, поэтому ток, при "
+                    "котором элемент реально выходит на проектный момент, может отличаться: "
+                    + "; ".join(parts) + ". Расхождение — прямая мера того, насколько проектная "
+                    "точка ушла на изгиб кривой намагничивания.")
+        else:
+            p = doc.add_paragraph()
+            p.add_run("Проектные токи. ").bold = True
+            p.add_run("Проектных коэффициентов у этого элемента в решётке нет — он не оттюнен, и "
+                      "рабочая точка ему ещё не назначена. Графики выше показывают саму "
+                      "зависимость моментов от тока, по которой ток и будет определяться, когда "
+                      "рабочая точка появится.")
+
+    ec._apply_body_formatting(doc)
     os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
-    doc.save(out)
+    try:
+        doc.save(out)
+    except PermissionError:
+        out = os.path.splitext(out)[0] + "_new.docx"
+        doc.save(out)
+        print(f"  (отчёт заблокирован Word — записан {os.path.basename(out)})")
     return out
 
 
