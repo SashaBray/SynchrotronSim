@@ -390,55 +390,192 @@ def plot_fits(elements, Hof, nseg=2, out=os.path.join("workspace", "results",
 # ярмо 2–3 со своим сечением, рабочий зазор 4–1. Параллельно каждой катушечной ветви — воздушная
 # утечка. Поток через зазор и есть кик (связь вырождается в коэффициент, он поглощён единицами).
 
-def graph_mmf(par, y, Hof, ni_max=None):
-    """Ампер-витки одной катушки по кику для графа 4 узлов — ЗАМКНУТОЙ ФОРМУЛОЙ, без итераций.
+# ───────────────────── граф магнита: контур с двумя катушками ─────────────────────
+#
+#              ┌──── утечка ────┐
+#   (1)───[уч.]┴(2)──[ I1 ]─────┴(3)
+#    │                            │
+#  зазор                        ярмо
+#    │                            │
+#   (6)───[уч.]┬(5)──[ I1 ]─────┬(4)
+#              └──── утечка ────┘
+#
+# Замкнутый контур 1→2→3→4→5→6→1. Две ОДИНАКОВЫЕ катушки одной обмотки на ветвях 2–3 и 4–5,
+# параллельно каждой — воздушная утечка. Ветви 1–2 и 5–6 — участки между полюсами и ярмом, 3–4 —
+# ярмо, 6–1 — рабочий зазор. Поток зазора и есть кик.
+#
+# Ключ к замкнутой форме: все ветви, кроме полюсов, несут ОДИН И ТОТ ЖЕ поток — поток зазора.
+# Полюса несут свой, потому что часть потока уходит в утечку рядом с катушкой. Поэтому сколько бы
+# последовательных участков ни добавляли (наконечник, ярмо, торцевая плита), они лишь пополняют
+# сумму Q, и структура решения не меняется.
 
-    Контур 1→2→3→4→1 даёт закон Ампера  2F = 2D + ℓя·H(y/Sя) + Rз·y,  где D — падение на полюсе.
-    Отсюда D − F = −Q/2 при Q = ℓя·H(y/Sя) + Rз·y, а утечка стоит параллельно катушечной ветви и
-    видит ту же разность потенциалов:  Φу = P·(D − F) = −P·Q/2. Узел 1 даёт поток полюса
-    p = y − Φу = y + P·Q/2, и остаётся
 
-        Q(y) = ℓя·H(y/Sя) + Rз·y
-        p(y) = y + (P/2)·Q(y)
-        F(y) = ℓп·H(p/Sп) + Q(y)/2
+def graph_mmf(par, y, Hof, nseries=2):
+    """Ампер-витки одной катушки по кику — ЗАМКНУТОЙ ФОРМУЛОЙ, без итераций.
 
-    Всё явно по кику, решать нечего. Это важно не для скорости: параметрическая сетка с
-    интерполяцией давала дрожание невязки на уровне 1e-3, и градиентная подгонка по конечным
-    разностям срывалась — граф выходил ХУЖЕ сосредоточенной модели, хотя обязан быть не хуже.
+        Q(y) = Σₖ mₖ·ℓₖ·H(y/Sₖ) + Rз·y        падения на последовательных ветвях и зазоре
+        p(y) = y + (P/2)·Q(y)                  поток полюса: полезный плюс утечка
+        F(y) = ℓп·H(p/Sп) + Q(y)/2             ампер-витки катушки
 
-    Плато берётся отсюда же: полюс несёт p = y + (P/2)·Q, то есть с ростом МДС нагружается сверх
-    полезного потока. Насытившись, он забирает всю добавку, и кик встаёт."""
-    lp, Sp, ly, Sy, Rg, P = np.exp(np.asarray(par, float))
+    Вывод: закон Ампера по контуру даёт 2F = 2·ℓп·H(p/Sп) + Q, откуда падение на полюсе равно
+    F − Q/2. Утечка стоит параллельно катушечной ветви и видит ту же разность потенциалов, значит
+    её поток равен P·(D − F) = −P·Q/2, а узел на входе в полюс даёт p = y + P·Q/2.
+
+    Множитель mₖ — сколько РАВНЫХ ветвей этого класса в контуре: участки полюс–ярмо входят дважды
+    (сверху и снизу), ярмо один раз. Считать их порознь незачем — по симметрии они одинаковы, а
+    лишние свободные числа только размывают подгонку.
+
+    Отсюда же плато: полюс несёт p = y + (P/2)·Q, то есть с ростом МДС нагружается сверх полезного
+    потока и, насытившись, забирает всю добавку — кик встаёт. Последовательная цепь так не умеет.
+
+    `par` в логарифмах: [ℓп, Sп, Rз, P, (ℓ₁, S₁), (ℓ₂, S₂), …]."""
+    v = np.exp(np.asarray(par, float))
+    lp, Sp, Rg, P = v[0], v[1], v[2], v[3]
     y = np.asarray(y, float)
-    Q = ly * Hof(y / Sy) + Rg * y
+    Q = Rg * y
+    for k in range(nseries):
+        mult = SERIES_MULT[k] if k < len(SERIES_MULT) else 1.0
+        Q = Q + mult * v[4 + 2 * k] * Hof(y / v[5 + 2 * k])
     p = y + 0.5 * P * Q
     return lp * Hof(p / Sp) + 0.5 * Q
 
 
-def fit_graph(ni, y, Hof, seeds=60, rng0=0):
+# Сколько равных ветвей каждого последовательного класса в контуре: сперва ярмо (одно), затем
+# участки полюс–ярмо (их два — сверху и снизу).
+SERIES_MULT = (1.0, 2.0, 1.0, 1.0)
+
+
+# Индукция в железе физически лежит в этих пределах — отсюда и коробка на сечения: S ≈ y_max/B.
+B_RANGE = (0.4, 3.0)
+
+
+def _lengths(y, ni, Hof, S, P, nseries, passes=6):
+    """Длины ветвей и сопротивление зазора при ЗАДАННЫХ сечениях и утечке — линейным МНК.
+
+    При фиксированных сечениях ампер-витки линейны по длинам и по сопротивлению зазора:
+
+        F = ℓп·H(p/Sп) + Rз·(y/2) + Σ mₖ·ℓₖ·H(y/Sₖ)/2
+
+    поэтому искать их перебором незачем — они решаются точно. Нелинейным остаётся только поток
+    полюса p, который сам зависит от найденных длин через утечку; он берётся простой итерацией
+    (обычно хватает трёх проходов, начиная с p = y).
+
+    Неотрицательность обязательна: отрицательная длина или сечение — не «немного хуже», а другая
+    физика, и подгонка с ними уходит в бессмысленные минимумы."""
+    from scipy.optimize import nnls
+    y = np.asarray(y, float)
+    p = y.copy()
+    Sp, Sk = S[0], S[1:]
+    coef = None
+    for _ in range(passes):
+        cols = [Hof(p / Sp), 0.5 * y]
+        for k in range(nseries):
+            mult = SERIES_MULT[k] if k < len(SERIES_MULT) else 1.0
+            cols.append(0.5 * mult * Hof(y / Sk[k]))
+        A = np.column_stack(cols) / ni[:, None]          # веса: метрика — ОТНОСИТЕЛЬНАЯ ошибка тока
+        coef, _ = nnls(A, np.ones_like(ni))
+        Q = coef[1] * y + sum(coef[2 + k] * (SERIES_MULT[k] if k < len(SERIES_MULT) else 1.0)
+                              * Hof(y / Sk[k]) for k in range(nseries))
+        p_new = y + 0.5 * P * Q
+        if np.allclose(p_new, p, rtol=1e-10, atol=0):
+            p = p_new
+            break
+        p = p_new
+    return coef
+
+
+def _pack_from(S, P, coef, nseries):
+    """Сечения + утечка + найденные длины → вектор параметров `graph_mmf`."""
+    par = [np.log(max(coef[0], 1e-300)), np.log(S[0]), np.log(max(coef[1], 1e-300)),
+           np.log(max(P, 1e-300))]
+    for k in range(nseries):
+        par += [np.log(max(coef[2 + k], 1e-300)), np.log(S[1 + k])]
+    return np.array(par)
+
+
+def fit_graph_sep(ni, y, Hof, nseries=2, seeds=8, nkappa=17, rng0=0):
+    """Подгонка графа РАЗДЕЛЁННЫМ методом: (параметры, СКО %).
+
+    Длины и сопротивление зазора решаются линейным МНК внутри, наружу выходит поиск только по
+    СЕЧЕНИЯМ — с 8 свободных чисел до 2–3. Сечения ищутся в физической коробке (индукция железа
+    0.4…3 Тл), а не в бесконечном логарифме, поэтому случайные старты сразу попадают в осмысленную
+    область.
+
+    Утечка не подгоняется вместе с ними, а СКАНИРУЕТСЯ по сетке с полной переподгонкой остального
+    на каждом значении. Причина: она входит в задачу иначе, чем сечения — через поток полюса, — и
+    при совместном поиске оптимизатор устойчиво сваливал её в ноль, вырождая граф в последовательную
+    цепь (те самые 18.5%).
+
+    Наружу отдаётся ВЕКТОР невязок, а не их среднеквадратичное: по скаляру least_squares работает
+    вслепую, теряя всю структуру задачи."""
+    ymax, nimax = float(np.max(y)), float(np.max(ni))
+    lo, hi = np.log(ymax / B_RANGE[1]), np.log(ymax / B_RANGE[0])
+    kaps = [0.0] + list(np.geomspace(ymax / nimax * 1e-3, ymax / nimax * 30, nkappa - 1))
+
+    def solve(q, P):
+        S = np.exp(q)
+        coef = _lengths(y, ni, Hof, S, P, nseries)
+        par = _pack_from(S, P, coef, nseries)
+        return par, (graph_mmf(par, y, Hof, nseries) - ni) / ni
+
+    best = None
+    for P in kaps:
+        for k in range(seeds):
+            g = np.random.default_rng(rng0 + k)
+            q0 = list(g.uniform(lo, hi, 1 + nseries))
+            try:
+                t = least_squares(lambda q: solve(q, P)[1], q0, xtol=1e-12, ftol=1e-12,
+                                  diff_step=1e-5, max_nfev=2000,
+                                  bounds=([lo] * (1 + nseries), [hi] * (1 + nseries)))
+            except Exception:
+                continue
+            par, r = solve(t.x, P)
+            rms = float(np.sqrt(np.mean(r ** 2)) * 100)
+            if np.isfinite(rms) and (best is None or rms < best[0]):
+                best = (rms, par)
+    return best[1], best[0]
+
+
+def fit_graph(ni, y, Hof, nseries=2, seeds=60, rng0=0):
     """Подгонка графа по ошибке тока: (параметры, СКО %).
 
-    Шесть чисел: длина и сечение полюса, длина и сечение ярма, сопротивление зазора, проводимость
-    утечки. Все положительны — подгоняются в логарифмах."""
-    def res(q):
-        return (graph_mmf(q, y, Hof) - ni) / ni
+    Подгонка ВЛОЖЕННАЯ по числу последовательных участков: решение для N стартует с решения для
+    N−1 плюс слабый новый участок. Без этого модель с бóльшим числом ветвей выходила бы хуже
+    модели с меньшим, хотя содержит её как частный случай."""
+    def res_n(q, n):
+        return (graph_mmf(q, y, Hof, n) - ni) / ni
 
-    best, ymax, nimean = None, float(np.max(y)), float(np.mean(ni))
-    for k in range(seeds):
-        g = np.random.default_rng(rng0 + k)
-        q0 = [np.log(0.05 * nimean * g.lognormal(0, 1.5)),
-              np.log(ymax / 1.5 * g.lognormal(0, 1.0)),
-              np.log(0.05 * nimean * g.lognormal(0, 1.5)),
-              np.log(ymax / 1.5 * g.lognormal(0, 1.0)),
-              np.log(float(np.mean(ni / y)) * g.lognormal(0, 0.5)),
-              np.log(ymax / float(np.max(ni)) * g.lognormal(0, 2.0))]
-        try:
-            t = least_squares(res, q0, xtol=1e-14, ftol=1e-14, max_nfev=20000)
-        except Exception:
-            continue
-        if np.all(np.isfinite(t.fun)) and (best is None or t.cost < best.cost):
-            best = t
-    return best.x, float(np.sqrt(np.mean(res(best.x) ** 2)) * 100)
+    ymax, nimean = float(np.max(y)), float(np.mean(ni))
+    best = None
+    for n in range(1, nseries + 1):
+        starts = []
+        if best is not None:
+            starts.append(list(best[1]) + [best[1][4] - 3.0, best[1][5]])
+            starts.append(list(best[1]) + [best[1][4] - 1.0, best[1][5] + 1.0])
+        for k in range(seeds if best is None else max(seeds // 3, 8)):
+            g = np.random.default_rng(rng0 + 1000 * n + k)
+            q0 = [np.log(0.05 * nimean * g.lognormal(0, 1.5)),
+                  np.log(ymax / 1.5 * g.lognormal(0, 1.0)),
+                  np.log(float(np.mean(ni / y)) * g.lognormal(0, 0.5)),
+                  np.log(ymax / float(np.max(ni)) * g.lognormal(0, 2.0))]
+            for _ in range(n):
+                q0 += [np.log(0.05 * nimean * g.lognormal(0, 1.5)),
+                       np.log(ymax / 1.5 * g.lognormal(0, 1.0))]
+            starts.append(q0)
+        cur = None
+        for q0 in starts:
+            try:
+                t = least_squares(lambda q: res_n(q, n), q0, xtol=1e-14, ftol=1e-14,
+                                  max_nfev=20000)
+            except Exception:
+                continue
+            if np.all(np.isfinite(t.fun)) and (cur is None or t.cost < cur.cost):
+                cur = t
+        if cur is not None:
+            rms = float(np.sqrt(np.mean(cur.fun ** 2)) * 100)
+            if best is None or rms <= best[0] + 1e-9:
+                best = (rms, cur.x, n)
+    return best[1], best[0]
 
 
 def plot_transfer(nseg=2, base="steel_1008_bh.csv", alt="lowsat_custom_bh.csv",
