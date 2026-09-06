@@ -3,7 +3,8 @@
 
 Исходный отчёт НЕ пересобирается: он открывается как есть, и в конец каждой главы элемента
 добавляются кривые намагниченности обмоток (киковые моменты в зависимости от тока питания, по
-трёхмерным картам поля) и оценка проектных токов С УЧЁТОМ НАСЫЩЕНИЯ. Всё остальное — вводный
+трёхмерным картам поля) и таблица проектных токов С УЧЁТОМ НАСЫЩЕНИЯ, а в самый конец — раздел с
+кривой намагничивания материала сердечника. Всё остальное — вводный
 раздел, матрицы связи, таблицы свипа, траектории, проектные токи, сводная таблица диапазонов —
 остаётся нетронутым.
 
@@ -51,6 +52,7 @@ RESOLVED = 25.0        # % разброса по радиусу пробы, вы
 SPEC_CACHE = os.path.join("workspace", "results", "library_report_spectra_ri.json")
 VAR_CACHE = os.path.join("workspace", "results", "library_report_variants.json")
 MAPLEN_CACHE = os.path.join("workspace", "results", "library_report_maplen.json")
+MATERIAL = os.path.join("workspace", "materials", "steel_1008_bh.csv")
 
 
 # ───────────────────────────── моменты из карт ─────────────────────────────
@@ -420,6 +422,61 @@ def plot_winding(m, label, pts, turns, L, moments, design, cur, ef, outdir):
     return png
 
 
+def plot_material(path, outdir):
+    """Кривая намагничивания материала B(H): линейный и логарифмический масштаб по H.
+
+    Логарифм нужен, потому что таблица покрывает четыре порядка по напряжённости: в линейном
+    масштабе весь начальный участок, где сталь и работает, сжимается в отрезок у нуля."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    d = pd.read_csv(path, sep=";")
+    H, B = d.iloc[:, 0].to_numpy(float), d.iloc[:, 1].to_numpy(float)
+    fig, ax = plt.subplots(1, 2, figsize=(9.6, 4.2))
+    for a, log in zip(ax, (False, True)):
+        a.plot(H, B, "-o", color="#1f4e79", ms=4, lw=1.6)
+        if log:
+            a.set_xscale("log")
+            a.set_xlim(max(H[H > 0].min() * 0.6, 1e-1), H.max() * 1.4)
+        else:
+            a.ticklabel_format(axis="x", style="sci", scilimits=(0, 0))
+        a.set_xlabel("H, А/м")
+        a.set_ylabel("B, Тл")
+        a.grid(alpha=0.25, which="both")
+        a.set_title("логарифмический масштаб по H" if log else "линейный масштаб",
+                    fontsize=10)
+    fig.suptitle(f"Кривая намагничивания материала: {os.path.basename(path)}", fontsize=11)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    os.makedirs(outdir, exist_ok=True)
+    png = os.path.join(outdir, "material_bh.png")
+    fig.savefig(png, dpi=150)
+    plt.close(fig)
+    return png, H, B
+
+
+def material_section(doc, figs, path=MATERIAL):
+    """Заключительный раздел: кривая намагничивания материала и таблица её точек."""
+    from docx.shared import Inches
+    if not os.path.exists(path):
+        return False
+    doc.add_heading("Кривая намагничивания материала", level=1)
+    png, H, B = plot_material(path, figs)
+    doc.add_picture(png, width=Inches(6.3))
+    p = doc.add_paragraph()
+    p.add_run(f"Материал сердечника: {os.path.basename(path)}; точек в таблице: {len(H)}; "
+              f"насыщение при B = {B.max():.4f} Тл.")
+    t = doc.add_table(rows=1, cols=3)
+    t.style = "Light Grid Accent 1"
+    for k, h in enumerate(("№", "H, А/м", "B, Тл")):
+        t.rows[0].cells[k].text = h
+    for i, (h_, b_) in enumerate(zip(H, B), 1):
+        c = t.add_row().cells
+        c[0].text, c[1].text, c[2].text = str(i), f"{h_:.1f}", f"{b_:.4f}"
+    doc.add_paragraph()
+    return True
+
+
 # ───────────────────────── дополнение отчёта ─────────────────────────
 
 def build(out=OUT, src=SRC, figs=PNG):
@@ -504,6 +561,8 @@ def build(out=OUT, src=SRC, figs=PNG):
             anchor.addprevious(node)
         added += 1
 
+    if material_section(doc, figs):                 # заключительный раздел — в САМЫЙ конец
+        added += 1
     os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
     try:
         doc.save(out)
