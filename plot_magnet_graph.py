@@ -24,13 +24,20 @@ KIND_STYLE = {"iron": dict(color="#1f4e79", lw=2.6, ls="-"),
 
 
 def load(element, branches=BRANCHES, members=MEMBERS):
-    """Ветви элемента и катушки на них: (список ветвей, {ребро: [(обмотка, витки)]})."""
+    """Ветви элемента и катушки на них: (список ветвей, {ребро: [(обмотка, витки, знак)]}).
+
+    Знак МДС катушки (`mmf_share`) выводится на рисунок: у соседних полюсов квадруполя полярность
+    противоположна, значит и намотка встречная, и перепутать её ничего не стоит."""
     rows = [r for r in csv.DictReader(open(branches, encoding="utf-8-sig"), delimiter=";")
             if r["element"] == element]
     coils = collections.defaultdict(list)
     for r in csv.DictReader(open(members, encoding="utf-8-sig"), delimiter=";"):
         if r["element"] == element and r.get("branch"):
-            coils[r["branch"]].append((r["winding"], r.get("turns_per_coil") or "?"))
+            try:
+                sign = float(r.get("mmf_share") or 1)
+            except ValueError:
+                sign = 1.0
+            coils[r["branch"]].append((r["winding"], r.get("turns_per_coil") or "?", sign))
     return rows, coils
 
 
@@ -75,7 +82,8 @@ def draw(element, out=None, annotate=True, branches=None, members=None):
         if annotate:
             lab = r["branch"]
             if r["branch"] in coils:
-                lab += "\n" + ", ".join(f"{w}({t})" for w, t in coils[r["branch"]])
+                lab += "\n" + ", ".join(f"{'−' if sg < 0 else '+'}{w}({t})"
+                                        for w, t, sg in coils[r["branch"]])
             if (r.get("S_m2") or "").strip():
                 lab += f"\nS={float(r['S_m2']) * 1e4:.0f} см²"
             ax.annotate(lab, xy=(mx, my), fontsize=7.5, ha="center", va="center", zorder=4,
