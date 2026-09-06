@@ -17,6 +17,15 @@ corrector;2;gap_straight_o|2;4.042915184;-7.070404287;
 corrector;2;tip_row_adj|01;2.726534844;-4.528604084;
 corrector;2;tip_row_adj|02;3.099101797;-5.361214389;
 corrector;2;tip_row_far|12;0.8654034015;-1.486781631;
+corrector;3;gap_diag_far|12;0.5946960722;-1.044628245;c1=1|c2=1|c3=-1|c4=-1|main=1
+corrector;3;gap_diag_near|01;-0.2851704207;0.7159615082;
+corrector;3;gap_diag_near|02;-0.2173493396;0.4991778481;
+corrector;3;gap_straight_c|0;-3.140499547;5.933514096;
+corrector;3;gap_straight_o|1;1.575029165;-2.461436204;
+corrector;3;gap_straight_o|2;1.756612977;-3.055274223;
+corrector;3;tip_row_adj|01;0.3140517197;-0.5807519258;
+corrector;3;tip_row_adj|02;0.3401568002;-0.6455330239;
+corrector;3;tip_row_far|12;0.2010707668;-0.3680528219;
 DQ;1;gap_adjacent;129.9382701;-171.8984423;I1=1|I2=1|I3=1
 DQ;1;gap_opposite;-16.06532593;30.20006947;
 DQ;1;gap_poleleak;544.9080714;-781.5642566;
