@@ -361,8 +361,20 @@ def saturation_currents(m, ec, pts_by_w, L):
 
 # ───────────────────────── кривые намагниченности ─────────────────────────
 
-def plot_winding(m, label, pts, turns, L, moments, outdir):
-    """Кривая намагниченности обмотки: киковые моменты в зависимости от тока питания."""
+def to_coef(value, moment, L, ef):
+    """Интеграл момента по длине (физические единицы) → физкоэффициент в шкале отчёта (mat_*).
+
+    Обратное преобразование к тому, которым проектный mat_* переводится в измеримую величину:
+    делим на длину, на энергетический множитель и умножаем на (n−1)! — таково соглашение столбцов
+    mat_*. После него ось графика и столбец таблицы — одно и то же число."""
+    return value * math.factorial(MOMENT[moment][0] - 1) / (L * ef)
+
+
+def plot_winding(m, label, pts, turns, L, moments, design, cur, ef, outdir):
+    """Кривая намагниченности обмотки: физкоэффициенты в зависимости от тока питания.
+
+    Проектная точка обозначена линиями: горизонталь — проектный физкоэффициент из .lte, вертикаль —
+    проектный ток обмотки с учётом насыщения, ромб — их пересечение."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -373,13 +385,28 @@ def plot_winding(m, label, pts, turns, L, moments, outdir):
     for k, mp in enumerate(moments):
         n, comp = MOMENT[mp]
         a, col = axes[mp], MOMENT_COLOR[mp]
-        y = np.array([p[1][n][comp] for p in pts])
+        y = np.array([to_coef(p[1][n][comp], mp, L, ef) for p in pts])
         a.plot(x, y, "-o", color=col, ms=4.5, lw=1.6, zorder=3)
-        a.set_ylabel(f"{mp}, {MOMENT_UNITS[mp]}", color=col, fontsize=9)
+        a.set_ylabel(mp, color=col, fontsize=10)
         a.tick_params(axis="y", labelcolor=col, labelsize=8)
         if k > 1:
             a.spines["right"].set_position(("outward", 46 * (k - 1)))
-        a.set_ylim(0, y.max() * 1.15)
+        ymax = y.max()
+        d = abs(design.get(mp, 0.0))
+        if d > 1e-30:
+            a.axhline(d, color=col, lw=1.2, ls="-", alpha=0.85, zorder=1)
+            a.annotate(f"{mp} = {d:.4e}", xy=(0.015, 0.965 - 0.055 * k), xycoords="axes fraction",
+                       fontsize=8.5, color=col, family="monospace", va="top",
+                       bbox=dict(fc="white", ec="none", alpha=0.85, pad=1.5))
+            if cur is not None and abs(cur) > 1e-9:
+                a.plot([abs(cur)], [d], "D", color=col, ms=8, mec="white", mew=1.0, zorder=5)
+            ymax = max(ymax, d)
+        a.set_ylim(0, ymax * 1.15)
+    if cur is not None and abs(cur) > 1e-9:
+        ax.axvline(abs(cur), color="#444", lw=1.3, ls="--", zorder=2)
+        ax.annotate(f"{abs(cur):.1f} А", xy=(abs(cur), 0.02), xycoords=("data", "axes fraction"),
+                    fontsize=9, color="#222", ha="left", va="bottom",
+                    bbox=dict(fc="white", ec="none", alpha=0.85, pad=1.5))
     ax.set_xlabel(f"ток обмотки, А   ({turns} витк./катушку)")
     ax.set_title(f"{m['name']} — обмотка {label}: " + ", ".join(moments)
                  + f";  L_eff = {L:.3f} м"
@@ -428,6 +455,8 @@ def build(out=OUT, src=SRC, figs=PNG):
         pts_by_w = variant_kicks(el, L, lead)
         native = element_spectra(el)
         allow = KIND_MOMENTS.get(m["kind"], tuple(MOMENT))
+        lam, cur, ctrl = saturation_currents(m, ec, pts_by_w, L)
+        design = ec._design_ivec(m)[2]
 
         new = []
         p = doc.add_paragraph(f"Кривые намагниченности {m['name']}: киковые моменты обмоток в "
@@ -443,31 +472,33 @@ def build(out=OUT, src=SRC, figs=PNG):
                      and (MOMENT[mp][1] == 0 or mp in m["outputs"])]
             if not shown:
                 continue
-            png = plot_winding(m, lb, pts, ec.dev_tpc(m["devs"][j]), L, shown, figs)
+            png = plot_winding(m, lb, pts, ec.dev_tpc(m["devs"][j]), L, shown,
+                               design, cur.get(lb), ec.ENERGY_FACTOR, figs)
             pic = doc.add_paragraph()
             pic.add_run().add_picture(png, width=Inches(6.3))
             new.append(pic._p)
 
-        lam, cur, ctrl = saturation_currents(m, ec, pts_by_w, L)
-        p = doc.add_paragraph()
-        p.add_run("Проектные токи с учётом насыщения. ").bold = True
-        if not ctrl:
-            p.add_run("Проектных коэффициентов у элемента в решётке нет — оценка не ставится.")
-        elif lam is None:
-            p.add_run("Оценка не получена: кривые не покрывают проектный уровень.")
-        else:
-            parts = []
-            for j, lb in enumerate(m["labels"]):
-                if lb not in cur or abs(cur[lb]) < 1e-9:
-                    continue
-                nom = ec.dev_nominal(m["devs"][j])
-                parts.append(f"{lb} = {cur[lb]:+.1f} А"
-                             + (f" ({100 * abs(cur[lb]) / nom:.0f}% номинала)" if nom else ""))
-            p.add_run(
-                f"Матрица связи линейна, кривые намагниченности выше содержат насыщение железа. "
-                f"Множитель λ = {lam:.3f} к линейному вектору токов выводит элемент на проектные "
-                f"коэффициенты ({', '.join(ctrl)}): " + ";  ".join(parts) + ".")
-        new.append(p._p)
+        cap = doc.add_paragraph()
+        cap.add_run(f"{m['name']} — проектные токи с учётом насыщения").bold = True
+        new.append(cap._p)
+        t = doc.add_table(rows=1, cols=5)
+        t.style = "Light Grid Accent 1"
+        for k, h in enumerate(("элемент", "обмотка", "проектные физкоэффициенты (.lte)",
+                               "проектный ток, А", "% номинала")):
+            t.rows[0].cells[k].text = h
+        coefs = ";  ".join(f"{mp} = {design[mp]:+.4e}" for mp in ctrl) if ctrl else "—"
+        for j, lb in enumerate(m["labels"]):
+            c = t.add_row().cells
+            c[0].text, c[1].text, c[2].text = m["name"], lb, coefs
+            I = cur.get(lb)
+            if I is None:
+                c[3].text = c[4].text = "—"
+                continue
+            nom = ec.dev_nominal(m["devs"][j])
+            c[3].text = f"{I:+.1f}"
+            c[4].text = f"{100 * abs(I) / nom:.0f}%" if nom else "—"
+        new.append(t._tbl)
+        new.append(doc.add_paragraph()._p)
 
         for node in new:                                   # перенос созданных блоков в конец главы
             anchor.addprevious(node)
