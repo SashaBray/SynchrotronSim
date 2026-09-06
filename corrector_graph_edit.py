@@ -153,12 +153,16 @@ def merge_degree2(path=BR, element=ELEMENT):
     return dropped
 
 
-def rewrite_leaks(leak, path=BR, members=MB, element=ELEMENT):
+def rewrite_leaks(leak, path=BR, members=MB, element=ELEMENT, leak_yoke=None):
     """Убрать прежние утечки и поставить по одной на КАЖДУЮ катушку, в обход её собственной ветви.
 
     Правило одно на все обмотки: катушка сидит на ветви — её утечка идёт мимо этой ветви, теми же
     концами. Поэтому у `main` их две (по катушке на половину ярма), а средний участок `yokeM` между
-    ними ни в одну не входит."""
+    ними ни в одну не входит.
+
+    Сечения у катушки на ПОЛЮСЕ и на ЯРМЕ разные: геометрия вокруг них разная, и один класс на
+    обе означал бы, что утечка одинакова — это допущение, а не чертёж. `leak_yoke` задаёт своё
+    сечение катушкам ярма; без него берётся общее."""
     rows = list(csv.DictReader(io.open(path, encoding="utf-8-sig"), delimiter=";"))
     head = list(rows[0])
     rows = [r for r in rows
@@ -171,14 +175,18 @@ def rewrite_leaks(leak, path=BR, members=MB, element=ELEMENT):
             coiled.append((r["branch"], r["winding"]))
 
     new = []
-    for br, wd in coiled if leak > 0 else []:
+    for br, wd in coiled:
         src = by_branch[br]
+        yoke = src["sym_class"].startswith("yoke")
+        S = (leak_yoke if (yoke and leak_yoke is not None) else leak)
+        if S <= 0:
+            continue
         new.append({c: "" for c in head} | {
             "element": element, "branch": f"lk_{br}", "material": "air",
-            "S_m2": f"{leak:.6g}", "len_m": src["len_m"], "origin": "fit",
+            "S_m2": f"{S:.6g}", "len_m": src["len_m"], "origin": "fit",
             "comment": f"собственная утечка катушки {wd}: воздух в обход ветви {br}",
             "node_from": src["node_from"], "node_to": src["node_to"], "kind": "gap",
-            "sym_class": "leak_coil", "mirror": "0",
+            "sym_class": "leak_coil_yoke" if yoke else "leak_coil_pole", "mirror": "0",
             "pos_from": src["pos_from"], "pos_to": src["pos_to"],
             "z_from": src["z_from"], "z_to": src["z_to"]})
 
@@ -194,11 +202,13 @@ def rewrite_leaks(leak, path=BR, members=MB, element=ELEMENT):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--leak", type=float, default=0.005,
-                    help="сечение собственной утечки катушки, кв.м")
+                    help="сечение собственной утечки катушки полюса, кв.м")
+    ap.add_argument("--leak-yoke", type=float, default=None,
+                    help="то же для катушек ярма (main); без него берётся --leak")
     a = ap.parse_args(argv)
     seen = merge_coils()
     gone = merge_pole_roots()
-    _, made = rewrite_leaks(a.leak)
+    _, made = rewrite_leaks(a.leak, leak_yoke=a.leak_yoke)
     plain = merge_degree2()
     n = sum(1 for r in csv.DictReader(io.open(BR, encoding="utf-8-sig"), delimiter=";")
             if r["element"] == ELEMENT)
