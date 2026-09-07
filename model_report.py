@@ -105,37 +105,58 @@ def _body_format(doc):
 
 # ─────────────────────────────── живые числа ────────────────────────────────
 
+COEF = {"QP_sh": ("G", "Тл/м", "int_G"), "QP_L": ("G", "Тл/м", "int_G"),
+        "SP": ("S", "Тл/м²", "int_S"), "OP": ("O", "Тл/м³", "int_O")}
+NTURNS = {"QP_sh": "68", "QP_L": "85", "SP": "41+390", "OP": "34"}
+
+
+def _leff(element):
+    """Средняя эффективная длина элемента по записям датасета (проектная, фиксированная)."""
+    import json
+    import saturation_model as sm
+    recs = json.load(open(os.path.join(sm.OUTDIR, f"{element}.json"), encoding="utf-8"))["records"]
+    xs = [float(r["Leff"]) for r in recs if r.get("Leff")]
+    return sum(xs) / len(xs)
+
+
 def facts():
     import numpy as np
     import saturation_model as sm
 
-    F = {"fits": {}, "example": None}
+    F = {"fits": {}, "single": [], "example": None}
     for r in csv.DictReader((l for l in io.open(FITS, encoding="utf-8-sig")
                              if not l.startswith("#")), delimiter=";"):
         F["fits"].setdefault(r["section"], []).append(r)
 
-    # Разобранный пример: QP_sh, уравнение NI = A·y + L·H(C·y) на рабочих картах.
+    fit = {r["section"]: r for rs in F["fits"].values() for r in rs}
+    for el in ("QP_sh", "QP_L", "SP", "OP"):
+        sym, unit, _ = COEF[el]
+        r = fit[el]
+        F["single"].append(dict(el=el, sym=sym, unit=unit, N=NTURNS[el], leff=_leff(el),
+                                c=float(r["C"]), l=float(r["L_m"]),
+                                err=float(r["max_err_pct"]), n=r["n_points"]))
+
+    # Разобранный пример: QP_sh. Цепочка I → NI=N·I → χ=∫G·dl → G=χ/l_eff.
     Hof = sm._material()
     H = lambda b: float(np.atleast_1d(Hof(b))[0])
-    fit = {r["section"]: r for rs in F["fits"].values() for r in rs}
     q = fit["QP_sh"]
     C, L, aon = float(q["C"]), float(q["L_m"]), float(q["A_over_naive"])
+    N, leff = 68.0, _leff("QP_sh")
     rows = sorted(csv.DictReader(io.open(os.path.join("workspace", "datasets",
                   "currents_to_kicks", "QP_sh.csv"), encoding="utf-8-sig"), delimiter=";"),
                   key=lambda r: float(r["AT_I"]))
-    ni0, y0 = float(rows[0]["AT_I"]), abs(float(rows[0]["int_G"]))
-    A = aon * ni0 / y0
+    ni0, chi0 = float(rows[0]["AT_I"]), abs(float(rows[0]["int_G"]))
+    A = aon * ni0 / chi0
     picks, seen = [], set()
     for r in rows:
-        ni, y = float(r["AT_I"]), abs(float(r["int_G"]))
+        ni, chi = float(r["AT_I"]), abs(float(r["int_G"]))
         band = round(ni / 1600)
         if ni > 6000 or band in seen:
             continue
         seen.add(band)
-        air, iron = A * y, L * H(C * y)
-        picks.append((ni, y, C * y, H(C * y), air, iron, air + iron,
-                      100 * (air + iron - ni) / ni))
-    F["example"] = dict(A=A, C=C, L=L, ni0=ni0, y0=y0, rows=picks[:4])
+        nim = A * chi + L * H(C * chi)
+        picks.append((ni / N, ni, chi, chi / leff, nim, 100 * (nim - ni) / ni))
+    F["example"] = dict(A=A, C=C, L=L, N=N, leff=leff, ni0=ni0, chi0=chi0, rows=picks[:4])
     return F
 
 
@@ -249,56 +270,68 @@ def ch_single(doc, F, lo):
     doc.add_heading("3. Однообмоточный элемент: расчёт на бумаге", level=1)
     doc.add_paragraph(
         "У квадруполей, секступоля и октуполя обмотка одна, поток идёт единственным путём, граф "
-        "вырождается в одно ребро, и цепь сводится к скалярному уравнению, связывающему "
-        "возбуждение NI с физкоэффициентом y:")
-    _formula(doc, r"NI = a\,y + l\,H(c\,y)", lo)
+        "вырождается в одно ребро. Расчёт от тока к физкоэффициенту идёт в три шага. Сначала ток "
+        "переводится в возбуждение:")
+    _formula(doc, r"NI = N\,I", lo)
     _where(doc, lo, [
-        (r"NI", "скаляр, ампер-витки", "возбуждение обмотки"),
-        (r"y", "скаляр", "физкоэффициент элемента — искомое"),
+        (r"I", "скаляр, ампер", "ток обмотки"),
+        (r"N", "скаляр", "число витков катушки"),
+        (r"NI", "скаляр, ампер-витки", "возбуждение"),
+    ])
+    doc.add_paragraph(
+        "Возбуждение связано со СТРОГО интегральной силой гармоники χ (интеграл коэффициента вдоль "
+        "пучка) скалярным уравнением магнитной цепи:")
+    _formula(doc, r"NI = a\,\chi + l\,H(c\,\chi)", lo)
+    _where(doc, lo, [
+        (r"\chi", "скаляр", "интегральная сила гармоники, χ = ∫G·dl (или ∫S·dl, ∫O·dl)"),
         (r"a", "скаляр", "линейный член: воздух, не насыщается"),
         (r"l", "скаляр, м", "длина пути по железу"),
-        (r"c", "скаляр", "пересчёт коэффициента в индукцию железа"),
+        (r"c", "скаляр", "пересчёт χ в индукцию железа"),
         (r"H(\cdot)", "функция, А/м", "обратная кривая намагничивания"),
     ])
     doc.add_paragraph(
         "Первое слагаемое — воздух (линеен всегда), второе — железо (почти ничего до насыщения и "
-        "резкий рост после). Свободных чисел два, c и l; "
-        "множитель a берётся из контрольной точки при малом токе, где железо ещё не мешает "
-        "(NI ≈ a·y, откуда a = NI/y). Обе подбираемые величины геометрические — смена материала "
-        "означает лишь замену таблицы H(·) без перенастройки.")
-    doc.add_paragraph("Подобранные по картам постоянные:")
-    rows = []
-    for el in ("QP_sh", "QP_L", "SP", "OP"):
-        for r in F["fits"].get(el, []):
-            rows.append([el, r["coefficient"], f'{float(r["C"]):.4g}', f'{float(r["L_m"]):.4g}',
-                         f'{float(r["max_err_pct"]):.1f}', r["n_points"]])
-    _table(doc, ["Элемент", "Коэффициент", "c", "l, м", "макс. ошибка, %", "Точек"], rows,
-           caption="Постоянные однообмоточного уравнения")
+        "резкий рост после). Наконец, при ФИКСИРОВАННОЙ эффективной длине физкоэффициент — это "
+        "интеграл, делённый на неё:")
+    _formula(doc, r"G = \chi / l_{\text{эфф}}", lo)
+    _where(doc, lo, [
+        (r"G", "скаляр, Тл/м", "физкоэффициент (для секступоля S, Тл/м²; октуполя O, Тл/м³)"),
+        (r"l_{\text{эфф}}", "скаляр, м", "эффективная длина элемента (проектная, фиксированная)"),
+    ])
+    doc.add_paragraph(
+        "Свободных в уравнении цепи два числа, c и l; множитель a берётся из контрольной точки при "
+        "малом токе, где железо ещё не мешает (NI ≈ a·χ, откуда a = NI/χ). Величины c и l "
+        "геометрические — смена материала означает лишь замену таблицы H(·) без перенастройки. "
+        "Энергомножитель здесь не нужен: он появляется только при переводе G в нормированную "
+        "силу решётки (раздел 2).")
+    doc.add_paragraph("Постоянные, число витков и эффективная длина по элементам:")
+    rows = [[s["el"], f'{s["sym"]}, {s["unit"]}', s["N"], f'{s["leff"]:.4f}',
+             f'{s["c"]:.4g}', f'{s["l"]:.4g}', f'{s["err"]:.1f}', s["n"]]
+            for s in F["single"]]
+    _table(doc, ["Элемент", "Коэффициент", "N", "l_эфф, м", "c", "l, м", "макс. ошибка, %",
+                 "Точек"], rows, caption="Постоянные однообмоточного уравнения", pt=8)
 
     doc.add_heading("Порядок расчёта", level=2)
-    doc.add_paragraph(
-        "Дано возбуждение NI, требуется коэффициент y (прямая задача — наоборот, тоже одним "
-        "уравнением). Порядок такой:")
-    for t in ("взять a, c, l элемента из таблицы 3 (a — через контрольную точку, см. пример);",
-              "задаться пробным y и вычислить правую часть a·y + l·H(c·y), взяв H по таблице "
-              "материала при индукции c·y;",
-              "сравнить с NI и поправить y (уравнение монотонно по y, годится деление отрезка "
-              "пополам); двух-трёх приближений достаточно."):
+    doc.add_paragraph("Дано ток I, требуется физкоэффициент G. Порядок такой:")
+    for t in ("возбуждение NI = N·I;",
+              "взять a, c, l элемента из таблицы 2 (a — через контрольную точку, см. пример);",
+              "решить уравнение цепи относительно χ: задаться пробным χ, вычислить "
+              "a·χ + l·H(c·χ), взяв H по таблице материала при индукции c·χ, сравнить с NI и "
+              "поправить χ (уравнение монотонно, годится деление отрезка пополам; 2–3 приближения);",
+              "физкоэффициент G = χ / l_эфф."):
         doc.add_paragraph(t, style="List Number")
 
     ex = F["example"]
     doc.add_heading("Числовой пример (QP_sh)", level=2)
     doc.add_paragraph(
-        f"Постоянные: c = {ex['C']:.4g}, l = {ex['L']:.4g} м. Множитель a по контрольной точке "
-        f"NI₀ = {ex['ni0']:.0f} А·в, y₀ = {ex['y0']:.3g} Тл: a = {ex['ni0']:.0f}/{ex['y0']:.3g} "
-        f"≈ {ex['A']:.0f}. Подставляя измеренный коэффициент y = int_G в уравнение, получаем "
-        f"возбуждение и сверяем с картой:")
-    rows = [[f"{ni:.0f}", f"{y:.3f}", f"{cy:.3f}", f"{h:.0f}", f"{air:.0f}", f"{iron:.0f}",
-             f"{tot:.0f}", f"{err:+.1f}"]
-            for ni, y, cy, h, air, iron, tot, err in ex["rows"]]
-    _table(doc, ["NI изм., А·в", "y = int_G, Тл", "c·y, Тл", "H(c·y), А/м",
-                 "a·y (возд.)", "l·H (жел.)", "NI расч.", "ошибка, %"], rows,
-           caption="Проверка уравнения на рабочих картах QP_sh", pt=8)
+        f"Дано: N = {ex['N']:.0f} витков, l_эфф = {ex['leff']:.4f} м, постоянные c = {ex['C']:.4g}, "
+        f"l = {ex['L']:.4g} м. Множитель a по контрольной точке NI₀ = {ex['ni0']:.0f} А·в, "
+        f"χ₀ = {ex['chi0']:.3g}: a = {ex['ni0']:.0f}/{ex['chi0']:.3g} ≈ {ex['A']:.0f}. Для нескольких "
+        f"токов проходим цепочку I → NI → χ → G и сверяем расчётное возбуждение с картой:")
+    rows = [[f"{i:.1f}", f"{ni:.0f}", f"{chi:.3f}", f"{g:.2f}", f"{nim:.0f}", f"{err:+.1f}"]
+            for i, ni, chi, g, nim, err in ex["rows"]]
+    _table(doc, ["I, А", "NI = N·I", "χ = ∫G·dl", "G = χ/l_эфф, Тл/м", "NI расч.", "ошибка, %"],
+           rows, caption="Проверка цепочки на рабочих картах QP_sh", pt=8)
 
 
 
