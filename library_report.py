@@ -534,6 +534,20 @@ def single_model_curve(el, L, pts, order, tpc, ef, tag=""):
     return x[k], yv[k]
 
 
+def moment_possible(el, kind, winding, comp):
+    """Разрешена ли компонента симметрией обмотки (у многообмоточных — по маске модели связи).
+
+    У обмотки `main` корректора скошенных компонент быть не может: в картах на их месте остаётся
+    численный шум порядка 1e-7, который на собственной оси выглядит как сигнал."""
+    if comp == 0 or kind not in ("dq", "kicker"):
+        return True
+    try:
+        import coupling_model as cm
+        return cm.allowed(el, winding, comp)
+    except Exception:
+        return True
+
+
 def model_curves(el, kind, label, moments, pts, turns, ef, L):
     """Кривые МОДЕЛИ насыщения для показываемых моментов: {момент: (ток_А, значение_в_шкале_графика)}.
 
@@ -543,12 +557,12 @@ def model_curves(el, kind, label, moments, pts, turns, ef, L):
     import saturation_solve as ss
     wkey = "I1" if kind in SINGLE_KINDS else label
     have = {"quad": ("G",), "sext": ("S",), "oct": ("O",),
-            "dq": ("B", "G", "S"), "kicker": ("B", "G", "S")}.get(kind, ())
+            "dq": ("B", "G", "S"), "kicker": ("B", "Bv", "G", "Gv", "S")}.get(kind, ())
     xs = np.array([p[0] for p in pts]) / (turns or 1)
     grid = np.linspace(0.0, float(xs.max()) * 1.02, 80)
     out = {}
     for mp in moments:
-        if mp not in have or MOMENT[mp][1] != 0:            # модель даёт нормальные компоненты
+        if mp not in have:
             continue
         n, comp = MOMENT[mp]
         if kind in SINGLE_KINDS:
@@ -559,8 +573,10 @@ def model_curves(el, kind, label, moments, pts, turns, ef, L):
                 pass
             continue
         try:
+            # Модель даёт ИНТЕГРАЛ момента (её физкоэф отнесён к своей опорной длине). Шкала
+            # графика — та же, что у измерений: интеграл, делённый на длину ЭТОГО исполнения.
             out[mp] = (grid, np.array(
-                [ss.forward(el, {wkey: float(I)})[mp][0] * math.factorial(n - 1) / ef
+                [abs(ss.graph_moment(el, {wkey: float(I)}, n, comp)[1]) / (L * ef)
                  for I in grid]))
         except Exception:
             continue
@@ -579,7 +595,9 @@ def plot_winding(m, label, pts, turns, L, moments, design, cur, ef, outdir, mode
     model = model or {}
     x = np.array([p[0] for p in pts]) / (turns or 1)
     cb = float(np.mean([p[2] for p in pts]))
-    fig, ax = plt.subplots(figsize=(9.0, 5.2))
+    # Каждый момент живёт на своей оси; при пяти-шести моментах оси съедают поле, поэтому
+    # холст расширяется под их число, а заголовок ставится на ФИГУРУ, иначе его срезает.
+    fig, ax = plt.subplots(figsize=(9.0 + 0.85 * max(0, len(moments) - 3), 5.2))
     axes = {mp: (ax if k == 0 else ax.twinx()) for k, mp in enumerate(moments)}
     for k, mp in enumerate(moments):
         n, comp = MOMENT[mp]
@@ -610,11 +628,12 @@ def plot_winding(m, label, pts, turns, L, moments, design, cur, ef, outdir, mode
                     fontsize=9, color="#222", ha="left", va="bottom",
                     bbox=dict(fc="white", ec="none", alpha=0.85, pad=1.5))
     ax.set_xlabel(f"ток обмотки, А   ({turns} витк./катушку)")
-    ax.set_title(f"{m['name']} — обмотка {label}: " + ", ".join(moments)
-                 + f";  L_eff = {L:.3f} м"
-                 + ("" if abs(cb - 1) < 0.03 else f" (тело карты ×{cb:.2f})"), fontsize=10.5)
     ax.grid(alpha=0.25)
     fig.tight_layout()
+    fig.suptitle(f"{m['name']} — обмотка {label}: " + ", ".join(moments)
+                 + f";  L_eff = {L:.3f} м"
+                 + ("" if abs(cb - 1) < 0.03 else f" (тело карты ×{cb:.2f})"), fontsize=10.5)
+    fig.subplots_adjust(top=0.90)
     os.makedirs(outdir, exist_ok=True)
     png = os.path.join(outdir, f"{m['name']}_{label}.png")
     fig.savefig(png, dpi=150)
@@ -697,6 +716,66 @@ def mark_linear_tables(doc):
     return n
 
 
+def _cell_text(tc, text):
+    """Заменить текст ячейки, сохранив её оформление (ячейка приходит копией соседней)."""
+    from docx.table import _Cell
+    c = _Cell(tc, None)
+    for extra in c.paragraphs[1:]:
+        extra._p.getparent().remove(extra._p)
+    par = c.paragraphs[0]
+    for extra in par.runs[1:]:
+        extra._r.getparent().remove(extra._r)
+    if par.runs:
+        par.runs[0].text = text
+    else:
+        par.add_run(text)
+
+
+def insert_column(table, after, header, values, key_col=0):
+    """Вставить столбец сразу за столбцом `after`: заголовок и значения по имени в `key_col`.
+
+    Ячейки создаются копией соседних, поэтому рамки, заливка и шрифт совпадают со столбцом, рядом
+    с которым столбец встаёт; python-docx умеет добавлять столбец только в конец таблицы."""
+    import copy
+    from docx.oxml.ns import qn
+    grid = table._tbl.find(qn("w:tblGrid"))
+    cols = grid.findall(qn("w:gridCol"))
+    grid.insert(list(grid).index(cols[after]) + 1, copy.deepcopy(cols[after]))
+    for i, tr in enumerate(table._tbl.findall(qn("w:tr"))):
+        tcs = tr.findall(qn("w:tc"))
+        new = copy.deepcopy(tcs[after])
+        tcs[after].addnext(new)
+        if i == 0:
+            _cell_text(new, header)
+        else:
+            name = _Cell_text(tcs[key_col])
+            _cell_text(new, values.get(name, "—"))
+
+
+def _Cell_text(tc):
+    from docx.table import _Cell
+    return _Cell(tc, None).text.strip()
+
+
+def summary_table(doc):
+    """Сводная таблица отчёта: та, где в шапке есть столбец проектных токов."""
+    for t in doc.tables:
+        head = [_Cell_text(c._tc) for c in t.rows[0].cells]
+        if any(h.startswith("проектные токи") for h in head):
+            return t, [h.startswith("проектные токи") for h in head].index(True)
+    return None, None
+
+
+def page_break_chapters(doc):
+    """Каждая глава — с новой страницы (кроме первой: перед ней и так начало документа)."""
+    n = 0
+    for i, par in enumerate(p for p in doc.paragraphs if p.style.name == "Heading 1"):
+        if i:
+            par.paragraph_format.page_break_before = True
+            n += 1
+    return n
+
+
 def build(out=OUT, src=SRC, figs=PNG):
     """Достоверная копия element_compare_report, дополненная по элементам: кривые намагниченности,
     формула модели (у квадруполей/секступолей/октуполей) и таблица проектных токов С УЧЁТОМ
@@ -712,6 +791,7 @@ def build(out=OUT, src=SRC, figs=PNG):
                          f"построить: py -3.14 element_compare.py library")
     doc = Document(src)
     mark_linear_tables(doc)
+    sat_by_name = {}
     sm = _smodels()
     mats = dc.load_coupling()
     dc.attach_devices(mats, ec.LCROW)
@@ -736,6 +816,9 @@ def build(out=OUT, src=SRC, figs=PNG):
         allow = KIND_MOMENTS.get(kind, tuple(MOMENT))
         design = ec._design_ivec(m)[2]
         cur = sat_currents_solve(el, kind, m, design, ec, pts_by_w, L)
+        if kind != "kicker":
+            sat_by_name[m["name"]] = ", ".join(f"{lb}={cur.get(lb, 0.0):+.1f}"
+                                               for lb in m["labels"])
 
         new = []
 
@@ -752,7 +835,8 @@ def build(out=OUT, src=SRC, figs=PNG):
                 continue
             shown = [mp for mp in MOMENT
                      if mp in allow and resolution(nat, MOMENT[mp][0]) <= RESOLVED
-                     and (MOMENT[mp][1] == 0 or mp in m["outputs"])]
+                     and (MOMENT[mp][1] == 0 or mp in m["outputs"])
+                     and moment_possible(el, kind, lb, MOMENT[mp][1])]
             if not shown:
                 continue
             tpc = ec.dev_tpc(m["devs"][j])
@@ -817,6 +901,11 @@ def build(out=OUT, src=SRC, figs=PNG):
 
     if material_section(doc, figs):                 # заключительный раздел — в САМЫЙ конец
         added += 1
+    tbl, col = summary_table(doc)
+    if tbl is not None:                     # сводка: старый столбец пометить, новый вставить рядом
+        _cell_text(tbl.rows[0].cells[col]._tc, "проектные токи, А (линейное приближение)")
+        insert_column(tbl, col, "проектные токи, А (с насыщением)", sat_by_name)
+    print("глав с новой страницы:", page_break_chapters(doc))
     os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
     try:
         doc.save(out)

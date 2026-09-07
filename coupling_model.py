@@ -53,6 +53,14 @@ def _allowed(element, wname, part):
     return True if m is None else part in m
 
 
+def allowed(element, winding, comp):
+    """Может ли обмотка создать эту компоненту: comp=0 — нормальную, 1 — скошенную.
+
+    Симметрия обмотки запрещает часть гармоник (`MASK`); модель их зануляет, а в измерениях на их
+    месте стоит численный шум карты. Отчёту это нужно, чтобы не рисовать шум как величину."""
+    return _allowed(element, winding, "скош." if comp else "норм.")
+
+
 def tips(cir):
     """Наконечники (узлы, к которым подходят зазоры кик-класса) и сами эти зазоры."""
     gaps = [b for b in cir.gaps if cir.sym[b] in cir.kick_classes]

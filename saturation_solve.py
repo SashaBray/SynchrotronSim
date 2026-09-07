@@ -143,10 +143,24 @@ def _single_y_of_ni(row, ni):
 
 # ───────────────────────── многообмоточные ─────────────────────────
 
-def _graph_coef(element, currents_ni, order, leff_ref):
+def _graph_coef(element, currents_ni, order, leff_ref, comp=0):
+    """Физкоэффициент по токам в ампер-витках: comp=0 — нормальная гармоника, 1 — скошенная."""
     import coupling_model as cm
     k = cm.predict(element, order, currents_ni)
-    return MAT_SIGN[order] * math.factorial(order - 1) / R_PROBE ** (order - 1) * k.imag / leff_ref
+    part = k.real if comp else k.imag
+    return MAT_SIGN[order] * math.factorial(order - 1) / R_PROBE ** (order - 1) * part / leff_ref
+
+
+def graph_moment(element, currents_A, order, comp=0, device=None):
+    """Один момент многообмоточного магнита: (физкоэффициент, интеграл по длине исполнения).
+
+    Отдельно от `forward`, потому что тому нужны только нормальные B, G, S, а корректор описан и
+    скошенными компонентами — их и берут кривые отчёта."""
+    m = _row(element, device=device)
+    leff = device_leff(element, device)
+    ni = {w: currents_A[w] * _turns(element, w) for w in currents_A}
+    g = _graph_coef(element, ni, order, float(m["leff"]), comp)
+    return g, g * leff
 
 
 # ───────────────────────── публичный интерфейс ─────────────────────────
