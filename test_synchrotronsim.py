@@ -781,5 +781,47 @@ class TestMecSigma(unittest.TestCase):
 
 
 
+class TestSaturationSolve(unittest.TestCase):
+    """Единый решатель насыщения: таблица параметров и цикл прямая↔обратная задача."""
+
+    def _tool(self):
+        if not os.path.exists(os.path.join("workspace", "tables", "saturation_models.csv")):
+            self.skipTest("нет saturation_models.csv — запустите build_saturation_models.py")
+        import saturation_solve as ss
+        return ss
+
+    def test_models_table_covers_electromagnets(self):
+        ss = self._tool()
+        M = ss._models()
+        for el in ("QP_sh", "QP_L", "SP", "OP", "DQ", "corrector"):
+            self.assertIn(el, M, f"нет модели насыщения для {el}")
+
+    def test_single_roundtrip(self):
+        """Однообмоточный: ток → g → ток восстанавливается."""
+        ss = self._tool()
+        for el in ("QP_sh", "QP_L", "OP"):
+            sym = ss._models()[el]["coefficient"]
+            g = ss.forward(el, {"I1": 55.0})[sym][0]
+            back = ss.inverse(el, {sym: g})
+            self.assertAlmostEqual(next(iter(back.values())), 55.0, delta=0.5,
+                                   msg=f"{el}: обратная задача не вернула ток")
+
+    def test_dq_length_variant_same_coefficient(self):
+        """Физкоэффициент длинонезависим: у исполнений g одинаков, интеграл разный."""
+        ss = self._tool()
+        g_base = ss.forward("DQ", {"I1": 100.0, "I2": 0.0, "I3": 0.0})["G"][0]
+        g_l400 = ss.forward("DQ", {"I1": 100.0, "I2": 0.0, "I3": 0.0},
+                            device="DQ_I1_1A_L400")["G"][0]
+        self.assertAlmostEqual(g_base, g_l400, delta=1e-9)
+
+    def test_dq_inverse_forward_consistent(self):
+        """Многообмоточный: обратная задача под цель, прямая её воспроизводит."""
+        ss = self._tool()
+        cur = ss.inverse("DQ", {"B": 0.26, "G": -31.0}, fixed={"I3": 0.0})
+        res = ss.forward("DQ", cur)
+        self.assertAlmostEqual(res["B"][0], 0.26, delta=0.01)
+        self.assertAlmostEqual(res["G"][0], -31.0, delta=0.5)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")

@@ -1,0 +1,7 @@
+element;model;coefficient;a_g;c_g;l;leff_ref;fit_err_pct;note
+QP_sh;single;G;92.1235;0.0276632;0.2209;0.199447;1.69;"NI = a_g·g + l·H(c_g·g); g — физкоэф, длинонезависимо"
+QP_L;single;G;63.3371;0.0196942;0.1029;0.388598;1.47;"NI = a_g·g + l·H(c_g·g); g — физкоэф, длинонезависимо"
+SP;single;S;0;0.00106426;0.0372;0.206492;4.91;"NI = a_g·g + l·H(c_g·g); g — физкоэф, длинонезависимо"
+OP;single;O;0.0325354;2.88115e-06;0.2674;0.0594052;0.84;"NI = a_g·g + l·H(c_g·g); g — физкоэф, длинонезависимо"
+DQ;graph;B,G,S;;;;0.408062;;"граф saturation_branches + веса mec_sigma_weights; расчёт coupling_model"
+corrector;graph;B,G,S;;;;0.141995;;"граф saturation_branches + веса mec_sigma_weights; расчёт coupling_model"
