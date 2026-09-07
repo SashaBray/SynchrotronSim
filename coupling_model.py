@@ -104,11 +104,20 @@ def train(element):
     maps = {n: bn.read_maps(element, n) for n in ORDERS_OF[element]}
     ids = [t[3] for t in maps[ORDERS_OF[element][0]]]
     cur = {t[3]: t[0] for t in maps[ORDERS_OF[element][0]]}
-    single = [i for i in ids if len(cur[i]) == 1]
-    X = np.array([features(cir, cur[i]) for i in single])
+    split = {t[3]: t[2] for t in maps[ORDERS_OF[element][0]]}
+    # В подгонку идут все одиночные карты и ТЕ комбинации, что помечены в реестре как train.
+    # Одиночные показывают модели каждую обмотку по отдельности, но не показывают, как потоки
+    # перераспределяются, когда катушки давят вместе, — а именно это она потом и предсказывает.
+    # Проверено на отложенных комбинациях (split=test): у корректора расхождение падает с 9.6 до
+    # 7.8% по диполю, с 10.1 до 8.6% по квадруполю и с 18.6 до 16.2% по секступолю. Комбинации
+    # split=test в подгонку не входят и остаются независимой проверкой.
+    fit_ids = [i for i in ids if len(cur[i]) == 1 or split.get(i) == "train"]
+    X = np.array([features(cir, cur[i]) for i in fit_ids])
     Y = np.array([[_PF[p](complex({t[3]: t[1] for t in maps[n]}[i])) for n, p in cols]
-                  for i in single])
-    for r, i in enumerate(single):                     # маска: запрещённой компоненте цель — ноль
+                  for i in fit_ids])
+    for r, i in enumerate(fit_ids):                    # маска: запрещённой компоненте цель — ноль
+        if len(cur[i]) != 1:                           # у комбинации запрета нет: обмоток несколько
+            continue
         w = list(cur[i])[0]
         for c, (n, p) in enumerate(cols):
             if not _allowed(element, w, p):

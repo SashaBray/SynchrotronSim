@@ -30,15 +30,27 @@ PNG = os.path.join("workspace", "results", "library_report_figs")
 
 # Киковый момент → (порядок мультиполя, компонента): 0 — нормальная, 1 — скью. Обозначения те же,
 # что в `element_compare.MULTIPOLES`.
-MOMENT = {"B": (1, 0), "Bv": (1, 1), "G": (2, 0), "Gv": (2, 1), "S": (3, 0), "O": (4, 0)}
+MOMENT = {"B": (1, 0), "Bv": (1, 1), "G": (2, 0), "Gv": (2, 1), "S": (3, 0), "Sv": (3, 1),
+          "O": (4, 0)}
 # Единицы ИНТЕГРАЛА момента по длине: By ∝ b_n·r^(n−1), отсюда степени метра.
-MOMENT_UNITS = {"B": "Тл·м", "Bv": "Тл·м", "G": "Тл", "Gv": "Тл", "S": "Тл/м", "O": "Тл/м²"}
+MOMENT_UNITS = {"B": "Тл·м", "Bv": "Тл·м", "G": "Тл", "Gv": "Тл", "S": "Тл/м", "Sv": "Тл/м",
+                "O": "Тл/м²"}
+# Те же моменты как ФИЗИЧЕСКИЕ коэффициенты (интеграл, делённый на длину): в них считает
+# `saturation_solve` и в них же задача «токи → кики» ставится в методичке.
+COEF_UNITS = {"B": "Тл", "Bv": "Тл", "G": "Тл/м", "Gv": "Тл/м", "S": "Тл/м²", "Sv": "Тл/м²",
+              "O": "Тл/м³"}
+MAT_SIGN = {1: -1.0, 2: 1.0, 3: 1.0, 4: 1.0}    # знаковое соглашение столбцов mat_* (как в ядре)
 MOMENT_COLOR = {"B": "#1f4e79", "Bv": "#5b9bd5", "G": "#c0392b", "Gv": "#e07b6a",
-                "S": "#4a9d5f", "O": "#e8a33d"}
+                "S": "#4a9d5f", "Sv": "#8fc79a", "O": "#e8a33d"}
+MOMENT_TITLE = {"B": "B норм.", "Bv": "B скош.", "G": "G норм.", "Gv": "G скош.",
+                "S": "S норм.", "Sv": "S скош.", "O": "O норм."}
+SYM_BY_ORDER = {(1, 0): "B", (1, 1): "Bv", (2, 0): "G", (2, 1): "Gv", (3, 0): "S", (3, 1): "Sv",
+                (4, 0): "O"}
 ELEMENTS = ("QP_sh", "QP_L", "SP", "OP", "DQ", "corrector")   # элементы, у которых есть карты полей
 # Моменты, рассматриваемые у элементов данного вида. У диполя-квадруполя это B, G и S: секступоль
 # там несущий (через feed-down он и объясняет связь G с током), а октуполь в модель не входит.
-KIND_MOMENTS = {"dq": ("B", "G", "S")}
+# Корректор описан шестью коэффициентами: B, G, S и они же скошенные, — их и показывают кривые.
+KIND_MOMENTS = {"dq": ("B", "G", "S"), "kicker": ("B", "Bv", "G", "Gv", "S", "Sv")}
 
 PROBE_SCAN = (1e-3, 3e-3, 5e-3, 8e-3, 11e-3, 14e-3)   # карты все ±50 мм, 14 мм внутри хорошего поля
 PLOT_RADIUS = {1: 1e-3, 2: 5e-3, 3: 8e-3, 4: 14e-3}
@@ -598,7 +610,8 @@ def model_curves(el, kind, label, moments, pts, turns, ef, L, kappa=1.0):
     import saturation_solve as ss
     wkey = "I1" if kind in SINGLE_KINDS else label
     have = {"quad": ("G",), "sext": ("S",), "oct": ("O",),
-            "dq": ("B", "G", "S"), "kicker": ("B", "Bv", "G", "Gv", "S")}.get(kind, ())
+            "dq": ("B", "G", "S"),
+            "kicker": ("B", "Bv", "G", "Gv", "S", "Sv")}.get(kind, ())
     xs = np.array([p[0] for p in pts]) / (turns or 1)
     grid = np.linspace(0.0, float(xs.max()) * 1.02, 80)
     out = {}
@@ -619,8 +632,7 @@ def model_curves(el, kind, label, moments, pts, turns, ef, L, kappa=1.0):
             # κ переносит предсказание модели (она живёт на исходных картах) на длину исполнения;
             # там, где синтез длины не применялся, κ = 1.
             out[mp] = (grid, np.array(
-                [kappa * ss.graph_moment(el, {wkey: float(I)}, n, comp,
-                                         mat_sign=False)[1] / (L * ef)
+                [kappa * ss.graph_moment(el, {wkey: float(I)}, n, comp)[1] / (L * ef)
                  for I in grid]))
         except Exception:
             continue
@@ -685,6 +697,133 @@ def plot_winding(m, label, pts, turns, L, moments, design, cur, ef, outdir, mode
     fig.subplots_adjust(top=0.90)
     os.makedirs(outdir, exist_ok=True)
     png = os.path.join(outdir, f"{m['name']}_{label}.png")
+    fig.savefig(png, dpi=150)
+    plt.close(fig)
+    return png
+
+
+def plot_grid(m, labels, pts_by_w, turns_by_w, L, moments, design, cur, ef, outdir, models):
+    """Кривые многообмоточного магнита сеткой: строка — момент, столбец — обмотка.
+
+    Шесть моментов на одном поле требуют шести осей с разными масштабами, и кривые сливаются.
+    В сетке у каждой пары «момент — обмотка» своя клетка со своим масштабом, и видно, где модель
+    расходится с картами, а где точки просто шумят."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    col = "#1f4e79"
+    nr, nc = len(moments), len(labels)
+    fig, axs = plt.subplots(nr, nc, figsize=(3.3 * nc, 2.05 * nr), squeeze=False, sharex="col")
+    hl = hp = None
+    for j, lb in enumerate(labels):
+        pts, turns = pts_by_w.get(lb), turns_by_w.get(lb) or 1
+        for i, mp in enumerate(moments):
+            a = axs[i][j]
+            if pts:
+                n, comp = MOMENT[mp]
+                # Физический коэффициент = интеграл момента, делённый на длину, в знаковом
+                # соглашении mat_*: в нём же считает решатель и заданы проектные значения.
+                x = np.array([q[0] for q in pts]) / turns
+                y = MAT_SIGN[n] * ef * np.array([to_coef(q[1][n][comp], mp, L, ef) for q in pts])
+                hp = a.plot(x, y, "o", color=col, ms=4, mec="white", mew=0.5, zorder=3)[0]
+                mod = (models.get(lb) or {}).get(mp)
+                if mod is not None:
+                    hl = a.plot(mod[0], ef * np.asarray(mod[1]), "-", color=col, lw=1.6,
+                                zorder=2)[0]
+            # Проектный коэффициент магнит набирает ВСЕМИ обмотками сразу, а клетка показывает
+            # отклик одной при обнулённых прочих. Проектное значение коэффициента на эту кривую не
+            # ложится, поэтому его тут нет: обмотке принадлежит только её проектный ток.
+            if cur.get(lb) is not None and abs(cur[lb]) > 1e-9:
+                a.axvline(abs(cur[lb]), color="#c0392b", lw=1.0, ls="--", alpha=0.8, zorder=1)
+                if i == 0:
+                    a.annotate(f"проектный {abs(cur[lb]):.0f} А", xy=(abs(cur[lb]), 0.04),
+                               xycoords=("data", "axes fraction"), fontsize=7.5, color="#c0392b",
+                               ha="left", va="bottom",
+                               bbox=dict(fc="white", ec="none", alpha=0.85, pad=1.0))
+            a.axhline(0.0, color="#999", lw=0.7, zorder=0)
+            a.tick_params(labelsize=7.5)
+            a.grid(alpha=0.2)
+            if j == 0:
+                a.set_ylabel(f"{MOMENT_TITLE[mp]}, {COEF_UNITS[mp]}", fontsize=8.5)
+            if i == 0:
+                a.set_title(f"обмотка {lb}  ({turns_by_w.get(lb)} витк.)", fontsize=9)
+            if i == nr - 1:
+                a.set_xlabel("ток, А", fontsize=8.5)
+    fig.suptitle(f"{m['name']}: " + ", ".join(MOMENT_TITLE[mp] for mp in moments)
+                 + " от тока каждой обмотки", fontsize=11)
+    if hl is not None and hp is not None:
+        fig.legend([hl, hp], ["модель", "карты"], loc="lower center", ncol=2, frameon=False,
+                   fontsize=9.5)
+    fig.tight_layout(rect=(0, 0.035, 1, 0.975))
+    os.makedirs(outdir, exist_ok=True)
+    png = os.path.join(outdir, f"{m['name']}_grid.png")
+    fig.savefig(png, dpi=150)
+    plt.close(fig)
+    return png
+
+
+def plot_combos(el, name, outdir):
+    """Предсказано против измеренного на КОМБИНАЦИЯХ токов: переносится ли модель с одной обмотки.
+
+    Одиночные карты и часть комбинаций (split=train) — то, на чём модель подогнана; комбинации
+    split=test она не видела, и по ним считается ошибка в заголовке. Если красные точки лежат на
+    той же диагонали, что серые, модель обобщается на совместное возбуждение обмоток."""
+    import math
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import branch_network as bn
+    import coupling_model as cm
+    import saturation_solve as ss
+
+    leff = float(ss._row(el)["leff"])
+    parts = (0, 1) if el == "corrector" else (0,)
+    cols = [(n, c) for n in (1, 2, 3) for c in parts]
+
+    def phys(n, z, comp):
+        part = z.real if comp else z.imag
+        return ss.MAT_SIGN[n] * math.factorial(n - 1) / ss.R_PROBE ** (n - 1) * part / leff
+
+    fig, axs = plt.subplots(1, len(cols), figsize=(3.05 * len(cols), 4.0), squeeze=False)
+    handles = {}
+    for k, (n, comp) in enumerate(cols):
+        a = axs[0][k]
+        maps = bn.read_maps(el, n)
+        groups = (("одиночные (подгонка)", "#9aa0a6", 4.5,
+                   [t for t in maps if len(t[0]) == 1]),
+                  ("комбинации в подгонке", "#e8a33d", 5.0,
+                   [t for t in maps if len(t[0]) > 1 and t[2] == "train"]),
+                  ("комбинации отложенные (проверка)", "#c0392b", 5.5,
+                   [t for t in maps if len(t[0]) > 1 and t[2] != "train"]))
+        err = float("nan")
+        for lbl, colr, msz, grp in groups:
+            if not grp:
+                continue
+            x = np.array([phys(n, complex(m), comp) for c, m, _, _ in grp])
+            y = np.array([phys(n, cm.predict(el, n, c), comp) for c, m, _, _ in grp])
+            handles[lbl] = a.plot(x, y, "o", color=colr, ms=msz, mec="white", mew=0.5,
+                                  zorder=4 if "отложен" in lbl else 2)[0]
+            if "отложен" in lbl:
+                den = float(np.sum(np.abs(x)))
+                err = 100 * float(np.sum(np.abs(y - x))) / den if den else float("nan")
+        lim = max(abs(v) for v in list(a.get_xlim()) + list(a.get_ylim()))
+        a.plot([-lim, lim], [-lim, lim], "-", color="#333", lw=0.9, zorder=1)
+        a.set_xlim(-lim, lim)
+        a.set_ylim(-lim, lim)
+        a.set_aspect("equal")
+        a.grid(alpha=0.25)
+        a.tick_params(labelsize=7)
+        a.set_title(f"{MOMENT_TITLE[SYM_BY_ORDER[(n, comp)]]}\nпроверка: {err:.1f}%", fontsize=9.5)
+        a.set_xlabel(f"измерено, {COEF_UNITS[SYM_BY_ORDER[(n, comp)]]}", fontsize=8.5)
+        if k == 0:
+            a.set_ylabel("предсказано", fontsize=8.5)
+    fig.suptitle(f"{name}: перенос модели на комбинации токов", fontsize=11.5)
+    if handles:
+        fig.legend(list(handles.values()), list(handles), loc="lower center", ncol=3,
+                   frameon=False, fontsize=9, bbox_to_anchor=(0.5, 0.005))
+    fig.tight_layout(rect=(0, 0.10, 1, 0.94))
+    os.makedirs(outdir, exist_ok=True)
+    png = os.path.join(outdir, f"{name}_combos.png")
     fig.savefig(png, dpi=150)
     plt.close(fig)
     return png
@@ -889,7 +1028,32 @@ def build(out=OUT, src=SRC, figs=PNG):
         # Кривые физкоэффициентов от тока (у всех элементов с картами; corrector — только они).
         add(doc.add_paragraph(f"Кривые физкоэффициентов {m['name']} от тока обмоток "
                               f"(по трёхмерным картам поля; линии — модель, точки — измерения)")._p)
-        for j, lb in enumerate(m["labels"]):
+        if kind in ("dq", "kicker"):        # сетка «момент × обмотка»: шесть кривых на одном
+            moments = [mp for mp in MOMENT if mp in allow]      # поле сливаются в кашу
+            turns_by_w = {lb: ec.dev_tpc(m["devs"][j]) for j, lb in enumerate(m["labels"])}
+            models = {lb: model_curves(el, kind, lb, moments,
+                                       pts_by_w.get(lb) or [], turns_by_w.get(lb),
+                                       ec.ENERGY_FACTOR, L_shown, kappa.get(lb, 1.0))
+                      for lb in m["labels"] if pts_by_w.get(lb)}
+            png = plot_grid(m, m["labels"], pts_by_w, turns_by_w, L_shown, moments, design,
+                            cur, ec.ENERGY_FACTOR, figs, models)
+            pic = doc.add_paragraph()
+            pic.add_run().add_picture(png, width=Inches(6.5))
+            add(pic._p)
+            try:
+                cpng = plot_combos(el, m["name"], figs)
+            except Exception as exc:
+                print(f"  {m['name']}: картинка комбинаций не построена ({exc})")
+            else:
+                add(doc.add_paragraph(
+                    "Проверка переноса на комбинации токов. Модель подогнана на одиночных картах и "
+                    "части комбинаций; отложенные комбинации в подгонке не участвовали, по ним и "
+                    "считается ошибка в заголовках.")._p)
+                pic = doc.add_paragraph()
+                pic.add_run().add_picture(cpng, width=Inches(6.5))
+                add(pic._p)
+        # Однообмоточные остаются по картинке на обмотку: там момент один и оси не конкурируют.
+        for j, lb in enumerate([] if kind in ("dq", "kicker") else m["labels"]):
             pts = pts_by_w.get(lb) or pts_by_w.get("I1" if lb == "I" else "I")
             nat = native.get(lb) or native.get("I1" if lb == "I" else "I")
             if not pts or not nat:
