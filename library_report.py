@@ -381,10 +381,13 @@ def _g_design(design, mp, ef):
     return design[mp] * ef / math.factorial(n - 1)
 
 
-def sat_currents_solve(el, kind, m, design, ec):
-    """Проектные токи С УЧЁТОМ НАСЫЩЕНИЯ через модель saturation_solve (то же уравнение, что в
-    формуле). Возврат {обмотка: ток, А}. Токи обмоток, которые модель не описывает (тримы), берутся
-    линейными — на малом токе насыщения нет, и разницы с моделью там тоже нет."""
+def sat_currents_solve(el, kind, m, design, ec, pts_by_w=None, L=None):
+    """Проектные токи С УЧЁТОМ НАСЫЩЕНИЯ. Возврат {обмотка: ток, А}.
+
+    Однообмоточные считаются граф-моделью с утечкой, подогнанной на картах ЭТОГО исполнения
+    (`single_current`) — той же, что рисует линию на графике. Многообмоточные — графом магнитной
+    цепи через `saturation_solve`. Токи обмоток, которые модель не описывает (тримы), берутся
+    линейными: на малом токе насыщения нет, и разницы с моделью там тоже нет."""
     import saturation_solve as ss
     ef = ec.ENERGY_FACTOR
     tpc = [ec.dev_tpc(d) or 1 for d in m["devs"]]
@@ -410,31 +413,53 @@ def sat_currents_solve(el, kind, m, design, ec):
         if lead not in design or abs(design[lead]) < 1e-30:
             return lin
         w0 = m["labels"][0]
-        tgt = signed(el, {w0: lin[w0]}, [lead])
-        Imain = next(iter(ss.inverse(el, {lead: tgt[lead]}).values()))
+        n = MOMENT[lead][0]
+        pts = (pts_by_w or {}).get(w0) or (pts_by_w or {}).get("I1") or (pts_by_w or {}).get("I")
+        if not pts or not L:
+            return lin
+        y_design = _g_design(design, lead, ef) * L          # проектный интеграл момента
         out = dict(lin)
-        out[w0] = Imain                            # первая обмотка — несущая коэффициент
+        out[w0] = single_current(el, L, pts, n, y_design,
+                                 ec.dev_tpc(m["devs"][0]) or 1,
+                                 lin[w0] if lin[w0] else 1.0, w0)
         return out
     except Exception:
         return lin
 
 
-def formula_paragraph(doc, el, kind, sm_row, lo):
-    """Формула однообмоточного расчёта с подобранными параметрами элемента (нативная формула Word)."""
+def formula_paragraph(doc, el, kind, par, L, lo):
+    """Модель насыщения элемента с подобранными числами — граф магнитной цепи с утечкой.
+
+    Та же модель, что рисует линию на графике и даёт проектный ток: последовательные ветви (ярмо и
+    участки полюс–ярмо) плюс утечка, шунтирующая катушку. Параметры подобраны на картах поля этого
+    исполнения."""
+    import single_winding_model as sw
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     lead = LEAD_MOMENT[kind]
+    v = np.exp(np.asarray(par, float))
+    lp, Sp, Rg, P = v[0], v[1], v[2], v[3]
+    terms = []
+    for k in range(_ns(par)):
+        mult = sw.SERIES_MULT[k] if k < len(sw.SERIES_MULT) else 1.0
+        pre = "" if mult == 1.0 else "%g " % mult
+        terms.append(r"%s%.4g H\left(\frac{y}{%.4g}\right)" % (pre, v[4 + 2 * k], v[5 + 2 * k]))
+
     doc.add_paragraph(
-        f"Модель насыщения (подобранные параметры): возбуждение обмотки связано с "
-        f"физкоэффициентом {lead} уравнением магнитной цепи")
-    a, c, l = float(sm_row["a_g"]), float(sm_row["c_g"]), float(sm_row["l"])
-    p = doc.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    lo.add_formula(p, r"NI = %.4g\cdot %s + %.4g\cdot H(%.4g\cdot %s)"
-                   % (a, lead, l, c, lead))
+        f"Модель насыщения: ампер-витки обмотки связаны с интегралом момента y = ∫{lead}·dl "
+        f"уравнениями магнитной цепи (ярмо, участки полюс–ярмо, зазор и утечка, шунтирующая "
+        f"катушку); подобранные параметры подставлены.")
+    for tex in (r"Q(y) = %.4g y + %s" % (Rg, " + ".join(terms)),
+                r"p(y) = y + %.4g Q(y)" % (0.5 * P),
+                r"NI = %.4g H\left(\frac{p(y)}{%.4g}\right) + \frac{Q(y)}{2}" % (lp, Sp)):
+        q = doc.add_paragraph()
+        q.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        lo.add_formula(q, tex)
     doc.add_paragraph(
-        f"здесь {lead} — физкоэффициент (Тл/м, Тл/м², Тл/м³), H(·) — обратная кривая "
-        f"намагничивания стали; NI = N·I — ампер-витки. Проектный ток получается обращением этого "
-        f"уравнения под проектный {lead} и делением на число витков N.")
+        f"здесь y = ∫{lead}·dl — интеграл момента вдоль элемента (физкоэффициент "
+        f"{lead} = y/lэф, lэф = {L:.4g} м), Q(y) — сумма магнитных напряжений "
+        f"на последовательных ветвях и зазоре, p(y) — поток полюса (полезный плюс утечка), H(·) — "
+        f"обратная кривая намагничивания стали, NI = N·I — ампер-витки. Проектный ток получается "
+        f"обращением этой цепочки под проектный {lead} и делением на число витков N.")
 
 
 def to_coef(value, moment, L, ef):
@@ -446,14 +471,112 @@ def to_coef(value, moment, L, ef):
     return value * math.factorial(MOMENT[moment][0] - 1) / (L * ef)
 
 
-def plot_winding(m, label, pts, turns, L, moments, design, cur, ef, outdir):
+_HOF = None
+_GRAPH = {}
+
+
+def _hof():
+    import single_winding_model as sw
+    global _HOF
+    if _HOF is None:
+        _HOF = sw.material(os.path.join("workspace", "materials", "steel_1008_bh.csv"))
+    return _HOF
+
+
+def _ns(par):
+    """Сколько последовательных классов ветвей в подобранном графе: par = [ℓп, Sп, Rз, P, (ℓ, S)…].
+
+    Подгонка вложенная по числу участков и может остановиться на меньшем, если оно не хуже, —
+    поэтому число берётся из самого вектора, а не задаётся снаружи."""
+    return (len(par) - 4) // 2
+
+
+def single_graph_fit(el, L, pts, order, tag=""):
+    """Граф-модель с утечкой (single_winding_model) на картах ЭТОГО исполнения: (par, y_max).
+
+    Именно эта модель строилась для однообмоточных магнитов: сердечник + катушка + утечка + участки
+    полюс–ярмо. Подгоняется на синтетических картах конкретной длины, поэтому масштаб по длине не
+    экстраполируется, а берётся из самих карт исполнения."""
+    import single_winding_model as sw
+    key = (el, round(float(L), 4), order, tag)    # обмотка в ключе: у SP их две, цепи разные
+    if key in _GRAPH:
+        return _GRAPH[key]
+    ni = np.array([p[0] for p in pts], float)
+    y = np.array([abs(p[1][order][0]) for p in pts], float)
+    o = np.argsort(ni)
+    ni, y = ni[o], y[o]
+    good = ni > 0
+    par, _ = sw.best_fit(ni[good], y[good], _hof(), nseries=2, tries=3, seeds=40)
+    _GRAPH[key] = (par, float(y.max()))
+    return _GRAPH[key]
+
+
+def single_current(el, L, pts, order, y_design, tpc, sign, tag=""):
+    """Проектный ток однообмоточного магнита: обращение граф-модели NI(y) при проектном кике y."""
+    import single_winding_model as sw
+    par, _ = single_graph_fit(el, L, pts, order, tag)
+    ni = float(sw.graph_mmf(par, np.array([abs(y_design)]), _hof(), _ns(par))[0])
+    return math.copysign(ni / (tpc or 1), sign)
+
+
+def single_model_curve(el, L, pts, order, tpc, ef, tag=""):
+    """Кривая граф-модели для показа: (ток_А, значение_в_шкале_графика) свипом по кику y."""
+    import single_winding_model as sw
+    par, ymax = single_graph_fit(el, L, pts, order, tag)
+    yg = np.linspace(0.0, ymax * 1.05, 400)
+    ni = sw.graph_mmf(par, yg, _hof(), _ns(par))
+    x = ni / (tpc or 1)
+    yv = yg * math.factorial(order - 1) / (L * ef)          # то же, что to_coef
+    # На полке ток растёт быстрее любой полезной шкалы: за пределами снятых карт линия только
+    # растянула бы ось, поэтому обрезаем её по измеренному диапазону тока.
+    xmax = max(p[0] for p in pts) / (tpc or 1) * 1.05
+    k = x <= xmax
+    return x[k], yv[k]
+
+
+def model_curves(el, kind, label, moments, pts, turns, ef, L):
+    """Кривые МОДЕЛИ насыщения для показываемых моментов: {момент: (ток_А, значение_в_шкале_графика)}.
+
+    Модель считает физкоэффициент g (Тл/м …); шкала графика — та же, что у измерений (`to_coef`),
+    в ней значение равно g·(n−1)!/EF (длина сокращается). Обмотку однообмоточного элемента модель
+    знает как I1, у многообмоточных метка совпадает."""
+    import saturation_solve as ss
+    wkey = "I1" if kind in SINGLE_KINDS else label
+    have = {"quad": ("G",), "sext": ("S",), "oct": ("O",),
+            "dq": ("B", "G", "S"), "kicker": ("B", "G", "S")}.get(kind, ())
+    xs = np.array([p[0] for p in pts]) / (turns or 1)
+    grid = np.linspace(0.0, float(xs.max()) * 1.02, 80)
+    out = {}
+    for mp in moments:
+        if mp not in have or MOMENT[mp][1] != 0:            # модель даёт нормальные компоненты
+            continue
+        n, comp = MOMENT[mp]
+        if kind in SINGLE_KINDS:
+            # Однообмоточные: граф-модель с утечкой, подогнанная на картах ЭТОГО исполнения.
+            try:
+                out[mp] = single_model_curve(el, L, pts, n, turns, ef, label)
+            except Exception:
+                pass
+            continue
+        try:
+            out[mp] = (grid, np.array(
+                [ss.forward(el, {wkey: float(I)})[mp][0] * math.factorial(n - 1) / ef
+                 for I in grid]))
+        except Exception:
+            continue
+    return out
+
+
+def plot_winding(m, label, pts, turns, L, moments, design, cur, ef, outdir, model=None):
     """Кривая намагниченности обмотки: физкоэффициенты в зависимости от тока питания.
 
+    Линия — модель насыщения (`model`: {момент: (ток_А, значение)}), точки — измерения по картам.
     Проектная точка обозначена линиями: горизонталь — проектный физкоэффициент из .lte, вертикаль —
     проектный ток обмотки с учётом насыщения, ромб — их пересечение."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    model = model or {}
     x = np.array([p[0] for p in pts]) / (turns or 1)
     cb = float(np.mean([p[2] for p in pts]))
     fig, ax = plt.subplots(figsize=(9.0, 5.2))
@@ -462,7 +585,10 @@ def plot_winding(m, label, pts, turns, L, moments, design, cur, ef, outdir):
         n, comp = MOMENT[mp]
         a, col = axes[mp], MOMENT_COLOR[mp]
         y = np.array([to_coef(p[1][n][comp], mp, L, ef) for p in pts])
-        a.plot(x, y, "-o", color=col, ms=4.5, lw=1.6, zorder=3)
+        a.plot(x, y, "o", color=col, ms=5, mec="white", mew=0.7, zorder=3)   # измерения — точки
+        if mp in model:                                                       # модель — линия
+            mx, my = model[mp]
+            a.plot(mx, my, "-", color=col, lw=1.8, zorder=2)
         a.set_ylabel(mp, color=col, fontsize=10)
         a.tick_params(axis="y", labelcolor=col, labelsize=8)
         if k > 1:
@@ -609,7 +735,7 @@ def build(out=OUT, src=SRC, figs=PNG):
         native = element_spectra(el)
         allow = KIND_MOMENTS.get(kind, tuple(MOMENT))
         design = ec._design_ivec(m)[2]
-        cur = sat_currents_solve(el, kind, m, design, ec)
+        cur = sat_currents_solve(el, kind, m, design, ec, pts_by_w, L)
 
         new = []
 
@@ -629,16 +755,27 @@ def build(out=OUT, src=SRC, figs=PNG):
                      and (MOMENT[mp][1] == 0 or mp in m["outputs"])]
             if not shown:
                 continue
-            png = plot_winding(m, lb, pts, ec.dev_tpc(m["devs"][j]), L, shown,
-                               design, cur.get(lb), ec.ENERGY_FACTOR, figs)
+            tpc = ec.dev_tpc(m["devs"][j])
+            model = model_curves(el, kind, lb, shown, pts, tpc, ec.ENERGY_FACTOR, L)
+            png = plot_winding(m, lb, pts, tpc, L, shown, design, cur.get(lb),
+                               ec.ENERGY_FACTOR, figs, model=model)
             pic = doc.add_paragraph()
             pic.add_run().add_picture(png, width=Inches(6.3))
             add(pic._p)
 
         # Формула модели — только у однообмоточных (квадруполь, секступоль, октуполь).
-        if kind in SINGLE_KINDS and el in sm and sm[el]["model"] == "single":
+        par_lead = None
+        if kind in SINGLE_KINDS:
+            w0 = m["labels"][0]
+            pts0 = pts_by_w.get(w0) or pts_by_w.get("I1") or pts_by_w.get("I")
+            if pts0:
+                try:
+                    par_lead = single_graph_fit(el, L, pts0, MOMENT[LEAD_MOMENT[kind]][0], w0)[0]
+                except Exception:
+                    par_lead = None
+        if par_lead is not None:
             marker = doc.add_paragraph()._p            # сдвиг: docx кладёт абзацы в конец, переносим
-            formula_paragraph(doc, el, kind, sm[el], lo)
+            formula_paragraph(doc, el, kind, par_lead, L, lo)
             body = doc.paragraphs
             i0 = body.index(next(p for p in body if p._p is marker))
             for p in body[i0 + 1:]:

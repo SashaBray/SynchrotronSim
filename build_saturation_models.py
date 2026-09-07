@@ -1,31 +1,33 @@
 # -*- coding: utf-8 -*-
 """Сборка параметров моделей насыщения ВСЕХ железных электромагнитов в одну таблицу БД.
 
-Модель насыщения даёт связь «ток обмотки ↔ физкоэффициент» с учётом насыщения железа. Физкоэф
-(G, S, O …) зависит от сечения и ампер-витков, но НЕ от длины магнита, поэтому ядро модели одно на
-элемент, а эффективная длина и число витков берутся у конкретного исполнения из `hardware_library`.
-Так одна модель покрывает элемент и все его исполнения (длины).
+Модель насыщения даёт связь «ток обмотки ↔ физкоэффициент» с учётом насыщения железа. Две формы
+ядра:
 
-Две формы ядра:
-
-  однообмоточные (QP_sh, QP_L, SP, OP) — скалярное уравнение в шкале ФИЗКОЭФФИЦИЕНТА
-      NI = a·g + l·H(c·g),      g — физкоэффициент, H(·) — обратная кривая намагничивания;
-      параметры a, c, l от длины не зависят (сняты на базовом исполнении).
+  однообмоточные (QP_sh, QP_L, SP, OP) — граф магнитной цепи с утечкой (`single_winding_model`):
+      Q(y) = Rз·y + Σₖ mₖ·ℓₖ·H(y/Sₖ),   p(y) = y + (P/2)·Q(y),   NI = ℓп·H(p/Sп) + Q(y)/2,
+      где y = ∫коэф·dl — интеграл ведущего момента, H(·) — обратная кривая намагничивания.
+      Параметры подбираются НА КАРТАХ КАЖДОГО ИСПОЛНЕНИЯ (карты снятой длины пересчитываются на
+      длину исполнения синтезом): растяжение магнита меняет соотношение железа и утечки, поэтому
+      на полке одна и та же модель на разные длины не переносится.
 
   многообмоточные (DQ, corrector) — граф магнитной цепи (`saturation_branches`) плюс матрица
       связи «потоки → кик» (`mec_sigma_weights`); физкоэф считается моделью `coupling_model`.
 
-Таблица `saturation_models.csv` хранит всё, что нужно для прямой и обратной задачи, ссылаясь на
-`hardware_library` за l_eff и N исполнения. Постоянные магниты (DP) и внешние s2_* сюда не входят:
-у первых нет тока управления, у вторых нет свипа по току.
+Таблица `saturation_models.csv` хранит по строке на исполнение и обмотку: вектор параметров графа
+(в логарифмах, как их держит `single_winding_model`), число последовательных классов ветвей и
+эффективную длину, при которой подгонка сделана. Строка с пустым `device` — базовая, на снятых
+картах: её берут, когда исполнение не указано. Постоянные магниты (DP) и внешние s2_* сюда не
+входят: у первых нет тока управления, у вторых нет свипа по току.
 
     py -3.14 build_saturation_models.py
+    py -3.14 build_saturation_models.py --only QP_sh
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import io
-import math
 import os
 import sys
 
@@ -34,20 +36,90 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 OUT = os.path.join("workspace", "tables", "saturation_models.csv")
-FITS = os.path.join("workspace", "materials", "saturation_fits.csv")
-SINGLE = {"QP_sh": ("G", "int_G"), "QP_L": ("G", "int_G"),
-          "SP": ("S", "int_S"), "OP": ("O", "int_O")}
+HWLIB = os.path.join("workspace", "tables", "hardware_library.csv")
+SINGLE = {"QP_sh": "G", "QP_L": "G", "SP": "S", "OP": "O"}
 MULTI = ("DQ", "corrector")
-R_PROBE = 8e-3
+ORDER = {"B": 1, "G": 2, "S": 3, "O": 4}
 
 
-def _material_H():
-    import saturation_model as sm
-    Hof = sm._material()
-    return lambda b: float(np.atleast_1d(Hof(b))[0])
+def _devices(element, windings):
+    """Исполнения элемента: [(device_type_id, обмотка, l_eff)] — только те, где задано число витков.
+
+    Число витков есть у исполнений, стоящих в решётке; строки-прототипы (без витков) описывают
+    снятые карты и в таблицу исполнений не идут — для них пишется базовая строка. Имя обмотки
+    берётся из идентификатора исполнения, а у однообмоточных — единственное имя из реестра карт
+    (в идентификаторе его нет)."""
+    import re
+    out = []
+    for r in csv.DictReader(io.open(HWLIB, encoding="utf-8-sig"), delimiter=";"):
+        d = r["device_type_id"]
+        if not d.startswith(element + "_"):
+            continue
+        if not (r.get("turns_per_coil") or "").strip() or not (r.get("eff_length") or "").strip():
+            continue
+        m = re.search(r"_(I\d+|c\d+|main)_", d)
+        w = m.group(1) if m and m.group(1) in windings else (
+            windings[0] if len(windings) == 1 else None)
+        if w is None:
+            print(f"  {d}: обмотка не опознана — пропуск")
+            continue
+        out.append((d, w, float(r["eff_length"])))
+    return out
 
 
-def _leff(element):
+def _base(element):
+    """Снятые карты элемента: ({обмотка: (ампер-витки, интеграл момента)}, длина отнесения)."""
+    import single_winding_model as sw
+    ser, _ = sw.series(element)
+    return ser, sw.coef_scale(element)[1]
+
+
+def _variant_series(element, winding, L, order):
+    """Карты исполнения длины L: (ампер-витки, интеграл момента) синтезом из снятых карт."""
+    import library_report as lr
+    pts = lr.variant_kicks(element, L, order).get(winding)
+    if not pts:
+        return None
+    ni = np.array([p[0] for p in pts], float)
+    y = np.array([abs(p[1][order][0]) for p in pts], float)
+    o = np.argsort(ni)
+    return ni[o], y[o]
+
+
+def _fit(ni, y):
+    """Подгонка графа с утечкой: (вектор параметров, СКО по току %)."""
+    import single_winding_model as sw
+    Hof = sw.material(os.path.join("workspace", "materials", "steel_1008_bh.csv"))
+    good = ni > 0
+    return sw.best_fit(ni[good], y[good], Hof, nseries=2, tries=3, seeds=40)
+
+
+def single_rows(element, sym):
+    """Строки таблицы для однообмоточного элемента: базовая плюс по строке на исполнение."""
+    order = ORDER[sym]
+    rows, seen = [], set()
+    base, Lb = _base(element)
+    for winding in sorted(base):
+        par, err = _fit(*base[winding])
+        rows.append([element, "", winding, "single_graph", sym,
+                     " ".join(f"{v:.10g}" for v in par), (len(par) - 4) // 2,
+                     f"{Lb:.6g}", f"{err:.2f}", "граф с утечкой на снятых картах"])
+    for dev, winding, L in _devices(element, sorted(base)):
+        if (winding, round(L, 6)) in seen:
+            continue
+        seen.add((winding, round(L, 6)))
+        ser = _variant_series(element, winding, L, order)
+        if ser is None:
+            print(f"  {dev}: нет карт обмотки {winding} — пропуск")
+            continue
+        par, err = _fit(*ser)
+        rows.append([element, dev, winding, "single_graph", sym,
+                     " ".join(f"{v:.10g}" for v in par), (len(par) - 4) // 2,
+                     f"{L:.6g}", f"{err:.2f}", "граф с утечкой на картах исполнения"])
+    return rows
+
+
+def _leff_ref(element):
     import json
     import saturation_model as sm
     recs = json.load(open(os.path.join(sm.OUTDIR, f"{element}.json"), encoding="utf-8"))["records"]
@@ -55,42 +127,28 @@ def _leff(element):
     return sum(xs) / len(xs)
 
 
-def single_params(element, coef_col):
-    """Параметры однообмоточного ядра в шкале ФИЗКОЭФФИЦИЕНТА: a_g, c_g, l, плюс l_eff базы.
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--only", help="пересобрать только этот элемент, остальные строки сохранить")
+    a = ap.parse_args(argv)
 
-    Из `saturation_fits` берём фит на интеграле y=∫coef·dl (c, l, A_over_naive), множитель a
-    восстанавливаем по контрольной точке при малом токе. Переводим в шкалу g = y/l_eff:
-        a_g = a·l_eff,  c_g = c·l_eff,  l = l (длина железа в уравнении неизменна)."""
-    fit = {r["section"]: r for r in csv.DictReader(
-        (l for l in io.open(FITS, encoding="utf-8-sig") if not l.startswith("#")), delimiter=";")}
-    q = fit[element]
-    C, L, aon = float(q["C"]), float(q["L_m"]), float(q["A_over_naive"])
-    allrows = list(csv.DictReader(io.open(os.path.join("workspace", "datasets", "currents_to_kicks",
-                   f"{element}.csv"), encoding="utf-8-sig"), delimiter=";"))
-    atcols = [c for c in allrows[0] if c.startswith("AT_")]
-    # У секступоля две обмотки: контрольную точку берём ТОЛЬКО по картам несущей обмотки (первый
-    # столбец AT_*), где остальные обмотки обесточены, иначе y0 берётся у чужой карты и a ломается.
-    lead = atcols[0]
-    single = [r for r in allrows if float(r[lead]) != 0
-              and all(float(r[c]) == 0 for c in atcols if c != lead)]
-    rows = sorted(single, key=lambda r: abs(float(r[lead])))
-    ni0, y0 = abs(float(rows[0][lead])), abs(float(rows[0][coef_col]))
-    a = aon * ni0 / y0
-    leff = _leff(element)
-    return dict(a_g=a * leff, c_g=C * leff, l=L, leff_ref=leff, err=float(q["max_err_pct"]))
+    keep = []
+    if a.only and os.path.exists(OUT):
+        keep = [r for r in csv.reader(io.open(OUT, encoding="utf-8-sig"), delimiter=";")][1:]
+        keep = [r for r in keep if r and r[0] != a.only]
 
-
-def main():
-    head = ["element", "model", "coefficient", "a_g", "c_g", "l", "leff_ref", "fit_err_pct",
-            "note"]
-    out = []
-    for el, (sym, col) in SINGLE.items():
-        p = single_params(el, col)
-        out.append([el, "single", sym, f'{p["a_g"]:.6g}', f'{p["c_g"]:.6g}', f'{p["l"]:.6g}',
-                    f'{p["leff_ref"]:.6g}', f'{p["err"]:.2f}',
-                    "NI = a_g·g + l·H(c_g·g); g — физкоэф, длинонезависимо"])
+    head = ["element", "device", "winding", "model", "coefficient", "par", "nseries", "leff",
+            "fit_err_pct", "note"]
+    out = list(keep)
+    for el, sym in SINGLE.items():
+        if a.only and el != a.only:
+            continue
+        print(el)
+        out += single_rows(el, sym)
     for el in MULTI:
-        out.append([el, "graph", "B,G,S", "", "", "", f'{_leff(el):.6g}', "",
+        if a.only and el != a.only:
+            continue
+        out.append([el, "", "", "graph", "B,G,S", "", "", f"{_leff_ref(el):.6g}", "",
                     "граф saturation_branches + веса mec_sigma_weights; расчёт coupling_model"])
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with io.open(OUT, "w", encoding="utf-8", newline="") as f:
@@ -99,7 +157,8 @@ def main():
         w.writerows(out)
     print("параметры моделей ->", OUT)
     for r in out:
-        print("  ", r[0], r[1], r[2], "a_g=" + r[3], "c_g=" + r[4], "l=" + r[5], "l_eff=" + r[6])
+        print("  ", r[0], r[1] or "(база)", r[2], r[3], "l_eff=" + str(r[7]),
+              ("СКО " + r[8] + "%") if r[8] else "")
     return 0
 
 
