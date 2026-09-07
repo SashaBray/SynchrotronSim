@@ -191,15 +191,40 @@ def _dq_coef(kappa, n):
 
 
 def dq_example(currents_A=(("I1", 150.0), ("I2", 100.0), ("I3", 40.0))):
-    """Пример расчёта DQ: заданные токи → σ → B, G, S. Числа считаются моделью."""
+    """Развёрнутый расчёт DQ: вектор токов → матрицы M, A → система цепи → решение → W → B,G,S.
+
+    Все матрицы и векторы возвращаются с числами для главы 4; считаются моделью при сборке."""
     import numpy as np
     import branch_network as bn
     import coupling_model as cm
-    A = dict(currents_A)
-    NI = {k: A[k] * DQ_N[k] for k in A}
-    cir, _, _ = cm.train("DQ")
+
+    A_cur = dict(currents_A)
+    wnames = ["I1", "I2", "I3"]
+    NI = {k: A_cur[k] * DQ_N[k] for k in A_cur}
+    cir, W, cols = cm.train("DQ")
+    br, nd = cir.branches, cir.nodes
+
+    # матрица обмоток M (по несущим ветвям): M_bw = знак намотки · доля МДС
+    coils = sorted({b for brs in cir.coil_branches.values() for b in brs},
+                   key=lambda b: br.index(b))
+    M = {b: {w: cir.sense.get(w, 1.0) * cir.share.get((w, b), 0.0) for w in wnames}
+         for b in coils}
+    F = cir.mmf(NI)
+
+    # матрица инцидентности (граф): −1 у начала ребра, +1 у конца
+    inc = {b: {n: 0 for n in nd} for b in br}
+    for b in br:
+        a_, c_ = cir.edge[b]
+        inc[b][a_] -= 1
+        inc[b][c_] += 1
+
     lens, perms, secs = bn.unpack(np.zeros(1), cir)
-    phi, _ = cir.solve(NI, lens, perms, secs=secs)
+    phi, u = cir.solve(NI, lens, perms, secs=secs)
+    upot = {nd[0]: 0.0}
+    upot.update(dict(zip(nd[1:], u)))
+
+    ts, _ = cm.tips(cir)
+    q = {t: cir_q for t, cir_q in zip(ts, cm.features(cir, NI)[:len(ts)])}
     num = den = 0.0
     for x in cir.iron:
         S = secs.get(cir.sym[x], 1.0)
@@ -207,9 +232,14 @@ def dq_example(currents_A=(("I1", 150.0), ("I2", 100.0), ("I3", 40.0))):
         num += a * min(a / S / cir.Barr[-1], 1.0)
         den += a
     sigma = num / den if den else 0.0
-    coef = {n: _dq_coef(cm.predict("DQ", n, NI), n) for n in (1, 2, 3)}
-    return dict(A=A, N=DQ_N, NI=NI, sigma=sigma, leff=DQ_LEFF,
-                B=coef[1], G=coef[2], S=coef[3])
+
+    feat_labels = [f"q({t})" for t in ts] + [f"σ·q({t})" for t in ts]
+    kappa = {n: cm.predict("DQ", n, NI) for n in (1, 2, 3)}
+    coef = {n: _dq_coef(kappa[n], n) for n in (1, 2, 3)}
+    return dict(A=A_cur, N=DQ_N, NI=NI, wnames=wnames, coils=coils, M=M, F=F,
+                branches=br, nodes=nd, inc=inc, phi=phi, u=upot, tips=ts, q=q,
+                sigma=sigma, leff=DQ_LEFF, W=W, feat_labels=feat_labels,
+                kappa=kappa, B=coef[1], G=coef[2], S=coef[3])
 
 
 # ─────────────────────────────── разделы ────────────────────────────────
@@ -431,41 +461,71 @@ def _dq_figures(figdir):
 
 def ch_dq_example(doc, F, lo):
     dq = F["dq"]
+    W = dq["W"]
     doc.add_heading("4. Пример расчёта: диполь-квадруполь", level=1)
     doc.add_paragraph(
-        "Диполь-квадруполь несёт три обмотки и даёт три коэффициента — B, G, S. Здесь цепочка "
-        "раздела 2 пройдена с числами.")
-    doc.add_paragraph(
-        f"Дано: токи обмоток I1 = {dq['A']['I1']:.0f} А, I2 = {dq['A']['I2']:.0f} А, "
-        f"I3 = {dq['A']['I3']:.0f} А. Числа витков N1 = {dq['N']['I1']}, N2 = {dq['N']['I2']}, "
-        f"N3 = {dq['N']['I3']}; эффективная длина l_эфф = {dq['leff']:.4f} м.")
+        "Диполь-квадруполь несёт три обмотки и даёт три коэффициента B, G, S. Граф: 8 вершин и "
+        "17 ветвей (4 полюса, 3 участка ярма, 4 воздушных шунта полюсов, 6 зазоров между "
+        "наконечниками). Ниже цепочка раздела 2 пройдена с числами.")
+    graph, moments = F["dq_figs"]
+    _pic(doc, graph, 13.0, caption="Магнитный граф диполя-квадруполя")
 
-    doc.add_paragraph("Шаг 1. Возбуждение ветвей — токи через матрицу намотки:")
-    _formula(doc, r"\vec{F} = M\,\vec{I}", lo)
-    doc.add_paragraph(
-        f"ампер-витки обмоток: NI1 = {dq['NI']['I1']:.0f}, NI2 = {dq['NI']['I2']:.0f}, "
-        f"NI3 = {dq['NI']['I3']:.0f}.")
+    doc.add_paragraph("На входе — вектор токов обмоток (амперы) и его перевод в ампер-витки:")
+    _formula(doc, r"\vec{I} = (%.0f,\ %.0f,\ %.0f)^{\mathsf{T}}, \qquad "
+                  r"\vec{NI} = (%.0f,\ %.0f,\ %.0f)^{\mathsf{T}}"
+             % (dq["A"]["I1"], dq["A"]["I2"], dq["A"]["I3"],
+                dq["NI"]["I1"], dq["NI"]["I2"], dq["NI"]["I3"]), lo)
 
-    doc.add_paragraph("Шаг 2. Решение цепи методом Ньютона даёт потоки всех ветвей:")
-    _formula(doc, r"A\,\vec{\varphi}(\vec{u}) = 0", lo)
+    doc.add_heading("Матрица обмоток", level=2)
     doc.add_paragraph(
-        f"по потокам считается доля насыщения σ = {dq['sigma']:.2f} (железо на этом режиме "
-        "насыщено примерно наполовину).")
+        "МДС ветвей F = M·NI. Ненулевые строки M — только у ветвей с катушками (остальные 13 "
+        "нулевые); знак учитывает встречную намотку:")
+    rows = [[b] + [("0" if dq["M"][b][w] == 0 else f'{dq["M"][b][w]:+.0f}') for w in dq["wnames"]]
+            for b in dq["coils"]]
+    _table(doc, ["Ветвь"] + dq["wnames"], rows, caption="Матрица обмоток M (несущие ветви)")
+    doc.add_paragraph("Отсюда МДС на полюсах: "
+                      + ", ".join(f"F({b}) = {dq['F'][b]:+.0f}" for b in dq["coils"]) + " А·в.")
 
-    doc.add_paragraph("Шаг 3. Кик — свёртка потоков наконечников матрицей связи, затем перевод в "
-                      "коэффициенты:")
-    _formula(doc, r"\vec{k} = W^{\mathsf{T}}\begin{bmatrix}\vec{q}\\ \sigma\,\vec{q}\end{bmatrix}", lo)
-    _formula(doc, r"c_n = \varsigma_n\,\frac{(n-1)!}{r^{\,n-1}\,l_{\text{эфф}}}\;\kappa_n", lo)
-    doc.add_paragraph("Результат:")
+    doc.add_heading("Матрица графа", level=2)
+    doc.add_paragraph("Инцидентная матрица A связывает ветви с вершинами (−1 у начала ребра, "
+                      "+1 у конца):")
+    rows = [[b] + [("" if dq["inc"][b][n] == 0 else f'{dq["inc"][b][n]:+d}') for n in dq["nodes"]]
+            for b in dq["branches"]]
+    _table(doc, ["Ветвь"] + dq["nodes"], rows, caption="Матрица инцидентности A", pt=8)
+
+    doc.add_heading("Система цепи и её решение", level=2)
+    doc.add_paragraph("Напор, закон ветви и сохранение потока (раздел 2) дают нелинейную систему "
+                      "относительно потенциалов вершин:")
+    _formula(doc, r"A\,\vec{\varphi}\big(\vec{NI} - A^{\mathsf{T}}\vec{u}\big) = 0", lo)
+    doc.add_paragraph("Ньютон даёт потенциалы вершин (опорная n1 = 0, ампер-витки):")
+    _table(doc, list(dq["nodes"]), [[f'{dq["u"][n]:.0f}' for n in dq["nodes"]]],
+           caption="Решение: потенциалы вершин u", pt=8)
+    doc.add_paragraph("и потоки всех ветвей (микровебер):")
+    rows = [[b, f'{dq["phi"][b] * 1e6:.0f}'] for b in dq["branches"]]
+    half = (len(rows) + 1) // 2
+    merged = [rows[i] + (rows[i + half] if i + half < len(rows) else ["", ""])
+              for i in range(half)]
+    _table(doc, ["Ветвь", "φ, мкВб", "Ветвь", "φ, мкВб"], merged,
+           caption="Решение: потоки ветвей φ", pt=8)
+    doc.add_paragraph(f"По потокам железа доля насыщения σ = {dq['sigma']:.2f}.")
+
+    doc.add_heading("Матрица связи и итог", level=2)
+    doc.add_paragraph(
+        "Признаки — потоки наконечников q и их копия, взвешенная σ. Кик — свёртка их матрицей "
+        "связи, затем перевод в коэффициенты:")
+    _formula(doc, r"\vec{k} = W^{\mathsf{T}}\begin{bmatrix}\vec{q}\\ \sigma\,\vec{q}\end{bmatrix}, "
+                  r"\qquad c_n = \varsigma_n\,\frac{(n-1)!}{r^{\,n-1}\,l_{\text{эфф}}}\;\kappa_n", lo)
+    rows = [[dq["feat_labels"][i], f'{W[i][0]:.2f}', f'{W[i][1]:.2f}', f'{W[i][2]:.2f}']
+            for i in range(len(dq["feat_labels"]))]
+    _table(doc, ["Признак", "→ B", "→ G", "→ S"], rows,
+           caption="Матрица связи Wᵀ (столбцы — компоненты кика)", pt=8)
+    doc.add_paragraph("Итоговый вектор физкоэффициентов:")
     _table(doc, ["Коэффициент", "Значение", "Единицы"],
            [["B (диполь)", f"{dq['B']:+.3g}", "Тл"],
             ["G (квадруполь)", f"{dq['G']:+.4g}", "Тл/м"],
             ["S (секступоль)", f"{dq['S']:+.4g}", "Тл/м²"]],
            caption="Физкоэффициенты диполя-квадруполя при заданных токах")
 
-    graph, moments = F["dq_figs"]
-    _pic(doc, graph, 14.0, caption="Магнитный граф диполя-квадруполя: четыре полюса, ярмо, "
-         "шунты полюсов и зазоры между наконечниками")
     _pic(doc, moments, 16.5, caption="Зависимости коэффициентов B, G, S от тока каждой обмотки: "
          "линии — модель, точки — карты поля")
 
