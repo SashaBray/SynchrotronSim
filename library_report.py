@@ -42,6 +42,11 @@ KIND_MOMENTS = {"dq": ("B", "G", "S")}
 
 PROBE_SCAN = (1e-3, 3e-3, 5e-3, 8e-3, 11e-3, 14e-3)   # карты все ±50 мм, 14 мм внутри хорошего поля
 PLOT_RADIUS = {1: 1e-3, 2: 5e-3, 3: 8e-3, 4: 14e-3}
+# Модель связи (`branch_network.R_PROBE`) обучена на гармониках, снятых на ОДНОМ радиусе 8 мм для
+# всех порядков. Сравнивать её с точками, снятыми на других радиусах, нельзя: поле не идеальный
+# мультиполь, и величина от радиуса зависит — у c1 корректора полка B на 1 мм и на 8 мм расходится
+# на 15%. Поэтому у многообмоточных точки берутся на радиусе модели.
+MODEL_RADIUS = {n: 8e-3 for n in (1, 2, 3, 4)}
 # Радиусы, НА КОТОРЫХ проверяется устойчивость данного порядка. Проверять октуполь на 1 мм
 # бессмысленно: там он заведомо под шумовым полом, и настоящий момент отбраковался бы вместе с
 # шумом — у секступоля SP, его ГЛАВНОГО момента, так и выходило 56%.
@@ -82,17 +87,19 @@ def _profile(h, B, order, radius, nth=64):
     return xs, np.abs(np.array(v)) / radius ** (order - 1)
 
 
-def _kicks(h, B, orders, nth=64):
+def _kicks(h, B, orders, nth=64, radii=None):
     """{порядок: (нормальный, скью)} на ПОЛНОЙ карте, каждый порядок на своём радиусе пробы.
 
     Момент комплексен: (By + i·Bz) даёт нормальный мультиполь и повёрнутый на пол-периода (скью).
     Брать МОДУЛЬ нельзя — он их смешивает: у боковых обмоток корректора скью-часть больше
-    нормальной, и модуль завышал дипольный момент на 59%."""
+    нормальной, и модуль завышал дипольный момент на 59%. Знак тоже сохраняется: компоненты
+    противоположных обмоток отличаются именно знаком, а модуль складывает их вместе."""
     from field_quality import _circle
+    radii = radii or PLOT_RADIUS
     xs = h["mnx"] + np.arange(h["nx"]) * h["sx"]
     out = {}
-    for r in sorted({PLOT_RADIUS[n] for n in orders}):
-        acc = {n: [] for n in orders if PLOT_RADIUS[n] == r}
+    for r in sorted({radii[n] for n in orders}):
+        acc = {n: [] for n in orders if radii[n] == r}
         if not acc:
             continue
         for ix in range(h["nx"]):
@@ -103,7 +110,7 @@ def _kicks(h, B, orders, nth=64):
         for n, a in acc.items():
             v = np.array(a)
             c = complex(np.trapezoid(v.real, xs), np.trapezoid(v.imag, xs))
-            out[n] = (abs(c.imag) / r ** (n - 1), abs(c.real) / r ** (n - 1))
+            out[n] = (c.imag / r ** (n - 1), c.real / r ** (n - 1))
     return out
 
 
@@ -243,7 +250,7 @@ def stretch(h, B, order, radius, L_target):
     return h2, B2, cb
 
 
-def variant_kicks(element, L_target, order_lead, orders=(1, 2, 3, 4)):
+def variant_kicks(element, L_target, order_lead, orders=(1, 2, 3, 4), radii=None):
     """{обмотка: [(ампер-витки, {порядок: (норм, скью)}, c_body)]} для магнита длины L_target.
 
     Карты сняты с ОДНОЙ длины семейства, а в библиотеке магнит стоит в нескольких исполнениях.
@@ -267,21 +274,55 @@ def variant_kicks(element, L_target, order_lead, orders=(1, 2, 3, 4)):
             continue
         if ni <= 0 or not os.path.exists(p):
             continue
-        ck = f"{r['map_id']}|{L_target:.4f}"
+        rt = "-".join(f"{(radii or PLOT_RADIUS)[n] * 1e3:g}" for n in sorted(orders))
+        ck = f"{r['map_id']}|{'нет' if L_target is None else format(L_target, '.4f')}|r{rt}|s2"
         if ck not in cache:
             h, B = _load_full(p)
-            h2, B2, cb = stretch(h, B, order_lead, PLOT_RADIUS[order_lead], L_target)
+            if L_target is None:                           # карта как есть, без синтеза длины
+                h2, B2, cb = h, B, 1.0
+            else:
+                h2, B2, cb = stretch(h, B, order_lead, PLOT_RADIUS[order_lead], L_target)
             if h2 is None:
                 continue
-            k = _kicks(h2, B2, orders)
+            k = _kicks(h2, B2, orders, radii=radii)
             cache[ck] = {"cb": cb, "k": {str(n): list(v) for n, v in k.items()}}
             dirty = True
         e = cache[ck]
-        data[r["winding"]].append((ni, {int(n): tuple(v) for n, v in e["k"].items()}, e["cb"]))
+        # Карта, снятая при ОТРИЦАТЕЛЬНОМ токе, складывается на положительную ось с переворотом
+        # знака момента: кривая намагничивания нечётна, B(−H) = −B(H), поэтому это точное
+        # преобразование. Без него такая карта попадала на график зеркально — у c1 корректора
+        # такая одна, и она одна давала ошибку 26% против 6% у симметричных c2, c3, c4.
+        sgn = -1.0 if float(r["amp_turns"]) < 0 else 1.0
+        data[r["winding"]].append((ni, {int(n): tuple(sgn * x for x in v)
+                                        for n, v in e["k"].items()}, e["cb"]))
     if dirty:
         os.makedirs(os.path.dirname(VAR_CACHE) or ".", exist_ok=True)
         json.dump(cache, open(VAR_CACHE, "w", encoding="utf-8"))
     return {w: sorted(v, key=lambda t: t[0]) for w, v in data.items()}
+
+
+def stretch_is_clean(el, L, lead, radii, tol=10.0):
+    """Годится ли синтез длины для этого элемента: (годится, κ по обмоткам, разброс %).
+
+    Синтез длины обязан быть ЧИСТЫМ МАСШТАБОМ: интеграл момента растянутой карты во столько же раз
+    больше исходного, во сколько длиннее магнит, и множитель один на все карты обмотки. У DQ так и
+    есть (разброс 0.7%), у корректора нет (65%): его тело по профилю дипольного момента
+    определяется неустойчиво, и каждая карта растягивается по-своему. Там, где синтез не чистый,
+    сравнивать модель с растянутыми точками нельзя — показываются исходные карты."""
+    nat = variant_kicks(el, None, lead, radii=radii)
+    var = variant_kicks(el, L, lead, radii=radii)
+    kap, spread = {}, []
+    for w, pts in var.items():
+        by_ni = {round(t[0], 6): t for t in nat.get(w, [])}
+        rs = [t[1][lead][0] / by_ni[round(t[0], 6)][1][lead][0]
+              for t in pts
+              if round(t[0], 6) in by_ni and abs(by_ni[round(t[0], 6)][1][lead][0]) > 1e-30]
+        if not rs:
+            continue
+        kap[w] = float(np.median(rs))
+        spread.append(float(np.std(rs) / abs(np.mean(rs)) * 100))
+    worst = max(spread) if spread else 0.0
+    return worst <= tol, kap, worst
 
 
 # ───────────────────── привязка к главам исходного отчёта ─────────────────────
@@ -502,7 +543,7 @@ def single_graph_fit(el, L, pts, order, tag=""):
     if key in _GRAPH:
         return _GRAPH[key]
     ni = np.array([p[0] for p in pts], float)
-    y = np.array([abs(p[1][order][0]) for p in pts], float)
+    y = np.array([abs(p[1][order][0]) for p in pts], float)   # знак у одиночной обмотки постоянен
     o = np.argsort(ni)
     ni, y = ni[o], y[o]
     good = ni > 0
@@ -548,7 +589,7 @@ def moment_possible(el, kind, winding, comp):
         return True
 
 
-def model_curves(el, kind, label, moments, pts, turns, ef, L):
+def model_curves(el, kind, label, moments, pts, turns, ef, L, kappa=1.0):
     """Кривые МОДЕЛИ насыщения для показываемых моментов: {момент: (ток_А, значение_в_шкале_графика)}.
 
     Модель считает физкоэффициент g (Тл/м …); шкала графика — та же, что у измерений (`to_coef`),
@@ -575,8 +616,11 @@ def model_curves(el, kind, label, moments, pts, turns, ef, L):
         try:
             # Модель даёт ИНТЕГРАЛ момента (её физкоэф отнесён к своей опорной длине). Шкала
             # графика — та же, что у измерений: интеграл, делённый на длину ЭТОГО исполнения.
+            # κ переносит предсказание модели (она живёт на исходных картах) на длину исполнения;
+            # там, где синтез длины не применялся, κ = 1.
             out[mp] = (grid, np.array(
-                [abs(ss.graph_moment(el, {wkey: float(I)}, n, comp)[1]) / (L * ef)
+                [kappa * ss.graph_moment(el, {wkey: float(I)}, n, comp,
+                                         mat_sign=False)[1] / (L * ef)
                  for I in grid]))
         except Exception:
             continue
@@ -611,17 +655,22 @@ def plot_winding(m, label, pts, turns, L, moments, design, cur, ef, outdir, mode
         a.tick_params(axis="y", labelcolor=col, labelsize=8)
         if k > 1:
             a.spines["right"].set_position(("outward", 46 * (k - 1)))
-        ymax = y.max()
-        d = abs(design.get(mp, 0.0))
-        if d > 1e-30:
+        # Значения знаковые: у противоположных обмоток компоненты отличаются именно знаком.
+        # Проектная линия ставится на ту сторону, где лежат измерения этой обмотки.
+        span = list(y) + (list(model[mp][1]) if mp in model else [])
+        sgn = 1.0 if y[int(np.argmax(np.abs(y)))] >= 0 else -1.0
+        d = sgn * abs(design.get(mp, 0.0))
+        if abs(d) > 1e-30:
             a.axhline(d, color=col, lw=1.2, ls="-", alpha=0.85, zorder=1)
             a.annotate(f"{mp} = {d:.4e}", xy=(0.015, 0.965 - 0.055 * k), xycoords="axes fraction",
                        fontsize=8.5, color=col, family="monospace", va="top",
                        bbox=dict(fc="white", ec="none", alpha=0.85, pad=1.5))
             if cur is not None and abs(cur) > 1e-9:
                 a.plot([abs(cur)], [d], "D", color=col, ms=8, mec="white", mew=1.0, zorder=5)
-            ymax = max(ymax, d)
-        a.set_ylim(0, ymax * 1.15)
+            span.append(d)
+        lo, hi = min(span + [0.0]), max(span + [0.0])
+        pad = 0.08 * (hi - lo) or 1e-30
+        a.set_ylim(lo - pad, hi + pad)
     if cur is not None and abs(cur) > 1e-9:
         ax.axvline(abs(cur), color="#444", lw=1.3, ls="--", zorder=2)
         ax.annotate(f"{abs(cur):.1f} А", xy=(abs(cur), 0.02), xycoords=("data", "axes fraction"),
@@ -811,7 +860,19 @@ def build(out=OUT, src=SRC, figs=PNG):
         kind = m["kind"]
         lead = lead_order(m)
         L = float(m["L"]) if m["L"] else map_length(el, lead)
-        pts_by_w = variant_kicks(el, L, lead)
+        radii = MODEL_RADIUS if m["kind"] in ("dq", "kicker") else PLOT_RADIUS
+        kappa, L_shown = {}, L
+        if m["kind"] in ("dq", "kicker"):
+            ok, kappa, spread = stretch_is_clean(el, L, lead, radii)
+            if not ok:                       # синтез длины неустойчив — показываем исходные карты
+                pts_by_w = variant_kicks(el, None, lead, radii=radii)
+                kappa = {}                   # шкала остаётся прежней: делим на ту же L_eff из БД
+                print(f"  {m['name']}: синтез длины неустойчив ({spread:.0f}%), "
+                      f"кривые показаны на исходных картах")
+            else:
+                pts_by_w = variant_kicks(el, L, lead, radii=radii)
+        else:
+            pts_by_w = variant_kicks(el, L, lead, radii=radii)
         native = element_spectra(el)
         allow = KIND_MOMENTS.get(kind, tuple(MOMENT))
         design = ec._design_ivec(m)[2]
@@ -833,15 +894,20 @@ def build(out=OUT, src=SRC, figs=PNG):
             nat = native.get(lb) or native.get("I1" if lb == "I" else "I")
             if not pts or not nat:
                 continue
+            # У многообмоточных показываются только те порядки, которые модель описывает: без
+            # линии точки на отдельной оси читаются как самостоятельная кривая, хотя это шум.
+            top = 3 if kind in ("dq", "kicker") else 4
             shown = [mp for mp in MOMENT
                      if mp in allow and resolution(nat, MOMENT[mp][0]) <= RESOLVED
                      and (MOMENT[mp][1] == 0 or mp in m["outputs"])
+                     and MOMENT[mp][0] <= top
                      and moment_possible(el, kind, lb, MOMENT[mp][1])]
             if not shown:
                 continue
             tpc = ec.dev_tpc(m["devs"][j])
-            model = model_curves(el, kind, lb, shown, pts, tpc, ec.ENERGY_FACTOR, L)
-            png = plot_winding(m, lb, pts, tpc, L, shown, design, cur.get(lb),
+            model = model_curves(el, kind, lb, shown, pts, tpc, ec.ENERGY_FACTOR, L_shown,
+                                 kappa.get(lb, 1.0))
+            png = plot_winding(m, lb, pts, tpc, L_shown, shown, design, cur.get(lb),
                                ec.ENERGY_FACTOR, figs, model=model)
             pic = doc.add_paragraph()
             pic.add_run().add_picture(png, width=Inches(6.3))
