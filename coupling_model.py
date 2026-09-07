@@ -118,8 +118,21 @@ def predict(element, order, currents):
     return complex(d.get((order, "скош."), 0.0), d.get((order, "норм."), 0.0))
 
 
+def feature_breakdown(element):
+    """Разбор потоковых признаков: (наконечники полюсов, шунты).
+
+    Признак — поток узла, к которому подходит зазор кик-класса. Такие узлы двух родов: наконечники
+    полюсов (имя на «p», выходят к пучку) и углы ярма, куда приходит воздушный шунт полюса. Число
+    признаков есть их сумма; называть все наконечниками неверно — у DQ 4 полюса, а признаков 8
+    (4 наконечника + 4 шунта)."""
+    cir = bn.Circuit(element)
+    ts, _ = tips(cir)
+    poles = [t for t in ts if t.startswith("p")]
+    return len(poles), len(ts) - len(poles)
+
+
 def free_numbers(element):
-    """Свободных чисел матрицы связи: (2 · число наконечников) × число компонент кика."""
+    """Свободных чисел матрицы связи: (2 · число потоковых признаков) × число компонент кика."""
     cir = bn.Circuit(element)
     ts, _ = tips(cir)
     return 2 * len(ts) * len(columns(element)), len(ts), len(columns(element))
