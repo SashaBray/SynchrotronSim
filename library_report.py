@@ -49,6 +49,9 @@ RES_RADII = {1: (1e-3, 3e-3, 5e-3, 8e-3), 2: (1e-3, 3e-3, 5e-3, 8e-3),
              3: (5e-3, 8e-3, 11e-3, 14e-3), 4: (8e-3, 11e-3, 14e-3)}
 RESOLVED = 25.0        # % разброса по радиусу пробы, выше которого момент считается шумом
 
+SMODELS = os.path.join("workspace", "tables", "saturation_models.csv")
+LEAD_MOMENT = {"quad": "G", "sext": "S", "oct": "O"}   # ведущий момент однообмоточного элемента
+SINGLE_KINDS = ("quad", "sext", "oct")
 SPEC_CACHE = os.path.join("workspace", "results", "library_report_spectra_ri.json")
 VAR_CACHE = os.path.join("workspace", "results", "library_report_variants.json")
 MAPLEN_CACHE = os.path.join("workspace", "results", "library_report_maplen.json")
@@ -363,6 +366,77 @@ def saturation_currents(m, ec, pts_by_w, L):
 
 # ───────────────────────── кривые намагниченности ─────────────────────────
 
+def _smodels():
+    """Параметры ядра моделей насыщения из БД: {элемент: строка saturation_models.csv}."""
+    import csv
+    if not os.path.exists(SMODELS):
+        return {}
+    return {r["element"]: r for r in csv.DictReader(open(SMODELS, encoding="utf-8-sig"),
+                                                    delimiter=";")}
+
+
+def _g_design(design, mp, ef):
+    """Проектный физкоэффициент (Тл/м …) из проектного mat_* отчёта: g = mat·EF/(n−1)!."""
+    n = MOMENT[mp][0]
+    return design[mp] * ef / math.factorial(n - 1)
+
+
+def sat_currents_solve(el, kind, m, design, ec):
+    """Проектные токи С УЧЁТОМ НАСЫЩЕНИЯ через модель saturation_solve (то же уравнение, что в
+    формуле). Возврат {обмотка: ток, А}. Токи обмоток, которые модель не описывает (тримы), берутся
+    линейными — на малом токе насыщения нет, и разницы с моделью там тоже нет."""
+    import saturation_solve as ss
+    ef = ec.ENERGY_FACTOR
+    tpc = [ec.dev_tpc(d) or 1 for d in m["devs"]]
+    lin = {w: float(np.asarray(ec._design_ivec(m)[0])[j]) * ef / tpc[j]
+           for j, w in enumerate(m["labels"])}
+    # Знак цели берётся из модели на ЛИНЕЙНЫХ токах: проектный mat_* хранится по модулю в своей
+    # конвенции, а физический знак (например, дефокусирующий квадруполь G < 0) даёт сама модель.
+    def signed(el_, cur_lin, mps):
+        fwd = ss.forward(el_, cur_lin)
+        out = {}
+        for mp in mps:
+            s = 1.0 if fwd.get(mp, (0.0,))[0] >= 0 else -1.0
+            out[mp] = math.copysign(abs(_g_design(design, mp, ef)), s)
+        return out
+
+    try:
+        if kind == "dq":
+            mps = [mp for mp in ("B", "G") if mp in design and abs(design[mp]) > 1e-30]
+            tgt = signed("DQ", {w: lin[w] for w in lin}, mps)
+            cur = ss.inverse("DQ", tgt, fixed={"I3": 0.0})
+            return {w: cur.get(w, lin.get(w, 0.0)) for w in m["labels"]}
+        lead = LEAD_MOMENT[kind]
+        if lead not in design or abs(design[lead]) < 1e-30:
+            return lin
+        w0 = m["labels"][0]
+        tgt = signed(el, {w0: lin[w0]}, [lead])
+        Imain = next(iter(ss.inverse(el, {lead: tgt[lead]}).values()))
+        out = dict(lin)
+        out[w0] = Imain                            # первая обмотка — несущая коэффициент
+        return out
+    except Exception:
+        return lin
+
+
+def formula_paragraph(doc, el, kind, sm_row, lo):
+    """Формула однообмоточного расчёта с подобранными параметрами элемента (нативная формула Word)."""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    lead = LEAD_MOMENT[kind]
+    doc.add_paragraph(
+        f"Модель насыщения (подобранные параметры): возбуждение обмотки связано с "
+        f"физкоэффициентом {lead} уравнением магнитной цепи")
+    a, c, l = float(sm_row["a_g"]), float(sm_row["c_g"]), float(sm_row["l"])
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    lo.add_formula(p, r"NI = %.4g\cdot %s + %.4g\cdot H(%.4g\cdot %s)"
+                   % (a, lead, l, c, lead))
+    doc.add_paragraph(
+        f"здесь {lead} — физкоэффициент (Тл/м, Тл/м², Тл/м³), H(·) — обратная кривая "
+        f"намагничивания стали; NI = N·I — ампер-витки. Проектный ток получается обращением этого "
+        f"уравнения под проектный {lead} и делением на число витков N.")
+
+
 def to_coef(value, moment, L, ef):
     """Интеграл момента по длине (физические единицы) → физкоэффициент в шкале отчёта (mat_*).
 
@@ -479,19 +553,40 @@ def material_section(doc, figs, path=MATERIAL):
 
 # ───────────────────────── дополнение отчёта ─────────────────────────
 
+def mark_linear_tables(doc):
+    """Пометить существующие таблицы проектных токов как ЛИНЕЙНОЕ ПРИБЛИЖЕНИЕ.
+
+    Эти таблицы в исходном отчёте получены обращением линейной матрицы связи; ниже в каждой главе
+    добавляется таблица того же формата, но с учётом насыщения. Помечаем подпись, чтобы читатель
+    не путал два расчёта."""
+    n = 0
+    for p in doc.paragraphs:
+        t = p.text.strip()
+        if "проектные токи обмоток" in t and "линейн" not in t.lower():
+            for r in p.runs:
+                if "проектные токи обмоток" in r.text:
+                    r.text = r.text.rstrip() + " (линейное приближение)"
+                    n += 1
+                    break
+    return n
+
+
 def build(out=OUT, src=SRC, figs=PNG):
-    """Копия исходного отчёта, дополненная кривыми намагниченности и оценкой проектных токов с
-    учётом насыщения. Документ не пересобирается: открывается как есть, и в конец каждой главы
-    элемента вставляются только эти два дополнения."""
+    """Достоверная копия element_compare_report, дополненная по элементам: кривые намагниченности,
+    формула модели (у квадруполей/секступолей/октуполей) и таблица проектных токов С УЧЁТОМ
+    НАСЫЩЕНИЯ (той же формы, что линейная). Существующие линейные таблицы помечаются."""
     from docx import Document
     from docx.shared import Inches
     import design_currents as dc
     import element_compare as ec
+    import latex2omml as lo
 
     if not os.path.exists(src):
         raise SystemExit(f"нет исходного отчёта: {src}\n"
                          f"построить: py -3.14 element_compare.py library")
     doc = Document(src)
+    mark_linear_tables(doc)
+    sm = _smodels()
     mats = dc.load_coupling()
     dc.attach_devices(mats, ec.LCROW)
     for m in mats:
@@ -507,18 +602,23 @@ def build(out=OUT, src=SRC, figs=PNG):
         if anchor is None:
             print(f"  главы {m['name']} в отчёте нет — пропуск")
             continue
+        kind = m["kind"]
         lead = lead_order(m)
         L = float(m["L"]) if m["L"] else map_length(el, lead)
         pts_by_w = variant_kicks(el, L, lead)
         native = element_spectra(el)
-        allow = KIND_MOMENTS.get(m["kind"], tuple(MOMENT))
-        lam, cur, ctrl = saturation_currents(m, ec, pts_by_w, L)
+        allow = KIND_MOMENTS.get(kind, tuple(MOMENT))
         design = ec._design_ivec(m)[2]
+        cur = sat_currents_solve(el, kind, m, design, ec)
 
         new = []
-        p = doc.add_paragraph(f"Кривые намагниченности {m['name']}: киковые моменты обмоток в "
-                              f"зависимости от тока питания, по трёхмерным картам поля.")
-        new.append(p._p)
+
+        def add(node):
+            new.append(node)
+
+        # Кривые физкоэффициентов от тока (у всех элементов с картами; corrector — только они).
+        add(doc.add_paragraph(f"Кривые физкоэффициентов {m['name']} от тока обмоток "
+                              f"(по трёхмерным картам поля; линии — модель, точки — измерения)")._p)
         for j, lb in enumerate(m["labels"]):
             pts = pts_by_w.get(lb) or pts_by_w.get("I1" if lb == "I" else "I")
             nat = native.get(lb) or native.get("I1" if lb == "I" else "I")
@@ -533,29 +633,46 @@ def build(out=OUT, src=SRC, figs=PNG):
                                design, cur.get(lb), ec.ENERGY_FACTOR, figs)
             pic = doc.add_paragraph()
             pic.add_run().add_picture(png, width=Inches(6.3))
-            new.append(pic._p)
+            add(pic._p)
 
-        cap = doc.add_paragraph()
-        cap.add_run(f"{m['name']} — проектные токи с учётом насыщения").bold = True
-        new.append(cap._p)
-        t = doc.add_table(rows=1, cols=5)
-        t.style = "Light Grid Accent 1"
-        for k, h in enumerate(("элемент", "обмотка", "проектные физкоэффициенты (.lte)",
-                               "проектный ток, А", "% номинала")):
-            t.rows[0].cells[k].text = h
-        coefs = ";  ".join(f"{mp} = {design[mp]:+.4e}" for mp in ctrl) if ctrl else "—"
-        for j, lb in enumerate(m["labels"]):
-            c = t.add_row().cells
-            c[0].text, c[1].text, c[2].text = m["name"], lb, coefs
-            I = cur.get(lb)
-            if I is None:
-                c[3].text = c[4].text = "—"
-                continue
-            nom = ec.dev_nominal(m["devs"][j])
-            c[3].text = f"{I:+.1f}"
-            c[4].text = f"{100 * abs(I) / nom:.0f}%" if nom else "—"
-        new.append(t._tbl)
-        new.append(doc.add_paragraph()._p)
+        # Формула модели — только у однообмоточных (квадруполь, секступоль, октуполь).
+        if kind in SINGLE_KINDS and el in sm and sm[el]["model"] == "single":
+            marker = doc.add_paragraph()._p            # сдвиг: docx кладёт абзацы в конец, переносим
+            formula_paragraph(doc, el, kind, sm[el], lo)
+            body = doc.paragraphs
+            i0 = body.index(next(p for p in body if p._p is marker))
+            for p in body[i0 + 1:]:
+                add(p._p)
+
+        # Таблица проектных токов с учётом насыщения — у всех, КРОМЕ корректора (там только кривые).
+        if kind != "kicker":
+            ctrl = [mp for mp in MOMENT if mp in design and abs(design[mp]) > 1e-30
+                    and (kind != "dq" or mp in ("B", "G", "S"))]
+            if kind == "dq":
+                add(doc.add_paragraph(
+                    "Диполь-квадруполь несимметричен: направление влёта пучка существенно для "
+                    "токов. Магнит установлен развёрнутым на 180° вокруг вертикали (rot_z = 180°) — "
+                    "это переворачивает знак квадрупольного градиента при сохранении дипольного "
+                    "поля, благодаря чему проектные B и G достигаются токами, близкими к "
+                    "номинальным. Токи ниже приведены для этой установленной ориентации.")._p)
+            cap = doc.add_paragraph()
+            cap.add_run(f"{m['name']} — проектные токи с учётом насыщения").bold = True
+            add(cap._p)
+            t = doc.add_table(rows=1, cols=5)
+            t.style = "Light Grid Accent 1"
+            for k, h in enumerate(("элемент", "обмотка", "проектные физкоэффициенты (.lte)",
+                                   "проектный ток, А", "% номинала")):
+                t.rows[0].cells[k].text = h
+            coefs = ";  ".join(f"{mp} = {design[mp]:+.4e}" for mp in ctrl) if ctrl else "—"
+            for j, lb in enumerate(m["labels"]):
+                c = t.add_row().cells
+                c[0].text, c[1].text, c[2].text = m["name"], lb, coefs
+                I = cur.get(lb)
+                nom = ec.dev_nominal(m["devs"][j])
+                c[3].text = f"{I:+.1f}" if I is not None else "—"
+                c[4].text = f"{100 * abs(I) / nom:.0f}%" if (I is not None and nom) else "—"
+            add(t._tbl)
+            add(doc.add_paragraph()._p)
 
         for node in new:                                   # перенос созданных блоков в конец главы
             anchor.addprevious(node)

@@ -65,11 +65,16 @@ def single_params(element, coef_col):
         (l for l in io.open(FITS, encoding="utf-8-sig") if not l.startswith("#")), delimiter=";")}
     q = fit[element]
     C, L, aon = float(q["C"]), float(q["L_m"]), float(q["A_over_naive"])
-    rows = sorted(csv.DictReader(io.open(os.path.join("workspace", "datasets", "currents_to_kicks",
-                  f"{element}.csv"), encoding="utf-8-sig"), delimiter=";"),
-                  key=lambda r: float(r[[c for c in r if c.startswith("AT_")][0]]))
-    at = [c for c in rows[0] if c.startswith("AT_")][0]
-    ni0, y0 = float(rows[0][at]), abs(float(rows[0][coef_col]))
+    allrows = list(csv.DictReader(io.open(os.path.join("workspace", "datasets", "currents_to_kicks",
+                   f"{element}.csv"), encoding="utf-8-sig"), delimiter=";"))
+    atcols = [c for c in allrows[0] if c.startswith("AT_")]
+    # У секступоля две обмотки: контрольную точку берём ТОЛЬКО по картам несущей обмотки (первый
+    # столбец AT_*), где остальные обмотки обесточены, иначе y0 берётся у чужой карты и a ломается.
+    lead = atcols[0]
+    single = [r for r in allrows if float(r[lead]) != 0
+              and all(float(r[c]) == 0 for c in atcols if c != lead)]
+    rows = sorted(single, key=lambda r: abs(float(r[lead])))
+    ni0, y0 = abs(float(rows[0][lead])), abs(float(rows[0][coef_col]))
     a = aon * ni0 / y0
     leff = _leff(element)
     return dict(a_g=a * leff, c_g=C * leff, l=L, leff_ref=leff, err=float(q["max_err_pct"]))
