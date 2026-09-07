@@ -122,11 +122,20 @@ def draw(element, out=None, annotate=True, branches=None, members=None):
             return 0.22 * (1.0 if xb > xa else -1.0) * (1.0 + 0.35 * dx)
         return 0.0
 
+    # Параллельные рёбра (одни и те же концы) — например, воздушный шунт полюса поверх железного
+    # полюса: без дуги они рисуются друг на друге, и шунт не виден.
+    import collections
+    pairn = collections.Counter(frozenset((r["node_from"], r["node_to"])) for r in rows)
+
     from matplotlib.patches import FancyArrowPatch
     for r in rows:
         a, b = pos[r["node_from"]], pos[r["node_to"]]
         st = KIND_STYLE.get(r["kind"], dict(color="#888", lw=1.0, ls=":"))
         rad = curvature(a, b, r["kind"])
+        if pairn[frozenset((r["node_from"], r["node_to"]))] > 1 and r["kind"] == "gap":
+            # шунт идёт теми же концами, что и железный полюс; выгибаем его в ДРУГУЮ сторону
+            # (и сильнее), иначе он ложится на полюс и не виден
+            rad = -1.8 * (rad if rad else 0.4)
         if rad:
             ax.add_patch(FancyArrowPatch(a, b, arrowstyle="-", shrinkA=0, shrinkB=0, zorder=2,
                                          connectionstyle=f"arc3,rad={rad}",

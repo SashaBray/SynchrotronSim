@@ -86,6 +86,7 @@ def _table(doc, header, rows, caption=None, pt=9):
             for par in cell.paragraphs:
                 for run in par.runs:
                     run.font.size = Pt(pt)
+    doc.add_paragraph()          # отступ строкой после таблицы
 
 
 def _pic(doc, path, cm=15.0, caption=None):
@@ -475,6 +476,10 @@ def ch_dq_example(doc, F, lo):
                   r"\vec{NI} = (%.0f,\ %.0f,\ %.0f)^{\mathsf{T}}"
              % (dq["A"]["I1"], dq["A"]["I2"], dq["A"]["I3"],
                 dq["NI"]["I1"], dq["NI"]["I2"], dq["NI"]["I3"]), lo)
+    _where(doc, lo, [
+        (r"\vec{I}", "вектор, ампер", "токи обмоток I1, I2, I3"),
+        (r"\vec{NI}", "вектор, ампер-витки", "те же токи, умноженные на числа витков 53, 13, 90"),
+    ])
 
     doc.add_heading("Матрица обмоток", level=2)
     doc.add_paragraph(
@@ -497,7 +502,12 @@ def ch_dq_example(doc, F, lo):
     doc.add_paragraph("Напор, закон ветви и сохранение потока (раздел 2) дают нелинейную систему "
                       "относительно потенциалов вершин:")
     _formula(doc, r"A\,\vec{\varphi}\big(\vec{NI} - A^{\mathsf{T}}\vec{u}\big) = 0", lo)
-    doc.add_paragraph("Ньютон даёт потенциалы вершин (опорная n1 = 0, ампер-витки):")
+    _where(doc, lo, [
+        (r"\vec{u}", "вектор, ампер-витки", "потенциалы вершин — неизвестные системы"),
+        (r"\vec{\varphi}", "вектор, вебер", "потоки ветвей: у железа по кривой B(H), у воздуха "
+         "линейны (раздел 2)"),
+    ])
+    doc.add_paragraph("Метод Ньютона даёт потенциалы вершин (опорная n1 = 0, ампер-витки):")
     _table(doc, list(dq["nodes"]), [[f'{dq["u"][n]:.0f}' for n in dq["nodes"]]],
            caption="Решение: потенциалы вершин u", pt=8)
     doc.add_paragraph("и потоки всех ветвей (микровебер):")
@@ -515,6 +525,11 @@ def ch_dq_example(doc, F, lo):
         "связи, затем перевод в коэффициенты:")
     _formula(doc, r"\vec{k} = W^{\mathsf{T}}\begin{bmatrix}\vec{q}\\ \sigma\,\vec{q}\end{bmatrix}, "
                   r"\qquad c_n = \varsigma_n\,\frac{(n-1)!}{r^{\,n-1}\,l_{\text{эфф}}}\;\kappa_n", lo)
+    _where(doc, lo, [
+        (r"\vec{q}", "вектор, вебер", "потоки наконечников (компоненты чистого потока A·φ)"),
+        (r"\vec{k}", "вектор, комплексный", "кик по гармоникам; κ_n — компонента n"),
+        (r"c_n", "скаляр", "физкоэффициент гармоники n (B, G, S)"),
+    ])
     rows = [[dq["feat_labels"][i], f'{W[i][0]:.2f}', f'{W[i][1]:.2f}', f'{W[i][2]:.2f}']
             for i in range(len(dq["feat_labels"]))]
     _table(doc, ["Признак", "→ B", "→ G", "→ S"], rows,
