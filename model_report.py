@@ -88,6 +88,22 @@ def _table(doc, header, rows, caption=None, pt=9):
                     run.font.size = Pt(pt)
 
 
+def _pic(doc, path, cm=15.0, caption=None):
+    from docx.shared import Cm, Pt
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    if not os.path.exists(path):
+        return
+    doc.add_picture(path, width=Cm(cm))
+    doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    if caption:
+        _pic.n = getattr(_pic, "n", 0) + 1
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run(f"Рисунок {_pic.n}. {caption}")
+        r.bold = True
+        r.font.size = Pt(9)
+
+
 def _body_format(doc):
     from docx.shared import Cm, Pt
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -157,7 +173,43 @@ def facts():
         nim = A * chi + L * H(C * chi)
         picks.append((ni / N, ni, chi, chi / leff, nim, 100 * (nim - ni) / ni))
     F["example"] = dict(A=A, C=C, L=L, N=N, leff=leff, ni0=ni0, chi0=chi0, rows=picks[:4])
+
+    F["dq"] = dq_example()
     return F
+
+
+DQ_N = {"I1": 53, "I2": 13, "I3": 90}
+DQ_LEFF = 0.4081
+DQ_R = 8e-3
+MAT_SIGN = {1: -1.0, 2: 1.0, 3: 1.0}
+
+
+def _dq_coef(kappa, n):
+    """Физкоэффициент DQ гармоники n из кика (мнимая часть — нормальная составляющая)."""
+    import math
+    return MAT_SIGN[n] * math.factorial(n - 1) / DQ_R ** (n - 1) * kappa.imag / DQ_LEFF
+
+
+def dq_example(currents_A=(("I1", 150.0), ("I2", 100.0), ("I3", 40.0))):
+    """Пример расчёта DQ: заданные токи → σ → B, G, S. Числа считаются моделью."""
+    import numpy as np
+    import branch_network as bn
+    import coupling_model as cm
+    A = dict(currents_A)
+    NI = {k: A[k] * DQ_N[k] for k in A}
+    cir, _, _ = cm.train("DQ")
+    lens, perms, secs = bn.unpack(np.zeros(1), cir)
+    phi, _ = cir.solve(NI, lens, perms, secs=secs)
+    num = den = 0.0
+    for x in cir.iron:
+        S = secs.get(cir.sym[x], 1.0)
+        a = abs(phi[x])
+        num += a * min(a / S / cir.Barr[-1], 1.0)
+        den += a
+    sigma = num / den if den else 0.0
+    coef = {n: _dq_coef(cm.predict("DQ", n, NI), n) for n in (1, 2, 3)}
+    return dict(A=A, N=DQ_N, NI=NI, sigma=sigma, leff=DQ_LEFF,
+                B=coef[1], G=coef[2], S=coef[3])
 
 
 # ─────────────────────────────── разделы ────────────────────────────────
@@ -325,22 +377,116 @@ def ch_single(doc, F, lo):
 
 
 
+def _dq_figures(figdir):
+    """Готовит две иллюстрации для главы 4: граф DQ и графики моментов B, G, S от токов."""
+    import json
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import branch_network as bn
+    import coupling_model as cm
+    import plot_magnet_graph as pmg
+
+    os.makedirs(figdir, exist_ok=True)
+    graph = os.path.join(figdir, "dq_graph.png")
+    pmg.draw("DQ", out=graph)
+
+    cm.train("DQ")
+    turns = json.load(open(os.path.join("workspace", "datasets", "currents_to_kicks",
+                                         "DQ.meta.json"), encoding="utf-8"))["turns_per_coil"]
+    ORD = ((1, "B", "Тл"), (2, "G", "Тл/м"), (3, "S", "Тл/м²"))
+    maps = {n: bn.read_maps("DQ", n) for n, _, _ in ORD}
+    wnames = ["I1", "I2", "I3"]
+    fig, ax = plt.subplots(3, 3, figsize=(11, 8), squeeze=False)
+    for i, (n, nm, u) in enumerate(ORD):
+        for k, w in enumerate(wnames):
+            a = ax[i][k]
+            pts = sorted((c[w], v) for c, v, *_ in maps[n] if list(c) == [w])
+            if pts:
+                at = np.array([p[0] for p in pts])
+                meas = np.array([_dq_coef(complex(p[1]), n) for p in pts])
+                grid = np.linspace(0, at.max() * 1.02, 80)
+                mod = np.array([_dq_coef(cm.predict("DQ", n, {w: g}), n) for g in grid])
+                a.plot(grid / turns[w], mod, "-", color="#1f4e79", lw=1.7)
+                a.plot(at / turns[w], meas, "o", color="#1f4e79", ms=5, mec="white", mew=.7)
+            a.grid(alpha=.25); a.tick_params(labelsize=8); a.axhline(0, color="#999", lw=.6)
+            if i == 0:
+                a.set_title(f"обмотка {w}", fontsize=10)
+            if i == 2:
+                a.set_xlabel("ток, А", fontsize=9)
+            if k == 0:
+                a.set_ylabel(f"{nm}, {u}", fontsize=10)
+    from matplotlib.lines import Line2D
+    fig.legend(handles=[Line2D([], [], color="#1f4e79", lw=1.7, label="модель"),
+                        Line2D([], [], color="#1f4e79", marker="o", ls="", label="карты")],
+               loc="lower center", ncol=2, fontsize=10, frameon=False)
+    fig.suptitle("Диполь-квадруполь: B, G, S от тока каждой обмотки", fontsize=12)
+    fig.tight_layout(rect=(0, 0.05, 1, 0.96))
+    moments = os.path.join(figdir, "dq_moments.png")
+    fig.savefig(moments, dpi=140)
+    plt.close(fig)
+    return graph, moments
+
+
+def ch_dq_example(doc, F, lo):
+    dq = F["dq"]
+    doc.add_heading("4. Пример расчёта: диполь-квадруполь", level=1)
+    doc.add_paragraph(
+        "Диполь-квадруполь несёт три обмотки и даёт три коэффициента — B, G, S. Здесь цепочка "
+        "раздела 2 пройдена с числами.")
+    doc.add_paragraph(
+        f"Дано: токи обмоток I1 = {dq['A']['I1']:.0f} А, I2 = {dq['A']['I2']:.0f} А, "
+        f"I3 = {dq['A']['I3']:.0f} А. Числа витков N1 = {dq['N']['I1']}, N2 = {dq['N']['I2']}, "
+        f"N3 = {dq['N']['I3']}; эффективная длина l_эфф = {dq['leff']:.4f} м.")
+
+    doc.add_paragraph("Шаг 1. Возбуждение ветвей — токи через матрицу намотки:")
+    _formula(doc, r"\vec{F} = M\,\vec{I}", lo)
+    doc.add_paragraph(
+        f"ампер-витки обмоток: NI1 = {dq['NI']['I1']:.0f}, NI2 = {dq['NI']['I2']:.0f}, "
+        f"NI3 = {dq['NI']['I3']:.0f}.")
+
+    doc.add_paragraph("Шаг 2. Решение цепи методом Ньютона даёт потоки всех ветвей:")
+    _formula(doc, r"A\,\vec{\varphi}(\vec{u}) = 0", lo)
+    doc.add_paragraph(
+        f"по потокам считается доля насыщения σ = {dq['sigma']:.2f} (железо на этом режиме "
+        "насыщено примерно наполовину).")
+
+    doc.add_paragraph("Шаг 3. Кик — свёртка потоков наконечников матрицей связи, затем перевод в "
+                      "коэффициенты:")
+    _formula(doc, r"\vec{k} = W^{\mathsf{T}}\begin{bmatrix}\vec{q}\\ \sigma\,\vec{q}\end{bmatrix}", lo)
+    _formula(doc, r"c_n = \varsigma_n\,\frac{(n-1)!}{r^{\,n-1}\,l_{\text{эфф}}}\;\kappa_n", lo)
+    doc.add_paragraph("Результат:")
+    _table(doc, ["Коэффициент", "Значение", "Единицы"],
+           [["B (диполь)", f"{dq['B']:+.3g}", "Тл"],
+            ["G (квадруполь)", f"{dq['G']:+.4g}", "Тл/м"],
+            ["S (секступоль)", f"{dq['S']:+.4g}", "Тл/м²"]],
+           caption="Физкоэффициенты диполя-квадруполя при заданных токах")
+
+    graph, moments = F["dq_figs"]
+    _pic(doc, graph, 14.0, caption="Магнитный граф диполя-квадруполя: четыре полюса, ярмо, "
+         "шунты полюсов и зазоры между наконечниками")
+    _pic(doc, moments, 16.5, caption="Зависимости коэффициентов B, G, S от тока каждой обмотки: "
+         "линии — модель, точки — карты поля")
+
+
 def build(out=OUT):
     import docx
     import latex2omml as lo
     from docx.shared import Pt
 
     F = facts()
+    F["dq_figs"] = _dq_figures(os.path.join(os.path.dirname(out) or ".", "model_report_figs"))
     doc = docx.Document()
     doc.styles["Normal"].font.name = "Times New Roman"
     doc.styles["Normal"].font.size = Pt(11)
 
     doc.add_heading("Модель «токи обмоток → кики»: методика расчёта", level=0)
     p = doc.add_paragraph()
-    p.add_run("Уравнения всех звеньев функции ток→кик и разобранный числовой пример для расчёта "
+    p.add_run("Уравнения всех звеньев функции ток→кик и разобранные числовые примеры для расчёта "
               "вручную. Связь потоков с киком — матрицей связи, без координат полюсов.").italic = True
 
-    for ch in (ch_task, ch_math, ch_single):
+    for ch in (ch_task, ch_math, ch_single, ch_dq_example):
         ch(doc, F, lo)
 
     _body_format(doc)
