@@ -2,9 +2,10 @@
 """Единый расчёт «ток ↔ физкоэффициент» по моделям насыщения из БД, прямая и обратная задача.
 
 Покрывает шесть железных электромагнитов и все их исполнения (длины). Однообмоточные считаются
-графом магнитной цепи с утечкой (`single_winding_model`), многообмоточные — графом ветвей плюс
-матрицей связи «потоки → кик» (`coupling_model`). Постоянные магниты и внешние s2_* не поддержаны —
-у них нет токовой модели.
+графом магнитной цепи с утечкой (`single_winding_model`), диполь-квадруполь — графом ветвей плюс
+матрицей связи «потоки → кик» (`coupling_model`). Корректор работает только в линейной области и
+считается линейной матрицей «ток → кик» (`linear_coupling`). Постоянные магниты и внешние s2_* не
+поддержаны — у них нет токовой модели.
 
 Параметры графа подобраны отдельно для каждого исполнения: растяжение магнита меняет соотношение
 железа и утечки, и на полке одна подгонка на все длины не переносится. Поэтому `device` — не
@@ -32,7 +33,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 MODELS = os.path.join("workspace", "tables", "saturation_models.csv")
 HWLIB = os.path.join("workspace", "tables", "hardware_library.csv")
 BH = os.path.join("workspace", "materials", "steel_1008_bh.csv")
-R_PROBE = 8e-3
+# Радиус пробы берётся у `branch_network`: гармоника переводится в физкоэффициент делением на
+# r^(n-1), и радиус здесь ОБЯЗАН совпадать с тем, на котором модель обучена.
+def R_PROBE_OF(n):
+    import branch_network as bn
+    return bn.probe_r(n)
+
+
+R_PROBE = 11e-3
 MAT_SIGN = {1: -1.0, 2: 1.0, 3: 1.0, 4: 1.0}
 ORDER = {"B": 1, "G": 2, "S": 3, "O": 4}
 _H = None
@@ -152,7 +160,7 @@ def _graph_coef(element, currents_ni, order, leff_ref, comp=0, mat_sign=True):
     k = cm.predict(element, order, currents_ni)
     part = k.real if comp else k.imag
     sgn = MAT_SIGN[order] if mat_sign else 1.0
-    return sgn * math.factorial(order - 1) / R_PROBE ** (order - 1) * part / leff_ref
+    return sgn * math.factorial(order - 1) / R_PROBE_OF(order) ** (order - 1) * part / leff_ref
 
 
 def graph_moment(element, currents_A, order, comp=0, device=None, mat_sign=True):
@@ -163,6 +171,12 @@ def graph_moment(element, currents_A, order, comp=0, device=None, mat_sign=True)
     m = _row(element, device=device)
     leff = device_leff(element, device)
     ni = {w: currents_A[w] * _turns(element, w) for w in currents_A}
+    if m["model"] == "linear":
+        import linear_coupling as lc
+        integ = lc.integrals(element, ni)[lc.SYM[(order, comp)]]
+        if not mat_sign:
+            integ *= lc.MAT_SIGN[order]            # MAT_SIGN = ±1: снять знаковое соглашение
+        return integ / leff, integ
     g = _graph_coef(element, ni, order, float(m["leff"]), comp, mat_sign)
     return g, g * leff
 
@@ -184,6 +198,10 @@ def forward(element, currents_A, device=None):
         return {r["coefficient"]: (y / leff, y)}
     leff = device_leff(element, device)
     ni = {w: currents_A[w] * _turns(element, w) for w in currents_A}
+    if m["model"] == "linear":
+        # Линейная матрица хранит интегралы на ампер-виток; физкоэффициент — делением на l_eff.
+        import linear_coupling as lc
+        return {sym: (v / leff, v) for sym, v in lc.integrals(element, ni).items()}
     out = {}
     for sym, n in (("B", 1), ("G", 2), ("S", 3)):
         g = _graph_coef(element, ni, n, float(m["leff"]))
@@ -200,6 +218,25 @@ def inverse(element, targets, fixed=None, device=None, winding=None):
         w = r["winding"]
         ni = _single_ni_of_y(r, targets[sym] * float(r["leff"]))
         return {w: math.copysign(ni, targets[sym]) / _turns(element, w)}
+
+    if m["model"] == "linear":
+        # Линейная задача решается прямо: A·I = цель − вклад закреплённых обмоток. При неравном
+        # числе целей и свободных обмоток — МНК (при недостатке целей — решение наименьшей нормы).
+        import linear_coupling as lc
+        K = lc.load(element)
+        turns, _ = _hw(element)
+        fixed = fixed or {}
+        free = [w for w in sorted(k for k in turns if k) if w not in fixed]
+        leff = device_leff(element, device)
+        syms = list(targets)
+        A = np.array([[K[sym].get(w, 0.0) * turns[w] for w in free] for sym in syms], float)
+        b = np.array([targets[sym] * leff
+                      - sum(K[sym].get(w, 0.0) * v * turns[w] for w, v in fixed.items())
+                      for sym in syms], float)
+        x = np.linalg.lstsq(A, b, rcond=None)[0]
+        cur = dict(fixed)
+        cur.update({w: float(x[i]) for i, w in enumerate(free)})
+        return cur
 
     from scipy.optimize import fsolve
     import coupling_model as cm

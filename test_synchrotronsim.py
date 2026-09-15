@@ -703,9 +703,11 @@ class TestMecSigma(unittest.TestCase):
     # квадруполь). Рубежи по кику переставлены под новый набор с запасом ~30%. Числа честнее
     # прежних: добавлены трудные точки в колене и за краем, где модель работает хуже всего.
     # (одиночные, КОМБИНАЦИИ), % расхождения ПО КИКУ.
-    LIMITS = {("corrector", 1): (5.0, 16.0), ("corrector", 2): (10.0, 20.0),
-              ("corrector", 3): (14.5, 26.0),
-              ("DQ", 1): (2.5, 3.0), ("DQ", 2): (2.5, 2.0), ("DQ", 3): (2.5, 6.0)}
+    #   2026-09-14: корректор отсюда УБРАН. Это тонкий прибор, штатно работающий при малых токах
+    # (номинал 2 А) и насыщения не достигающий, поэтому модель насыщения для него не нужна: его
+    # связь «ток → кик» — линейная матрица по картам рабочей области, её точность закреплена в
+    # TestLinearCorrector. Карты корректора за рабочей областью из набора выведены.
+    LIMITS = {("DQ", 1): (2.5, 3.0), ("DQ", 2): (2.5, 2.0), ("DQ", 3): (2.5, 6.0)}
 
     # Предельное число НЕДОСТИЖИМЫХ карт (одиночные, комбинации): карты, на которых модель не
     # дотягивается до измеренного кика ни при каком токе. Зафиксировано по состоянию на 2026-09-07.
@@ -725,8 +727,8 @@ class TestMecSigma(unittest.TestCase):
     # одиночных (miss 1-2 из 47), а на комбинациях недостижимость держится (15-20 из 37) — там
     # много точек на полке, ниже которых садится модель. Это тот же изъян полки, теперь на большем
     # наборе; пороги фиксируют его, не пряча.
-    MISS = {("corrector", 1): (2, 16), ("corrector", 2): (3, 13), ("corrector", 3): (1, 21),
-            ("DQ", 1): (4, 0), ("DQ", 2): (0, 0), ("DQ", 3): (4, 0)}
+    #   2026-09-14: корректор убран вместе с LIMITS (см. выше).
+    MISS = {("DQ", 1): (4, 0), ("DQ", 2): (0, 0), ("DQ", 3): (4, 0)}
 
     def _models(self):
         import mec_sigma as ms
@@ -821,6 +823,56 @@ class TestSaturationSolve(unittest.TestCase):
         res = ss.forward("DQ", cur)
         self.assertAlmostEqual(res["B"][0], 0.26, delta=0.01)
         self.assertAlmostEqual(res["G"][0], -31.0, delta=0.5)
+
+
+
+class TestLinearCorrector(unittest.TestCase):
+    """Корректор: линейная матрица «ток → кик» в рабочей области и её закреплённая точность.
+
+    Матрица подогнана только по одиночным картам; комбинации в подгонку не входят и проверяют
+    суперпозицию. Метрика — расхождение по кику Σ|Δ|/Σ|изм| по порядку, нормальная и скошенная
+    часть вместе. Пороги 2026-09-14 с запасом ~30% над достигнутым (одиночные / комбинации):
+    B 1.00/1.07%, G 1.21/2.69%, S 1.55/5.40% на 30 одиночных и 15 комбинациях при токах до 2.5 А.
+    Комбинации секступоля хуже прочих: секступоль у корректора мал и в комбинациях частично гасится."""
+
+    LIMITS = {(1, "одиночные"): 1.3, (1, "комбинации"): 1.5,
+              (2, "одиночные"): 1.6, (2, "комбинации"): 3.5,
+              (3, "одиночные"): 2.0, (3, "комбинации"): 7.0}
+
+    def _lc(self):
+        if not os.path.exists(os.path.join("workspace", "tables", "linear_coupling.csv")):
+            self.skipTest("нет linear_coupling.csv — запустите linear_coupling.py corrector")
+        import linear_coupling as lc
+        return lc
+
+    def test_matrix_complete(self):
+        """Шесть выходов на пять обмоток, числа конечны, скошенные у main запрещены симметрией."""
+        lc = self._lc()
+        K = lc.load("corrector")
+        self.assertEqual(set(K), {"B", "Bv", "G", "Gv", "S", "Sv"})
+        for sym, row in K.items():
+            self.assertEqual(set(row), {"c1", "c2", "c3", "c4", "main"}, sym)
+            self.assertTrue(all(np.isfinite(v) for v in row.values()), sym)
+        for sym in ("Bv", "Gv", "Sv"):
+            self.assertEqual(K[sym]["main"], 0.0, f"{sym}: main не создаёт скошенных компонент")
+
+    def test_accuracy_holds(self):
+        lc = self._lc()
+        acc = lc.accuracy("corrector")
+        for key, lim in self.LIMITS.items():
+            self.assertIn(key, acc, f"нет карт группы {key}")
+            val, n = acc[key]
+            self.assertLess(val, lim, f"порядок {key[0]} {key[1]}: {val:.2f}% (порог {lim}, {n} карт)")
+
+    def test_solver_roundtrip(self):
+        """Через единый решатель: токи → физкоэффициенты → токи (пять целей на пять обмоток)."""
+        self._lc()
+        import saturation_solve as ss
+        cur = {"c1": 1.2, "c2": -0.7, "c3": 0.4, "c4": 1.5, "main": 0.9}
+        fwd = ss.forward("corrector", cur)
+        back = ss.inverse("corrector", {k: fwd[k][0] for k in ("B", "Bv", "G", "Gv", "S")})
+        for w, v in cur.items():
+            self.assertAlmostEqual(back[w], v, delta=1e-6, msg=w)
 
 
 if __name__ == "__main__":

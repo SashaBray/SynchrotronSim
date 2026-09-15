@@ -54,11 +54,16 @@ KIND_MOMENTS = {"dq": ("B", "G", "S"), "kicker": ("B", "Bv", "G", "Gv", "S", "Sv
 
 PROBE_SCAN = (1e-3, 3e-3, 5e-3, 8e-3, 11e-3, 14e-3)   # карты все ±50 мм, 14 мм внутри хорошего поля
 PLOT_RADIUS = {1: 1e-3, 2: 5e-3, 3: 8e-3, 4: 14e-3}
-# Модель связи (`branch_network.R_PROBE`) обучена на гармониках, снятых на ОДНОМ радиусе 8 мм для
-# всех порядков. Сравнивать её с точками, снятыми на других радиусах, нельзя: поле не идеальный
-# мультиполь, и величина от радиуса зависит — у c1 корректора полка B на 1 мм и на 8 мм расходится
-# на 15%. Поэтому у многообмоточных точки берутся на радиусе модели.
-MODEL_RADIUS = {n: 8e-3 for n in (1, 2, 3, 4)}
+# Модель связи обучена на гармониках, снятых на радиусах `branch_network.PROBE_R` — своих у каждого
+# порядка. Сравнивать её с точками, снятыми на других радиусах, нельзя: поле не идеальный мультиполь,
+# и величина от радиуса зависит — у c1 корректора полка B на 1 мм и на 8 мм расходится на 15%.
+# Поэтому у многообмоточных точки берутся на радиусах модели, и берутся ОТТУДА ЖЕ, чтобы не разойтись.
+def _model_radius():
+    import branch_network as bn
+    return dict(bn.PROBE_R)
+
+
+MODEL_RADIUS = _model_radius()
 # Радиусы, НА КОТОРЫХ проверяется устойчивость данного порядка. Проверять октуполь на 1 мм
 # бессмысленно: там он заведомо под шумовым полом, и настоящий момент отбраковался бы вместе с
 # шумом — у секступоля SP, его ГЛАВНОГО момента, так и выходило 56%.
@@ -573,13 +578,19 @@ def single_current(el, L, pts, order, y_design, tpc, sign, tag=""):
 
 
 def single_model_curve(el, L, pts, order, tpc, ef, tag=""):
-    """Кривая граф-модели для показа: (ток_А, значение_в_шкале_графика) свипом по кику y."""
+    """Кривая граф-модели для показа: (ток_А, значение_в_шкале_графика) свипом по кику y.
+
+    Граф-модель работает с МОДУЛЕМ кика (у одиночной обмотки знак постоянен), а измерения на графике
+    знаковые. Поэтому кривой возвращается знак измерений — иначе она отражается относительно оси
+    тока там, где момент отрицателен, и это выглядит как ошибка модели."""
     import single_winding_model as sw
     par, ymax = single_graph_fit(el, L, pts, order, tag)
     yg = np.linspace(0.0, ymax * 1.05, 400)
     ni = sw.graph_mmf(par, yg, _hof(), _ns(par))
     x = ni / (tpc or 1)
-    yv = yg * math.factorial(order - 1) / (L * ef)          # то же, что to_coef
+    vals = [p[1][order][0] for p in pts]
+    sgn = 1.0 if vals[int(np.argmax(np.abs(vals)))] >= 0 else -1.0
+    yv = sgn * yg * math.factorial(order - 1) / (L * ef)     # то же, что to_coef, со знаком карт
     # На полке ток растёт быстрее любой полезной шкалы: за пределами снятых карт линия только
     # растянула бы ось, поэтому обрезаем её по измеренному диапазону тока.
     xmax = max(p[0] for p in pts) / (tpc or 1) * 1.05
@@ -658,20 +669,20 @@ def plot_winding(m, label, pts, turns, L, moments, design, cur, ef, outdir, mode
     for k, mp in enumerate(moments):
         n, comp = MOMENT[mp]
         a, col = axes[mp], MOMENT_COLOR[mp]
-        y = np.array([to_coef(p[1][n][comp], mp, L, ef) for p in pts])
+        # У ОДНООБМОТОЧНОГО магнита знак момента постоянен и ничего не сообщает, а проектные
+        # значения в таблицах отчёта даны по модулю; знак здесь только спорил бы с ними. Знаковые
+        # величины нужны многообмоточным, где обмотки отличаются именно знаком, — там своя сетка.
+        y = np.abs(np.array([to_coef(p[1][n][comp], mp, L, ef) for p in pts]))
         a.plot(x, y, "o", color=col, ms=5, mec="white", mew=0.7, zorder=3)   # измерения — точки
         if mp in model:                                                       # модель — линия
             mx, my = model[mp]
-            a.plot(mx, my, "-", color=col, lw=1.8, zorder=2)
+            a.plot(mx, np.abs(my), "-", color=col, lw=1.8, zorder=2)
         a.set_ylabel(mp, color=col, fontsize=10)
         a.tick_params(axis="y", labelcolor=col, labelsize=8)
         if k > 1:
             a.spines["right"].set_position(("outward", 46 * (k - 1)))
-        # Значения знаковые: у противоположных обмоток компоненты отличаются именно знаком.
-        # Проектная линия ставится на ту сторону, где лежат измерения этой обмотки.
-        span = list(y) + (list(model[mp][1]) if mp in model else [])
-        sgn = 1.0 if y[int(np.argmax(np.abs(y)))] >= 0 else -1.0
-        d = sgn * abs(design.get(mp, 0.0))
+        span = list(y) + ([abs(v) for v in model[mp][1]] if mp in model else [])
+        d = abs(design.get(mp, 0.0))
         if abs(d) > 1e-30:
             a.axhline(d, color=col, lw=1.2, ls="-", alpha=0.85, zorder=1)
             a.annotate(f"{mp} = {d:.4e}", xy=(0.015, 0.965 - 0.055 * k), xycoords="axes fraction",
@@ -777,33 +788,46 @@ def plot_combos(el, name, outdir):
     import saturation_solve as ss
 
     leff = float(ss._row(el)["leff"])
+    linear = ss._row(el)["model"] == "linear"
+    turns = {w: ss._turns(el, w) for w in ss._hw(el)[0] if w}
     parts = (0, 1) if el == "corrector" else (0,)
     cols = [(n, c) for n in (1, 2, 3) for c in parts]
 
     def phys(n, z, comp):
         part = z.real if comp else z.imag
-        return ss.MAT_SIGN[n] * math.factorial(n - 1) / ss.R_PROBE ** (n - 1) * part / leff
+        return ss.MAT_SIGN[n] * math.factorial(n - 1) / ss.R_PROBE_OF(n) ** (n - 1) * part / leff
 
     fig, axs = plt.subplots(1, len(cols), figsize=(3.05 * len(cols), 4.0), squeeze=False)
     handles = {}
     for k, (n, comp) in enumerate(cols):
         a = axs[0][k]
         maps = bn.read_maps(el, n)
-        groups = (("одиночные (подгонка)", "#9aa0a6", 4.5,
-                   [t for t in maps if len(t[0]) == 1]),
-                  ("комбинации в подгонке", "#e8a33d", 5.0,
-                   [t for t in maps if len(t[0]) > 1 and t[2] == "train"]),
-                  ("комбинации отложенные (проверка)", "#c0392b", 5.5,
-                   [t for t in maps if len(t[0]) > 1 and t[2] != "train"]))
+        if linear:
+            # матрица корректора подогнана только на одиночных: все комбинации — проверка
+            groups = (("одиночные (подгонка)", "#9aa0a6", 4.5,
+                       [t for t in maps if len(t[0]) == 1]),
+                      ("комбинации (проверка)", "#c0392b", 5.5,
+                       [t for t in maps if len(t[0]) > 1]))
+        else:
+            groups = (("одиночные (подгонка)", "#9aa0a6", 4.5,
+                       [t for t in maps if len(t[0]) == 1]),
+                      ("комбинации в подгонке", "#e8a33d", 5.0,
+                       [t for t in maps if len(t[0]) > 1 and t[2] == "train"]),
+                      ("комбинации отложенные (проверка)", "#c0392b", 5.5,
+                       [t for t in maps if len(t[0]) > 1 and t[2] != "train"]))
         err = float("nan")
         for lbl, colr, msz, grp in groups:
             if not grp:
                 continue
             x = np.array([phys(n, complex(m), comp) for c, m, _, _ in grp])
-            y = np.array([phys(n, cm.predict(el, n, c), comp) for c, m, _, _ in grp])
+            if linear:
+                y = np.array([ss.graph_moment(el, {w: v / turns[w] for w, v in c.items()},
+                                              n, comp)[0] for c, m, _, _ in grp])
+            else:
+                y = np.array([phys(n, cm.predict(el, n, c), comp) for c, m, _, _ in grp])
             handles[lbl] = a.plot(x, y, "o", color=colr, ms=msz, mec="white", mew=0.5,
-                                  zorder=4 if "отложен" in lbl else 2)[0]
-            if "отложен" in lbl:
+                                  zorder=4 if "проверка" in lbl else 2)[0]
+            if "проверка" in lbl:
                 den = float(np.sum(np.abs(x)))
                 err = 100 * float(np.sum(np.abs(y - x))) / den if den else float("nan")
         lim = max(abs(v) for v in list(a.get_xlim()) + list(a.get_ylim()))
@@ -1028,6 +1052,29 @@ def build(out=OUT, src=SRC, figs=PNG):
         # Кривые физкоэффициентов от тока (у всех элементов с картами; corrector — только они).
         add(doc.add_paragraph(f"Кривые физкоэффициентов {m['name']} от тока обмоток "
                               f"(по трёхмерным картам поля; линии — модель, точки — измерения)")._p)
+        if kind == "kicker":
+            add(doc.add_paragraph(
+                f"{m['name']} работает только в линейной области (номинальный ток 2 А, насыщения "
+                "не достигает), поэтому связь токов обмоток и физкоэффициентов описана линейной "
+                "матрицей, подогнанной на картах поля с токами до 2,5 А на катушку.")._p)
+        if kind == "dq":
+            # У диполя-квадруполя модель — это САМ ГРАФ магнитной цепи, поэтому глава начинается с
+            # него: без рисунка кривые не с чем соотнести.
+            try:
+                import plot_magnet_graph as pmg
+                gpng = os.path.join(figs, f"{el}_graph.png")
+                pmg.draw(el, out=gpng)
+            except Exception as exc:
+                print(f"  {m['name']}: граф не нарисован ({exc})")
+            else:
+                add(doc.add_paragraph(
+                    f"Магнитная цепь {m['name']}: вершины — развилки потока и наконечники полюсов, "
+                    "рёбра — участки железа (сплошные) и воздушные пути (пунктир), катушки стоят на "
+                    "рёбрах. Именно этот граф и есть модель: кривые ниже получены его решением.")._p)
+                pic = doc.add_paragraph()
+                pic.add_run().add_picture(gpng, width=Inches(6.5))
+                add(pic._p)
+
         if kind in ("dq", "kicker"):        # сетка «момент × обмотка»: шесть кривых на одном
             moments = [mp for mp in MOMENT if mp in allow]      # поле сливаются в кашу
             turns_by_w = {lb: ec.dev_tpc(m["devs"][j]) for j, lb in enumerate(m["labels"])}
@@ -1046,6 +1093,9 @@ def build(out=OUT, src=SRC, figs=PNG):
                 print(f"  {m['name']}: картинка комбинаций не построена ({exc})")
             else:
                 add(doc.add_paragraph(
+                    "Проверка суперпозиции на комбинациях токов. Матрица подогнана только на "
+                    "одиночных картах; комбинации в подгонке не участвовали, по ним и считается "
+                    "ошибка в заголовках." if kind == "kicker" else
                     "Проверка переноса на комбинации токов. Модель подогнана на одиночных картах и "
                     "части комбинаций; отложенные комбинации в подгонке не участвовали, по ним и "
                     "считается ошибка в заголовках.")._p)

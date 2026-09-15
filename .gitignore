@@ -119,3 +119,7 @@ workspace/tables/snapshot_closed/
 
 # кэш разложения карт (перестраивается build_kick_datasets.py, ~200 КБ машинного JSON)
 workspace/datasets/**/_harmonics_cache.json
+
+# отложенные к удалению данные и папка экспорта AEDT — большие, не для репозитория
+workspace/_на_удаление/
+workspace/aedt_exports/

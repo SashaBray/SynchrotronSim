@@ -38,7 +38,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join("workspace", "tables", "saturation_models.csv")
 HWLIB = os.path.join("workspace", "tables", "hardware_library.csv")
 SINGLE = {"QP_sh": "G", "QP_L": "G", "SP": "S", "OP": "O"}
-MULTI = ("DQ", "corrector")
+MULTI = ("DQ",)
+# Корректор работает только в линейной области: его модель — линейная матрица (linear_coupling).
+LINEAR = ("corrector",)
 ORDER = {"B": 1, "G": 2, "S": 3, "O": 4}
 
 
@@ -150,6 +152,20 @@ def main(argv=None):
             continue
         out.append([el, "", "", "graph", "B,G,S", "", "", f"{_leff_ref(el):.6g}", "",
                     "граф saturation_branches + веса mec_sigma_weights; расчёт coupling_model"])
+    for el in LINEAR:
+        if a.only and el != a.only:
+            continue
+        import linear_coupling as lc
+        import saturation_solve as ss
+        K, n_maps = lc.fit(el)
+        lc.write(el, K, n_maps)
+        acc = lc.accuracy(el, K)
+        # l_eff — у исполнения, стоящего в решётке (у корректора оно одно)
+        _, lens = ss._hw(el)
+        leff = next((v for d, v in sorted(lens.items()) if "_L" in d), None) or _leff_ref(el)
+        out.append([el, "", "", "linear", "B,Bv,G,Gv,S,Sv", "", "", f"{leff:.6g}",
+                    f"{acc[(1, 'одиночные')][0]:.2f}",
+                    f"линейная матрица linear_coupling.csv, токи до {lc.RANGE_A[el]:g} А на катушку"])
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with io.open(OUT, "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f, delimiter=";")

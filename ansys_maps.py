@@ -36,7 +36,12 @@ import sys
 REQUEST = os.path.join("workspace", "tables", "map_request.csv")
 AEDT_EXE = r"C:\Program Files\ANSYS Inc\v252\AnsysEM\ansysedt.exe"
 PROJECTS = r"C:\Sasha\Work\ansys_projects"
-KD = r"C:\Sasha\Work\SILA\ansis approximations\KD"
+# Папка, куда AEDT пишет экспорт и откуда берётся эталонная сетка. Прежняя (рядом с КД) убрана с
+# диска; если её нет, экспорт идёт в папку проекта. Переопределяется переменной SS_AEDT_EXPORT.
+_KD_OLD = r"C:\Sasha\Work\SILA\ansis approximations\KD"
+KD = (os.environ.get("SS_AEDT_EXPORT")
+      or (_KD_OLD if os.path.isdir(_KD_OLD)
+          else os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspace", "aedt_exports")))
 # Именованное выражение калькулятора, которым сняты ВСЕ прежние карты — видно в их шапке:
 # `X, Y, Z, Vector data "B_Vector"`. Сырое EnterQty("B") даёт величину с именем "<Bx,By,Bz>",
 # и карта становится несопоставимой с серией. Менять нельзя.

@@ -33,18 +33,31 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import saturation_model as sm
 from field_quality import load, _body_slice, _circle
 
-R_PROBE, NTH = 8e-3, 128
+NTH = 128
+# Радиус пробы СВОЙ у каждого порядка: поле мультиполя растёт как r^(n-1), а численный шум карты
+# аддитивен, поэтому слабый высокий момент на малом радиусе тонет. Радиусы выбраны по ГЛАДКОСТИ
+# ряда «кик от тока» (каждая точка против параболы по соседям): у корректора секступоль на 8 мм
+# шумит 4.16%, на 14 мм — 1.91%, квадруполь 2.83% против 1.92%. У однообмоточных эта поправка была
+# сделана давно (секступолю 5→8 мм, октуполю 8→14), до многообмоточных не дошла. Дальше 14 мм не
+# уходим: карты ±50 мм, и за этой границей хорошее поле кончается.
+PROBE_R = {1: 11e-3, 2: 14e-3, 3: 14e-3, 4: 14e-3}
+R_PROBE = PROBE_R[1]                      # совместимость: прежнее имя = радиус диполя
+
+
+def probe_r(n):
+    return PROBE_R.get(int(n), PROBE_R[max(PROBE_R)])
 REGISTRY = sm.REGISTRY
 
 
 # ───────────────────────────── измерение по картам ─────────────────────────────
 
-def harmonic_complex(path, n, r=R_PROBE, integrate=True):
+def harmonic_complex(path, n, r=None, integrate=True):
     """КОМПЛЕКСНАЯ гармоника n карты. По умолчанию — ИНТЕГРАЛ вдоль пучка (это и есть кик).
 
     Гармоника в одном срезе смещена: эффективная длина поля разная у разных обмоток (у корректора
     160 мм у c1/c3/main против 176 мм у c2/c4 — они дальше от ярма), и сравнение по центральному
     сечению вносит систематику до 9%. Карта — половина магнита, поэтому интеграл удваивается."""
+    r = probe_r(n) if r is None else r
     h, B = load(path)
     if not integrate:
         by, bz = _circle(h, B, _body_slice(h, B), r, nth=NTH)
@@ -92,7 +105,7 @@ def read_maps(element, order=1):
                 pass
         if not cur:
             continue
-        key = f"{r['map_id']}|{order}|int"
+        key = f"{r['map_id']}|{order}|int|r{probe_r(order) * 1e3:g}"
         if key in cache:
             h = complex(cache[key][0], cache[key][1])
         else:
