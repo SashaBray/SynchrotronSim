@@ -49,7 +49,7 @@ s2_SZ;sext;k2;40;s2lattice KSEXT
 s2_Bq;dipole;theta_y;40;s2lattice CSBEND
 s2_BM;dipole;theta_y;40;s2lattice CSBEND
 sila26_QF1A;quad;k1;40;импорт .lte, KQUAD
-sila26_SH1A;sext;k2;40;импорт .lte, KSEXT
+sila26_SH1A;kicker;kick_y|kick_z;40;импорт .lte, KSEXT
 sila26_QD2A;quad;k1;40;импорт .lte, KQUAD
 sila26_DL1A_5;dipole;theta_y;40;импорт .lte, CSBEND
 sila26_DL1A_4;dipole;theta_y;40;импорт .lte, CSBEND
@@ -72,7 +72,7 @@ sila26_DL2B_5;dipole;theta_y;40;импорт .lte, CSBEND
 sila26_QF6B;dq;theta_y|k1|k2;40;импорт .lte, CSBEND
 sila26_DQ1B;dq;theta_y|k1|k2;40;импорт .lte, CSBEND
 sila26_QF8B;quad;k1;40;импорт .lte, KQUAD
-sila26_SH2B;sext;k2;40;импорт .lte, KSEXT
+sila26_SH2B;kicker;kick_y|kick_z;40;импорт .lte, KSEXT
 sila26_DQ2C_1A;dq;theta_y|k1|k2;40;импорт .lte, CSBEND
 sila26_DQ2C_1B;dq;theta_y|k1|k2;40;импорт .lte, CSBEND
 sila26_SBM_1;dipole;theta_y;40;импорт .lte, CSBEND
@@ -101,7 +101,7 @@ sila26_DL1E_3;dipole;theta_y;40;импорт .lte, CSBEND
 sila26_DL1E_4;dipole;theta_y;40;импорт .lte, CSBEND
 sila26_DL1E_5;dipole;theta_y;40;импорт .lte, CSBEND
 sila26_QD2E;quad;k1;40;импорт .lte, KQUAD
-sila26_SH3E;sext;k2;40;импорт .lte, KSEXT
+sila26_SH3E;kicker;kick_y|kick_z;40;импорт .lte, KSEXT
 sila26_QF1E;quad;k1;40;импорт .lte, KQUAD
 sila26_QF1L;quad;k1;40;импорт .lte, KQUAD
 sila26_QD2L;quad;k1;40;импорт .lte, KQUAD
@@ -131,7 +131,7 @@ sila26_JL1A_3;dipole;theta_y;40;импорт .lte, CSBEND
 sila26_JL1A_2;dipole;theta_y;40;импорт .lte, CSBEND
 sila26_JL1A_1;dipole;theta_y;40;импорт .lte, CSBEND
 sila25_QF1J;quad;k1;40;импорт .lte, KQUAD
-sila25_SH1A;sext;k2;40;импорт .lte, KSEXT
+sila25_SH1A;kicker;kick_y|kick_z;40;импорт .lte, KSEXT
 sila25_QD2J;quad;k1;40;импорт .lte, KQUAD
 sila25_JL1A_5;dipole;theta_y;40;импорт .lte, CSBEND
 sila25_JL1A_4;dipole;theta_y;40;импорт .lte, CSBEND
@@ -155,7 +155,7 @@ sila25_DL2B_5;dipole;theta_y;40;импорт .lte, CSBEND
 sila25_QF6BI;quad;k1;40;импорт .lte, KQUAD
 sila25_DQ1BI;dq;theta_y|k1|k2;40;импорт .lte, CSBEND
 sila25_QF8BI;quad;k1;40;импорт .lte, KQUAD
-sila25_SH2B;sext;k2;40;импорт .lte, KSEXT
+sila25_SH2B;kicker;kick_y|kick_z;40;импорт .lte, KSEXT
 sila25_DQ2C_1I;dq;theta_y|k1|k2;40;импорт .lte, CSBEND
 sila25_SBM;dipole;theta_y;40;импорт .lte, CSBEND
 sila25_DQ2C_2I;dq;theta_y|k1|k2;40;импорт .lte, CSBEND
@@ -181,7 +181,7 @@ sila25_DL1E_3;dipole;theta_y;40;импорт .lte, CSBEND
 sila25_DL1E_4;dipole;theta_y;40;импорт .lte, CSBEND
 sila25_DL1E_5;dipole;theta_y;40;импорт .lte, CSBEND
 sila25_QD2L;quad;k1;40;импорт .lte, KQUAD
-sila25_SH3E;sext;k2;40;импорт .lte, KSEXT
+sila25_SH3E;kicker;kick_y|kick_z;40;импорт .lte, KSEXT
 sila25_QF1L;quad;k1;40;импорт .lte, KQUAD
 sila25_QF1A;quad;k1;40;импорт .lte, KQUAD
 sila25_QD2A;quad;k1;40;импорт .lte, KQUAD

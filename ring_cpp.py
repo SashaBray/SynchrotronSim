@@ -35,12 +35,13 @@ class CppRing:
     label = "SynchrotronSim"
 
     def __init__(self, lattice=1, start_before_first_m=None, settings=None, sr=False, isr=False, rf=None,
-                 design_mev=6000.0, nsl=None, order=None, seed=12345):
+                 design_mev=6000.0, nsl=None, order=None, seed=12345, ws=None):
         dn, do = _default_slices()
         self.lattice = int(lattice)
         self.lead = start_before_first_m
         self.sr, self.isr, self.rf, self.design_mev = bool(sr or isr), bool(isr), rf, float(design_mev)
         self.nsl = int(nsl or dn); self.order = int(order or do); self.seed = int(seed)
+        self.ws = ws                            # путь к workspace с ВОЗМУЩЁННОЙ решёткой (ансамбли ошибок); None — обычная БД
         self.settings = settings
         self._perturb = []                      # [("KICK"|"YAW", j, value)] — для копий и описания магнитов
         self._py = None
@@ -56,6 +57,8 @@ class CppRing:
                 "1" if self.sr else "0", "1" if self.isr else "0", str(self.nsl), str(self.order),
                 "1" if self.rf else "0", repr(float(rf.get("volt_mv", 0.0))), repr(float(rf.get("harmonic", 0.0))),
                 repr(float(rf.get("phase_deg", 0.0))), str(self.seed)]
+        if self.ws:                             # возмущённая рабочая папка (ансамбли ошибок) — 13-й аргумент
+            args.append(self.ws)
         self._proc = subprocess.Popen(args, cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                       stderr=subprocess.DEVNULL, bufsize=0)
         head = self._proc.stdout.readline().decode("utf-8", "replace").split()
@@ -184,17 +187,35 @@ class CppRing:
         return r
 
     def with_kick(self, j, theta):
-        """Кольцо с однородным киком θ в магните j (корректор; дрейф–кик–дрейф по n_slices из БД)."""
+        """Кольцо с однородным ГОР. киком θ в магните j (корректор; дрейф–кик–дрейф по n_slices из БД)."""
         return self._copy_with("KICK", j, theta)
+
+    def with_vkick(self, j, theta):
+        """Кольцо с однородным ВЕРТ. киком θ в магните j (корректор орбиты по y)."""
+        return self._copy_with("VKICK", j, theta)
 
     def with_yaw(self, j, alpha):
         """Кольцо с магнитом j, повёрнутым на α вокруг вертикали входа (ring_analysis.yaw_element)."""
         return self._copy_with("YAW", j, alpha)
 
-    def perturbed(self, kicks=(), yaws=()):
-        """Кольцо с несколькими возмущениями сразу: kicks=[(j, θ)], yaws=[(j, α)] — один процесс."""
+    def apply_perturb(self, kicks=(), vkicks=()):
+        """Применить кики корректоров НА ТОМ ЖЕ сервере (RESET + KICK/VKICK), без нового процесса.
+        Для матрицы отклика и итераций коррекции орбиты. RESET пересобирает кольцо из ws (ошибки
+        рассогласования в ws СОХРАНЯЮТСЯ, сбрасываются только прежние кики). Возврат self."""
+        self._text("RESET")
+        for j, v in kicks:
+            self._text(f"KICK {int(j)} {float(v)!r}")
+        for j, v in vkicks:
+            self._text(f"VKICK {int(j)} {float(v)!r}")
+        self._py = None
+        return self
+
+    def perturbed(self, kicks=(), yaws=(), vkicks=()):
+        """Кольцо с несколькими возмущениями сразу: kicks=[(j, θ)] (гор.), vkicks=[(j, θ)] (верт.),
+        yaws=[(j, α)] — один процесс сервера."""
         r = copy.copy(self)
         r._perturb = (list(self._perturb) + [("KICK", int(j), float(v)) for j, v in kicks]
+                      + [("VKICK", int(j), float(v)) for j, v in vkicks]
                       + [("YAW", int(j), float(v)) for j, v in yaws])
         r._py = None
         r._start()

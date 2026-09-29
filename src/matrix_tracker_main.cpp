@@ -289,7 +289,15 @@ static int runRingServe(int argc, char* argv[]) {
     _setmode(_fileno(stdin), _O_BINARY); _setmode(_fileno(stdout), _O_BINARY);
     #endif
     mc::RingModel R;
-    R.ws = findWorkspace(argv[0]);
+    // необязательный 13-й аргумент (после seed) — путь к рабочей папке workspace/ с ВОЗМУЩЁННОЙ
+    // lattice_configs (для ансамблей ошибок); по умолчанию — авто-поиск от пути exe.
+    if (argc >= 15 && argv[14][0]) {
+        std::string w = argv[14];
+        if (!w.empty() && w.back() != '/' && w.back() != '\\') w += '/';
+        R.ws = w;
+    } else {
+        R.ws = findWorkspace(argv[0]);
+    }
     std::string lead = argv[3];
     R.cfg.lattice = std::stoi(argv[2]);
     R.cfg.lead = (lead == "nan" || lead == "none") ? std::numeric_limits<double>::quiet_NaN() : std::stod(lead);

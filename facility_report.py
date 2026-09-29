@@ -25,6 +25,13 @@ import webbrowser
 import numpy as np
 import plotly.graph_objects as go
 
+for _s in (sys.stdout, sys.stderr):                           # греческие буквы в лог не должны падать на cp1251
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+import errors as errmod                                       # ошибки установки: допуски + возмущённая решётка
 import ring_analysis as ra
 import ring_cpp
 import ring_map as rmap
@@ -60,10 +67,12 @@ def info_of(lattice):
     return LATTICE_INFO[lattice]
 
 
-def _ring(inf, nsl=40, order=4, rf=False):
+def _ring(inf, nsl=40, order=4, rf=False, ws=None):
     kw = dict(lattice=inf["_id"], design_mev=inf["energy_mev"], nsl=nsl, order=order)
     if rf:
         kw["rf"] = dict(volt_mv=inf["rf"][0], harmonic=inf["rf"][1])
+    if ws:                                                    # возмущённая рабочая папка (ансамбль ошибок)
+        kw["ws"] = ws
     return ring_cpp.CppRing(**kw)
 
 
@@ -267,6 +276,130 @@ def momentum_aperture(ring, inf, turns, co, xe, dpos, dneg):
     return dict(ds=ds, surv=surv, turns=turns,
                 acc_pos=pos.max() if pos.size else 0.0, acc_neg=neg.min() if neg.size else 0.0)
 
+
+# ------------------------------------------------------------------ АНСАМБЛЬ МАШИН С ОШИБКАМИ
+def _edge_prob(xs, ys, prob, level=0.5):
+    """Граница ДА по уровню вероятности выживания level: дальний по |x| в каждой строке y."""
+    x0 = int(np.argmin(np.abs(xs))); ep = []; en = []
+    for r in range(len(ys)):
+        row = prob[r] >= level
+        rp = xs[x0:][row[x0:]]; rn = xs[:x0 + 1][row[:x0 + 1]]
+        ep.append(rp.max() if rp.size else 0.0); en.append(rn.min() if rn.size else 0.0)
+    return np.array(ep), np.array(en)
+
+
+def ensemble(lattice, inf, lin, turns, n_seeds, tol, cutoff, seed0=1000, correct=False):
+    """Ансамбль из n_seeds случайных машин с ошибками. Возврат агрегатов: ДА как ВЕРОЯТНОСТЬ выживания
+    по seed'ам, средняя диффузия, импульсная как доля выживших, и статистика влияния ошибок (искажение
+    орбиты, разброс частот, доля неустойчивых машин). Сетки фиксируются по ИДЕАЛЬНОЙ машине (1.5× границ),
+    чтобы все seed'ы считались на одной сетке.
+    correct=True — на каждой машине выправить замкнутую орбиту корректорами (матрица отклика + SVD,
+    orbit_correct.py); отчёт тогда отражает УЖЕ скорректированную установку и добавляет статистику
+    коррекции (орбита до/после, СКО и максимум углов корректоров)."""
+    import shutil
+    import tempfile
+    ideal = _ring(inf)
+    co0, xe, ye, dpos, dneg = auto_ranges(ideal, inf, turns)
+    xs = np.linspace(-1.5 * xe, 1.5 * xe, 41); ys_h = np.linspace(0.0, 1.5 * ye, 16)
+    fxs = np.linspace(-1.5 * xe, 1.5 * xe, 61); fys_h = np.linspace(0.0, 1.5 * ye, 16)
+    D = 1.2 * max(dpos, dneg, 1e-3); ds = np.linspace(-D, D, 61)
+    n_half = turns // 2
+    beta = (lin["betax0"], lin["betay0"]); alpha = (lin["alphax0"], lin["alphay0"])
+    resp = None; n_corr = 0
+    if correct:                                               # матрица отклика — один раз, на идеале (кэш)
+        import orbit_correct as oc
+        resp = oc.cached_response_matrix(ideal, lattice)
+        n_corr = len(resp["corr"])
+    bpm_rows = np.arange(1, ideal.n_mag + 1)                   # выходы всех магнитов — точки наблюдения орбиты
+    da_sum = np.zeros((len(ys_h), len(xs)))
+    fdiff_sum = np.zeros((len(fys_h), len(fxs))); fdiff_cnt = np.zeros_like(fdiff_sum)
+    mom_sum = np.zeros(len(ds))
+    co_x = []; co_y = []; nux = []; nuy = []; n_unstable = 0
+    co_x0 = []; co_y0 = []; kx = []; ky = []; kx_max = 0.0; ky_max = 0.0    # статистика коррекции
+    root = tempfile.mkdtemp(prefix="ens_")
+    try:
+        for s in range(n_seeds):
+            wsdir = os.path.join(root, f"s{s}")
+            errmod.perturbed_workspace(lattice, seed0 + s, tol, wsdir, cutoff)
+            r = _ring(inf, ws=wsdir)
+            if correct:                                       # выправить орбиту корректорами (стационарно)
+                import orbit_correct as oc
+                try:
+                    res = oc.correct(r, resp)
+                except Exception:
+                    res = None
+                if res is None:
+                    n_unstable += 1; r.close(); continue
+                co = res["co"]
+                co_x0.append(oc.rms(res["orb_before"][0])); co_y0.append(oc.rms(res["orb_before"][1]))
+                co_x.append(oc.rms(res["orb_after"][0])); co_y.append(oc.rms(res["orb_after"][1]))
+                kx.append(oc.rms(res["thx"])); ky.append(oc.rms(res["thy"]))
+                kx_max = max(kx_max, float(np.max(np.abs(res["thx"]))) if len(res["thx"]) else 0.0)
+                ky_max = max(ky_max, float(np.max(np.abs(res["thy"]))) if len(res["thy"]) else 0.0)
+            else:
+                try:
+                    co = ra.closed_orbit(r, dims=4)
+                    stable = bool(np.all(np.isfinite(co)))
+                except Exception:
+                    co, stable = None, False
+                if not stable:                                # машина неустойчива → всюду 0 выживших
+                    n_unstable += 1; r.close(); continue
+                orb = r.track_elements([co])[0]               # орбита по всему кольцу (СКО искажения)
+                co_x.append(float(np.sqrt(np.mean(np.square(orb[bpm_rows, 0])))))
+                co_y.append(float(np.sqrt(np.mean(np.square(orb[bpm_rows, 2])))))
+            try:                                              # частоты этой машины (для разброса тюна)
+                _, M = ra.one_turn_matrix(r, orbit=co)
+                qx, qy = ra.tunes_from_matrix(M)
+                if math.isfinite(qx):
+                    nux.append(qx); nuy.append(qy)
+            except Exception:
+                pass
+            da_sum += _da_alive(r, inf, turns, co, xs, ys_h).astype(float)
+            st = _grid_states(co, fxs, fys_h)
+            tbt = r.track_tbt(st, 2 * n_half, limit=inf["loss_m"])
+            _, _, diff = ra.frequency_map(tbt, beta, alpha, co, n_half)
+            diff = diff.reshape(len(fys_h), len(fxs)); ok = np.isfinite(diff)
+            fdiff_sum[ok] += diff[ok]; fdiff_cnt[ok] += 1
+            mom_sum += _mom_alive(r, inf, turns, co, xe, ds).astype(float)
+            r.close()
+    finally:
+        ideal.close()
+        shutil.rmtree(root, ignore_errors=True)
+    prob = da_sum / max(n_seeds, 1)
+    ys, prob = _mirror_y(ys_h, prob)
+    ep, en = _edge_prob(xs, ys, prob, 0.5)
+    fdiff = np.where(fdiff_cnt > 0, fdiff_sum / np.maximum(fdiff_cnt, 1), np.nan)
+    fys, fdiff = _mirror_y(fys_h, fdiff)
+    da = dict(xs=xs, ys=ys, prob=prob, turns=turns, edge_pos=ep, edge_neg=en, ensemble=n_seeds)
+    fma = dict(xs=fxs, ys=fys, diff2d=fdiff, ensemble=n_seeds)
+    momp = mom_sum / max(n_seeds - n_unstable, 1)
+    mom = dict(ds=ds, prob=momp, turns=turns, ensemble=n_seeds,
+               acc_pos=float(ds[(ds > 0) & (momp >= 0.5)].max()) if np.any((ds > 0) & (momp >= 0.5)) else 0.0,
+               acc_neg=float(ds[(ds < 0) & (momp >= 0.5)].min()) if np.any((ds < 0) & (momp >= 0.5)) else 0.0)
+    _rms = lambda a: float(np.sqrt(np.mean(np.square(a)))) if a else float("nan")
+    err = dict(n_seeds=n_seeds, n_unstable=n_unstable, n_stable=n_seeds - n_unstable,
+               co_x_rms=_rms(co_x), co_y_rms=_rms(co_y),
+               nux_mean=float(np.mean(nux)) if nux else float("nan"),
+               nux_std=float(np.std(nux)) if nux else float("nan"),
+               nuy_mean=float(np.mean(nuy)) if nuy else float("nan"),
+               nuy_std=float(np.std(nuy)) if nuy else float("nan"),
+               da_ideal_x=1.5 * xe, corrected=correct, n_corr=n_corr)
+    if correct:                                               # орбита ДО коррекции и силы корректоров
+        err.update(co_x_rms0=_rms(co_x0), co_y_rms0=_rms(co_y0),
+                   corr_x_rms=_rms(kx), corr_y_rms=_rms(ky), corr_x_max=kx_max, corr_y_max=ky_max)
+    return dict(da=da, fma=fma, mom=mom, err=err)
+
+
+def _da_alive(ring, inf, turns, co, xs, ys):
+    tbt = ring.track_tbt(_grid_states(co, xs, ys), turns, limit=inf["loss_m"])
+    return ra.survived_turns(tbt, limit=inf["loss_m"]).reshape(len(ys), len(xs)) >= turns
+
+
+def _mom_alive(ring, inf, turns, co, xe, ds):
+    st = np.tile(co, (len(ds), 1)).astype(float); st[:, 5] += ds; st[:, 0] += 0.3 * xe
+    return ra.survived_turns(ring.track_tbt(st, turns, limit=inf["loss_m"]), limit=inf["loss_m"]) >= turns
+
+
 def families(ring):
     """Таблица магнитов по семействам: тип, число, длина, сила (K1/K2/K3)."""
     fam = {}
@@ -364,13 +497,14 @@ def _lin(t):
     return (t[0], t[1], int(t[2]))
 
 
-def analyze(lattice, turns=512, fast=False, track_cache=None):
+def analyze(lattice, turns=512, fast=False, track_cache=None, errors_cfg=None):
     """Полный расчёт установки. Аналитика (геометрия/оптика/структура/footprint) — всегда мгновенно.
     Трекинг (ДА/карта частот/импульс) считается, если не fast; track_cache подставляет готовый трекинг
-    (для --rebuild: пересчитать только аналитику, не гоняя обороты заново)."""
+    (--rebuild). errors_cfg={n_seeds, tol, cutoff} — ансамбль машин с ошибками вместо идеального трекинга."""
     inf = dict(info_of(lattice)); inf["_id"] = lattice
     ring = _ring(inf)
-    out = dict(lattice=lattice, label=inf["label"], turns=turns, fast=fast and track_cache is None)
+    out = dict(lattice=lattice, label=inf["label"], turns=turns,
+               fast=fast and track_cache is None and errors_cfg is None)
     out["geom"] = geometry(ring, inf)
     out["lin"] = linear_optics(ring, inf)
     out["struct"] = detect_structures(ring, out["lin"], inf["superperiods"])   # уникальные суперпериоды
@@ -380,7 +514,11 @@ def analyze(lattice, turns=512, fast=False, track_cache=None):
     out["fam"] = families(ring)
     # аналитический tune footprint из нормальной формы — мгновенно, без трекинга (диапазон по бюджету |Δν|)
     out["foot"] = footprint(out["lin"], out["detune"])
-    if track_cache is not None:                               # готовый трекинг из кэша (--rebuild)
+    if errors_cfg is not None:                                # ансамбль машин с ошибками (± коррекция орбиты)
+        out.update(ensemble(lattice, inf, out["lin"], turns, errors_cfg["n_seeds"],
+                            errors_cfg["tol"], errors_cfg["cutoff"], correct=errors_cfg.get("correct", False)))
+        out["errors"] = errors_cfg
+    elif track_cache is not None:                             # готовый трекинг из кэша (--rebuild)
         out.update(track_cache); out["turns"] = int(track_cache.get("turns", turns))
     elif not fast:
         co, xe, ye, dpos, dneg = auto_ranges(ring, inf, turns)
@@ -440,7 +578,7 @@ def _fig_tunes(lin, foot=None, fma=None):
                                    marker=dict(size=5, color=foot["amp"], colorscale="Viridis", showscale=True,
                                                colorbar=dict(title="ампл., мм", thickness=12, len=0.9)),
                                    name="footprint (аналитика)", hoverinfo="skip"))
-    if fma is not None:                                        # трекинг: точки, окрашенные диффузией
+    if fma is not None and "nux" in fma:                       # трекинг: точки, окрашенные диффузией
         ok = np.isfinite(fma["nux"])
         fig.add_trace(go.Scattergl(x=fma["nux"][ok] % 1, y=fma["nuy"][ok] % 1, mode="markers",
                                    marker=dict(size=3, color="rgba(20,20,20,0.35)"),
@@ -474,14 +612,24 @@ def _fig_da_estimate(est, lin):
 
 
 def _fig_da(da):
-    """Карта выживания в (x, y): число оборотов до потери + граница апертуры."""
-    fig = go.Figure(go.Heatmap(x=da["xs"] * 1e3, y=da["ys"] * 1e3, z=da["surv"],
-                               colorscale="Viridis", colorbar=dict(title="оборотов", thickness=12, len=0.9)))
+    """Карта выживания в (x, y): число оборотов (идеал) или ВЕРОЯТНОСТЬ выживания по ансамблю + граница."""
+    ens = da.get("ensemble")
+    if ens:                                                   # ансамбль: доля выживших машин 0..1
+        z = da["prob"]; cb = dict(title="доля машин", thickness=12, len=0.9)
+        hm = go.Heatmap(x=da["xs"] * 1e3, y=da["ys"] * 1e3, z=z, colorscale="Viridis",
+                        zmin=0, zmax=1, zsmooth="best", colorbar=cb)
+        ttl = f"Динамическая апертура: доля выживших из {ens} машин с ошибками ({da['turns']} об.)"
+    else:
+        hm = go.Heatmap(x=da["xs"] * 1e3, y=da["ys"] * 1e3, z=da["surv"],
+                        colorscale="Viridis", colorbar=dict(title="оборотов", thickness=12, len=0.9))
+        ttl = f"Динамическая апертура: выживание за {da['turns']} оборотов"
+    fig = go.Figure(hm)
+    lab = "граница 50% машин" if ens else "граница +x"
     fig.add_trace(go.Scatter(x=da["edge_pos"] * 1e3, y=da["ys"] * 1e3, mode="lines+markers",
-                             line=dict(color="#e15759", width=2), name="граница +x", marker=dict(size=4)))
+                             line=dict(color="#e15759", width=2), name=lab, marker=dict(size=4)))
     fig.add_trace(go.Scatter(x=da["edge_neg"] * 1e3, y=da["ys"] * 1e3, mode="lines+markers",
-                             line=dict(color="#e15759", width=2, dash="dot"), name="граница −x", marker=dict(size=4)))
-    fig.update_layout(title=dict(text=f"Динамическая апертура: выживание за {da['turns']} оборотов",
+                             line=dict(color="#e15759", width=2, dash="dot"), name="", marker=dict(size=4)))
+    fig.update_layout(title=dict(text=ttl,
                                  x=0.5, y=0.97, font=dict(size=14)),
                       margin=dict(l=54, r=18, t=40, b=70), plot_bgcolor="white",
                       legend=dict(orientation="h", y=-0.16, x=0.5, xanchor="center", yanchor="top"))
@@ -505,20 +653,62 @@ def _fig_fma_space(fma):
 
 
 def _fig_momentum(mom, delta_rf=None):
-    fig = go.Figure(go.Scatter(x=mom["ds"] * 100, y=np.minimum(mom["surv"], mom["turns"]), mode="lines+markers",
+    ens = mom.get("ensemble")
+    if ens:                                                   # ансамбль: доля выживших машин 0..1
+        y = mom["prob"]; ytitle = "доля выживших машин"; ttl = f"Импульсная апертура: доля из {ens} машин с ошибками"
+    else:
+        y = np.minimum(mom["surv"], mom["turns"]); ytitle = "оборотов до потери"
+        ttl = f"Импульсная апертура: выживание за {mom['turns']} оборотов (красное — трекинг, зелёное — ВЧ)"
+    fig = go.Figure(go.Scatter(x=mom["ds"] * 100, y=y, mode="lines+markers",
                                line=dict(color="#2b7bba", width=2), marker=dict(size=5), name="выживание"))
     fig.add_vline(x=mom["acc_pos"] * 100, line=dict(color="#e15759", dash="dash"), annotation_text="ДА +δ")
     fig.add_vline(x=mom["acc_neg"] * 100, line=dict(color="#e15759", dash="dash"), annotation_text="ДА −δ")
     if delta_rf:
         fig.add_vline(x=delta_rf * 100, line=dict(color="#59a14f", dash="dot"), annotation_text="ВЧ")
         fig.add_vline(x=-delta_rf * 100, line=dict(color="#59a14f", dash="dot"))
-    fig.update_layout(title=dict(text=f"Импульсная апертура: выживание за {mom['turns']} оборотов "
-                                      f"(красное — трекинг, зелёное — аксептанс ВЧ)",
-                                 x=0.5, y=0.97, font=dict(size=14)),
+    fig.update_layout(title=dict(text=ttl, x=0.5, y=0.97, font=dict(size=14)),
                       margin=dict(l=62, r=18, t=34, b=42), plot_bgcolor="white")
     fig.update_xaxes(title_text="δ = Δp/p, %")
-    fig.update_yaxes(title_text="оборотов до потери", rangemode="tozero")
+    fig.update_yaxes(title_text=ytitle, rangemode="tozero")
     return ta._grid(fig, legend=False)
+
+
+def _tbl_errors(err, tol):
+    """Сводка влияния ошибок: заданные допуски, устойчивость ансамбля, искажение орбиты, разброс частот,
+    и (если была коррекция) орбита до/после + силы корректоров."""
+    corr = err.get("corrected")
+    rows = [
+        ("Машин в ансамбле", str(err["n_seeds"])),
+        ("Неустойчивых машин", f"{err['n_unstable']} из {err['n_seeds']}"),
+    ]
+    if corr:
+        rows += [
+            ("Корректоров орбиты (гор.+верт.)", str(err["n_corr"])),
+            ("СКО орбиты x: до → после коррекции",
+             f"{_num(err['co_x_rms0'] * 1e3, 3)} → {_num(err['co_x_rms'] * 1e3, 3)} мм"),
+            ("СКО орбиты y: до → после коррекции",
+             f"{_num(err['co_y_rms0'] * 1e3, 3)} → {_num(err['co_y_rms'] * 1e3, 3)} мм"),
+            ("Углы корректоров x: СКО / макс.",
+             f"{_num(err['corr_x_rms'] * 1e6, 3)} / {_num(err['corr_x_max'] * 1e6, 3)} мкрад"),
+            ("Углы корректоров y: СКО / макс.",
+             f"{_num(err['corr_y_rms'] * 1e6, 3)} / {_num(err['corr_y_max'] * 1e6, 3)} мкрад"),
+        ]
+    else:
+        rows += [
+            ("СКО искажения орбиты x (по кольцу)", f"{_num(err['co_x_rms'] * 1e3, 3)} мм"),
+            ("СКО искажения орбиты y (по кольцу)", f"{_num(err['co_y_rms'] * 1e3, 3)} мм"),
+        ]
+    rows += [
+        ("νx: среднее ± разброс", f"{_num(err['nux_mean'], 6)} ± {_num(err['nux_std'], 2)}"),
+        ("νy: среднее ± разброс", f"{_num(err['nuy_mean'], 6)} ± {_num(err['nuy_std'], 2)}"),
+    ]
+    for k, t in tol.items():
+        if any(t.get(c) for c in errmod.TOL_COLS):
+            rows.append((f"Допуск {KIND_RU.get(k, k)} (СКО)",
+                         f"сдвиг {t.get('dx', 0)*1e6:.0f} мкм · крен {t.get('droll', 0)*1e3:.2f} мрад · "
+                         f"поле {t.get('field_pct', 0):.2f} %"))
+    head = "Ошибки установки (ансамбль" + (", после коррекции орбиты" if corr else ", без коррекции орбиты") + ")"
+    return _table([head, "Значение"], rows, [55, 45])
 
 
 def _table(header, rows, widths=None):
@@ -646,7 +836,10 @@ def build_html(d):
     parts = [f"периметр {_num(g['circumference'], 7)} м", f"{g['superperiods']} суперпериодов",
              f"νx/νy {_num(lin['nux'], 6)}/{_num(lin['nuy'], 6)}",
              f"εx {_num(d['rad']['ex0']*1e12, 4)} пм", f"U₀ {_num(d['rad']['U0'], 4)} МэВ"]
-    if not d["fast"]:
+    err = d.get("errors")
+    if err:
+        parts.append(f"ансамбль {d['err']['n_seeds']} машин с ошибками ({d['turns']} об.)")
+    elif not d["fast"]:
         parts.append(f"трекинг {d['turns']} об.")
     subtitle = " · ".join(parts)
 
@@ -662,7 +855,10 @@ def build_html(d):
             (_tbl_radiation(d["rad"]), ta._table_h(15)),
             (_tbl_detune(d["detune"], d.get("mom")), ta._table_h(5)),
             (_fig_tunes(lin, d.get("foot"), d.get("fma")), 620)]
-    if not d["fast"]:                                          # трекинг: точные ДА / диффузия / импульс
+    if err:                                                    # ансамбль машин с ошибками
+        n_erows = (9 if d["err"].get("corrected") else 6) + len(err["tol"])
+        figs.append((_tbl_errors(d["err"], err["tol"]), ta._table_h(n_erows)))
+    if err or not d["fast"]:                                   # ДА / диффузия / импульс (идеал или ансамбль)
         figs += [(_fig_da(d["da"]), 520),
                  (_fig_fma_space(d["fma"]), 520),
                  (_fig_momentum(d["mom"], d["rad"].get("delta_rf")), 400)]
@@ -682,11 +878,24 @@ def main():
     ap.add_argument("--fast", action="store_true", help="только аналитика (без трекинга)")
     ap.add_argument("--rebuild", action="store_true",
                     help="пересобрать HTML на КЭШЕ трекинга (аналитика свежая, обороты не гоняются)")
+    ap.add_argument("--errors", action="store_true",
+                    help="учесть ошибки установки: ансамбль случайных машин по допускам из element_errors.csv")
+    ap.add_argument("--correct", action="store_true",
+                    help="выправить замкнутую орбиту корректорами на каждой машине (только с --errors)")
+    ap.add_argument("--seeds", type=int, default=32, help="машин в ансамбле ошибок (--errors)")
+    ap.add_argument("--cutoff", type=float, default=2.5, help="обрезка гауссовых ошибок, ед. σ")
+    ap.add_argument("--errors-table", default=None, help="путь к таблице допусков (по умолч. element_errors.csv)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--no-open", action="store_true")
     a = ap.parse_args()
-    print(f"=== паспорт установки: решётка {a.lattice} ===", flush=True)
-    if a.rebuild:                                             # быстрая пересборка: трекинг из кэша
+    tag = (' + ошибки' if a.errors else '') + (' + коррекция' if a.errors and a.correct else '')
+    print(f"=== паспорт установки: решётка {a.lattice}{tag} ===", flush=True)
+    if a.errors:                                             # ансамбль машин с ошибками
+        tol = errmod.load_tolerances(a.errors_table)
+        print(f"  допуски: {errmod.error_summary(tol)}", flush=True)
+        d = analyze(a.lattice, turns=a.turns,
+                    errors_cfg=dict(n_seeds=a.seeds, tol=tol, cutoff=a.cutoff, correct=a.correct))
+    elif a.rebuild:                                          # быстрая пересборка: трекинг из кэша
         cp = _cache_path(a.lattice)
         if not os.path.exists(cp):
             sys.exit(f"[!] нет кэша {cp} — сначала полный прогон без --rebuild")
@@ -700,11 +909,24 @@ def main():
     g, lin, r = d["geom"], d["lin"], d["rad"]
     print(f"  {d['label']}: периметр {g['circumference']:.3f} м, νx/νy {lin['nux']:.4f}/{lin['nuy']:.4f}, "
           f"εx {r['ex0']*1e12:.2f} пм, U₀ {r['U0']:.4f} МэВ, τx {r['taux']*1e3:.3f} мс", flush=True)
-    if not a.fast:
+    if a.errors:
+        e = d["err"]
+        if e.get("corrected"):
+            print(f"  ансамбль {e['n_seeds']} машин (коррекция, {e['n_corr']} корректоров): неустойчивых "
+                  f"{e['n_unstable']}, орбита СКО x {e['co_x_rms0']*1e3:.3f}→{e['co_x_rms']*1e3:.3f} / y "
+                  f"{e['co_y_rms0']*1e3:.3f}→{e['co_y_rms']*1e3:.3f} мм; углы корр. СКО x "
+                  f"{e['corr_x_rms']*1e6:.1f}/y {e['corr_y_rms']*1e6:.1f} мкрад; ДА +x "
+                  f"{d['da']['edge_pos'].max()*1e3:.2f} мм (50% машин)", flush=True)
+        else:
+            print(f"  ансамбль {e['n_seeds']} машин: неустойчивых {e['n_unstable']}, орбита СКО "
+                  f"x {e['co_x_rms']*1e3:.3f}/y {e['co_y_rms']*1e3:.3f} мм; ДА +x "
+                  f"{d['da']['edge_pos'].max()*1e3:.2f} мм (50% машин)", flush=True)
+    elif not a.fast:
         print(f"  динамическая апертура +x {d['da']['edge_pos'].max()*1e3:.2f} мм, "
               f"импульсная +{d['mom']['acc_pos']*100:.2f}/{d['mom']['acc_neg']*100:.2f} %", flush=True)
     os.makedirs(HTML_DIR, exist_ok=True)
-    out = a.out or os.path.join(HTML_DIR, f"facility_exp{a.lattice}.html")
+    suffix = ("_errors_corr" if a.correct else "_errors") if a.errors else ""
+    out = a.out or os.path.join(HTML_DIR, f"facility_exp{a.lattice}{suffix}.html")
     with open(out, "w", encoding="utf-8") as f:
         f.write(build_html(d))
     print(f"  → {out}", flush=True)

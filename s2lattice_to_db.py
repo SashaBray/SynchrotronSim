@@ -18,16 +18,23 @@ NSL = "40"                                                     # срезов н
 MONITORS = False                                               # заводить ли MONI как датчики положения
 MONI_DEV = "BPM"                                               # готовое устройство kind=monitor из БД
 MAGKIND = {"KQUAD": "quad", "KSEXT": "sext", "KOCT": "oct", "CSBEND": "dipole"}
-ACTIVE = {"quad": "k1", "sext": "k2", "oct": "k3", "dipole": "theta_y", "dq": "theta_y|k1|k2"}
+ACTIVE = {"quad": "k1", "sext": "k2", "oct": "k3", "dipole": "theta_y", "dq": "theta_y|k1|k2",
+          "kicker": "kick_y|kick_z"}
 STL = {"quad": "QPL_asm.stl", "sext": "SP_asm.stl", "oct": "OP_asm.stl", "dipole": "DPL_asm.stl",
-       "dq": "DPL_asm.stl"}
+       "dq": "DPL_asm.stl", "kicker": "SP_asm.stl"}
 
 
 def kind_of(e):
     """Вид элемента для ядра. Изгиб с градиентом — «dq», а НЕ «dipole»: у «dipole» ядро считает
-    mat_G относительным градиентом (умножает на mat_B), у «dq» — абсолютным, как его и пишет mat_of."""
+    mat_G относительным градиентом (умножает на mat_B), у «dq» — абсолютным, как его и пишет mat_of.
+    Секступоль с НУЛЕВОЙ K2 — это слот КОРРЕКТОРА (SH у СИЛА, SX/SZ у Сибири): kind=kicker (кик орбиты),
+    как в решётке 1. Мат-коэф. нулевые, кик задаётся коррекцией/опытами через KICK/VKICK."""
     k = MAGKIND[e["type"]]
-    return "dq" if k == "dipole" and e.get("K1") else k
+    if k == "dipole" and e.get("K1"):
+        return "dq"
+    if k == "sext" and not e.get("K2"):
+        return "kicker"
+    return k
 
 
 def parse():
@@ -76,7 +83,7 @@ def main():
     hw_by_dev = {r[hw_col["device_type_id"]]: r for r in hw_all[1:] if r}
     et_hdr = next(csv.reader(open(os.path.join(TB, "element_transforms.csv"), encoding="utf-8"), delimiter=";"))
     REF = {"quad": "QP_L_1A", "sext": "SP_I1_1A", "oct": "OP_1A", "dipole": "DP_L_PM",
-           "dq": "DQ_I1_1A"}                                        # SILA-эталон STL по виду
+           "dq": "DQ_I1_1A", "kicker": "SP_I1_1A"}                  # SILA-эталон STL по виду
     hw_rows, et_rows = [], []
     for nm, e in devs.items():
         kind = kind_of(e); L = e.get("L", 0.0); dev = PFX + nm

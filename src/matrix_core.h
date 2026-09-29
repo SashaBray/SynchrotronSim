@@ -115,7 +115,8 @@ struct Element {
     bool   kick   = false;                                // прямой мультиполь (quad/sext/oct)
     double rad_coef = 0;                                  // распределённое СИ (классическое)
     double isr_coef = 0;                                  // квантовое возбуждение (ISR), нужен IsrRng
-    double hkick = 0;                                     // однородный кик корректора, рад (возмущение для опытов)
+    double hkick = 0;                                     // однородный ГОР. кик корректора, рад (возмущение/коррекция)
+    double vkick = 0;                                     // однородный ВЕРТ. кик корректора, рад
     int    nsl_box = 40;                                  // срезов «ящика» из БД (n_slices) — для кика корректора
     double rho0 = 0, h = 0, b1 = 0, b2 = 0, b3 = 0;       // ПРЕКЭШ сектора: ρ, 1/ρ, bₙ=kₙ·ρ (не пересчитывать в цикле)
     double s_slice = 0;                                   // длина среза Leff/nsl (сектор/кик)
@@ -168,7 +169,7 @@ struct Element {
     // (дрейф–кик–дрейф, n_slices из БД — как box-тело matrix_tracker для θ0 у неизгибающего); иначе дрейф.
     State body(const State& st, IsrRng* rng = nullptr) const {
         if (sector) return body_sector(st, rng);
-        if (hkick != 0.0 && !kick) return body_kicker(st);
+        if ((hkick != 0.0 || vkick != 0.0) && !kick) return body_kicker(st);
         if (kick)   return body_kick(st);
         return drift(st, Leff);
     }
@@ -236,7 +237,7 @@ private:
         int N = nsl_box; double ds = Leff / N;
         for (int i = 0; i < N; ++i) {
             p = drift(p, ds / 2.0);
-            p.px += hkick / N;
+            p.px += hkick / N; p.py += vkick / N;
             p = drift(p, ds / 2.0);
         }
         return p;
