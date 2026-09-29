@@ -45,16 +45,50 @@ def _get_transform():
     return _transform
 
 
+M_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/math}"
+
+
+def _fill_empty_slots(root):
+    """Заткнуть ПУСТЫЕ слоты OMML — Word рисует на их месте пунктирный квадратик.
+
+    Так получается у операторов с пределами (∑, ∏, ∫, ∮): XSL кладёт знак с пределами в <m:nary>, а
+    подынтегральное выражение оставляет соседними ранами, и слот операнда <m:e/> остаётся пустым.
+    Правильнее писать операнд в фигурных скобках (sum_i{f_i}) — тогда слот заполняется сам; это
+    защита на случай, если так не написали."""
+    for e in root.iter(M_NS + "e"):
+        if len(e) == 0 and not (e.text or "").strip():
+            r = etree.SubElement(e, M_NS + "r")
+            etree.SubElement(r, M_NS + "t").text = "​"        # нулевой ширины: слот не пуст, но не виден
+    return root
+
+
 def latex_to_omml(latex):
     """LaTeX-строка → lxml-элемент OMML (`<m:oMath>`) для вставки в docx."""
     mathml = latex2mathml.converter.convert(latex)
     omml_root = _get_transform()(etree.fromstring(mathml)).getroot()
     # XSL отдаёт <m:oMathPara>…<m:oMath>…; для инлайна берём внутренний <m:oMath>, иначе корень
-    tag = "{http://schemas.openxmlformats.org/officeDocument/2006/math}oMath"
-    return omml_root.find(tag) if omml_root.tag != tag else omml_root
+    tag = M_NS + "oMath"
+    return _fill_empty_slots(omml_root.find(tag) if omml_root.tag != tag else omml_root)
 
 
-def add_formula(paragraph, latex):
+def set_size(omml, size_pt):
+    """Задать кегль ранам формулы (расшифровки под формулой идут мельче основного текста)."""
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    half = str(int(round(size_pt * 2)))
+    for r in omml.iter(M_NS + "r"):
+        pr = r.find(W + "rPr")
+        if pr is None:
+            pr = etree.SubElement(r, W + "rPr")
+            r.insert(0, pr)
+        for tag in ("sz", "szCs"):
+            el = pr.find(W + tag)
+            if el is None:
+                el = etree.SubElement(pr, W + tag)
+            el.set(W + "val", half)
+    return omml
+
+
+def add_formula(paragraph, latex, size_pt=None):
     """Вставить формулу LaTeX в конец абзаца python-docx. Возврат paragraph.
 
     Нет XSL Office (обычная ситуация вне Windows) ⇒ формула идёт курсивным текстом, сборка отчёта
@@ -63,8 +97,13 @@ def add_formula(paragraph, latex):
         node = latex_to_omml(latex)
     except (FileNotFoundError, OSError, etree.XMLSyntaxError, etree.XSLTError):
         _warn_once()
-        paragraph.add_run(latex).italic = True
+        r = paragraph.add_run(latex); r.italic = True
+        if size_pt:
+            from docx.shared import Pt
+            r.font.size = Pt(size_pt)
         return paragraph
     if node is not None:
+        if size_pt:
+            set_size(node, size_pt)
         paragraph._p.append(node)
     return paragraph

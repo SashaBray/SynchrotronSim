@@ -19,6 +19,11 @@
 #include "matrix_core.h"
 #include "matrix_ring.h"
 #include "matrix_npz.h"
+#include "matrix_ring_serve.h"
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -272,10 +277,43 @@ static int runFull(const std::string& ws, int exp, int turns, double x0_mm, doub
     return 0;
 }
 
+// --ring-serve <lattice> <lead_m|nan> <design_mev> <sr> <isr> <nsl> <order> <rf> <volt_mv> <harmonic>
+//              <phase_deg> <seed> — сервер кольца для анализа (порт ring_analysis.Ring), см. matrix_ring_serve.h.
+static int runRingServe(int argc, char* argv[]) {
+    if (argc < 14) {
+        std::cerr << "Usage: --ring-serve <lattice> <lead_m|nan> <design_mev> <sr> <isr> <nsl> <order> <rf>"
+                     " <volt_mv> <harmonic> <phase_deg> <seed>" << std::endl;
+        return 2;
+    }
+    #ifdef _WIN32
+    _setmode(_fileno(stdin), _O_BINARY); _setmode(_fileno(stdout), _O_BINARY);
+    #endif
+    mc::RingModel R;
+    R.ws = findWorkspace(argv[0]);
+    std::string lead = argv[3];
+    R.cfg.lattice = std::stoi(argv[2]);
+    R.cfg.lead = (lead == "nan" || lead == "none") ? std::numeric_limits<double>::quiet_NaN() : std::stod(lead);
+    R.cfg.design_mev = std::stod(argv[4]);
+    R.cfg.sr = std::stoi(argv[5]) != 0; R.cfg.isr = std::stoi(argv[6]) != 0;
+    R.cfg.nsl = std::stoi(argv[7]); R.cfg.order = std::stoi(argv[8]);
+    R.cfg.rf = std::stoi(argv[9]) != 0; R.cfg.volt_mv = std::stod(argv[10]);
+    R.cfg.harmonic = std::stod(argv[11]); R.cfg.phase_deg = std::stod(argv[12]);
+    R.cfg.seed = (uint64_t)std::stoull(argv[13]);
+    try {
+        return mc::serveRing(R);
+    } catch (const std::exception& e) {
+        std::fprintf(stdout, "ERR %s\n", e.what()); std::fflush(stdout);
+        return 1;
+    }
+}
+
 int main(int argc, char* argv[]) {
     #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
     #endif
+    if (argc >= 2 && std::string(argv[1]) == "--ring-serve") {
+        return runRingServe(argc, argv);
+    }
     if (argc >= 2 && std::string(argv[1]) == "--element") {
         return runElement(argc, argv);
     }
@@ -298,6 +336,8 @@ int main(int argc, char* argv[]) {
                  "  --full <exp_id> <turns> [x0_mm y0_mm]\n"
                  "      полный трек: запись на границах элементов, x(S)/спектр/тюны → .npz (mode=full)\n"
                  "  --serve   персистентный сервер кик-траекторий (stdin→stdout): дрейф→элемент(M суб)→дрейф\n"
-                 "      на пробу, замена Python track_matrix в element_compare (фит/RMS/демо)\n";
+                 "      на пробу, замена Python track_matrix в element_compare (фит/RMS/демо)\n"
+                 "  --ring-serve <lattice lead design_mev sr isr nsl order rf volt h phase seed>\n"
+                 "      сервер кольца для анализа (ring_analysis/сверка с elegant): TRACK/TBT/ELEM/PIECES\n";
     return (argc < 2) ? 1 : 0;
 }

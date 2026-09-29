@@ -82,6 +82,7 @@ def jacobian4(fn, base, h=1e-7):
 class TestImportsSmoke(unittest.TestCase):
     """Все продакшн-модули импортируются (ловит синтаксис и битые импорты)."""
     PROD = ["matrix_tracker", "track3", "traj_compare", "beam_injection", "bip_matrix",
+            "ring_analysis", "ring_matrix", "ring_response", "elegant_diag",
             "lte_ring", "load_config", "lte_to_lattice", "assemble_lattice_configs",
             "build_matrix_db", "warmstart_ring", "lte_warmstart", "db_snapshot",
             "matrix_optimizer", "design_orbit"]
@@ -873,6 +874,380 @@ class TestLinearCorrector(unittest.TestCase):
         back = ss.inverse("corrector", {k: fwd[k][0] for k in ("B", "Bv", "G", "Gv", "S")})
         for w, v in cur.items():
             self.assertAlmostEqual(back[w], v, delta=1e-6, msg=w)
+
+
+class TestRingAnalysis(unittest.TestCase):
+    """Алгоритмы ring_analysis (сверка с elegant) на синтетических отображениях с известным ответом — без БД."""
+
+    @classmethod
+    def setUpClass(cls):
+        import ring_analysis as ra
+        cls.ra = ra
+
+    @staticmethod
+    def _rot(beta, alpha, nu):
+        mu = 2 * math.pi * nu; c, s = math.cos(mu), math.sin(mu)
+        return np.array([[c + alpha * s, beta * s], [-(1 + alpha * alpha) / beta * s, c - alpha * s]])
+
+    class _MapRing:
+        """Трекер-заглушка: одно и то же нелинейное отображение за оборот (интерфейс Ring.track)."""
+        def __init__(self, f):
+            self.f = f
+
+        def track(self, states, n_turns=1):
+            out = []
+            for st in states:
+                z = np.asarray(st, float)
+                for _ in range(n_turns):
+                    z = self.f(z)
+                out.append(z)
+            return np.array(out)
+
+    def test_naff_precision(self):
+        k = np.arange(512)
+        z = np.exp(2j * np.pi * 0.2201813 * k) + 0.05 * np.exp(2j * np.pi * 0.4403 * k)
+        f, a = self.ra.naff(z, 2)
+        self.assertAlmostEqual(f[0], 0.2201813, delta=1e-9)
+        self.assertAlmostEqual(f[1], 0.4403, delta=1e-7)
+        self.assertAlmostEqual(abs(a[1]), 0.05, delta=1e-5)
+
+    def test_tbt_tunes_skips_forced_line(self):
+        """Слабая плоскость: собственная частота, а не вынужденная линия 1−2νy от сильной."""
+        k = np.arange(1024); nx, ny = 0.16, 0.2922
+        tbt = np.zeros((1024, 6))
+        tbt[:, 0] = 1e-5 * np.cos(2 * np.pi * nx * k) + 5e-5 * np.cos(2 * np.pi * 2 * ny * k)
+        tbt[:, 1] = -1e-5 * np.sin(2 * np.pi * nx * k) - 5e-5 * np.sin(2 * np.pi * 2 * ny * k)
+        tbt[:, 2] = 1e-3 * np.cos(2 * np.pi * ny * k); tbt[:, 3] = -1e-3 * np.sin(2 * np.pi * ny * k)
+        qx, qy = self.ra.tbt_tunes(tbt)
+        self.assertAlmostEqual(qx, nx, delta=1e-6)
+        self.assertAlmostEqual(qy, ny, delta=1e-6)
+
+    def test_twiss_from_one_turn_matrix(self):
+        Mx = self._rot(6.9, 0.3, 0.22); My = self._rot(3.1, -0.2, 0.31)
+        R = np.zeros((2, 6, 6))
+        for i in range(2):
+            R[i] = np.eye(6)
+        R[1][:2, :2] = Mx; R[1][2:4, 2:4] = My
+        R[0][:2, :2] = self._rot(6.9, 0.3, 0.1); R[0][2:4, 2:4] = self._rot(3.1, -0.2, 0.1)
+        tw = self.ra.twiss_from_matrices(R, [1.0, 2.0], 2.0)
+        self.assertAlmostEqual(tw["betax"][-1], 6.9, delta=1e-12)
+        self.assertAlmostEqual(tw["alphay"][-1], -0.2, delta=1e-12)
+        self.assertAlmostEqual(tw["nux"] % 1, 0.22, delta=1e-12)
+        self.assertAlmostEqual(tw["nuy"] % 1, 0.31, delta=1e-12)
+
+    def test_resonance_lines_irreducible(self):
+        keys = {l[:3] for l in self.ra.resonance_lines(3, (0.15, 0.30, 0.25, 0.40))}
+        self.assertEqual(keys, {(-2, 1, 0), (-1, 1, 0), (0, 3, 1), (1, 2, 1)})
+
+    def test_stencil_exact_on_quartic_map(self):
+        """4-точечная схема точна для многочленов до 4-й степени: матрица оборота = якобиан в точке."""
+        c = np.array([0.3, -1.2, 0.7, 2.0, -0.5, 1.1])
+        ring = self._MapRing(lambda z: z + c * z ** 2 + 0.1 * z ** 3 + 0.01 * np.roll(z, 1) ** 4)
+        z0 = np.array([1e-3, -2e-3, 5e-4, 0.0, 1e-4, 2e-4])
+        _, M = self.ra.one_turn_matrix(ring, orbit=z0, eps=1e-3)
+        J = np.eye(6) + np.diag(2 * c * z0 + 0.3 * z0 ** 2)
+        J += np.roll(np.diag(0.04 * z0 ** 3), 1, axis=0)          # d out_i / d z_{i−1}
+        np.testing.assert_allclose(M, J, atol=1e-12)
+
+    def test_damping_and_equilibrium_1d(self):
+        """Затухающий поворот в каждой плоскости: τ из |λ|, равновесный эмиттанс = b/(2(1−λ²))·β-норм."""
+        lam, beta, b = math.exp(-1e-3), 5.0, 1e-12
+        M = np.zeros((6, 6))
+        for i, nu in ((0, 0.22), (2, 0.31), (4, 0.004)):
+            M[i:i + 2, i:i + 2] = lam * self._rot(beta, 0.0, nu)
+        d = self.ra.damping_from_matrix(M, 1.0)
+        for pl in ("x", "y", "s"):
+            self.assertAlmostEqual(d[pl]["tau_turns"], 1e3, delta=1e-6)
+        self.assertAlmostEqual(d["s"]["tune"], 0.004, delta=1e-12)
+        B = np.zeros((6, 6)); B[1, 1] = b
+        _, em = self.ra.equilibrium_moments(M, B)
+        # диффузия по углу b в β-нормированных координатах: ε = β·b/(2·(1−λ²))
+        self.assertAlmostEqual(em[0] / (beta * b / (2 * (1 - lam * lam))), 1.0, delta=1e-6)
+        self.assertLess(em[1], 1e-30)
+
+
+class TestRingMatrix(unittest.TestCase):
+    """Аналитические матрицы элементов и стыков (ring_matrix) — против ядра и против симплектичности."""
+
+    @classmethod
+    def setUpClass(cls):
+        import ring_matrix as rm
+        cls.rm = rm
+
+    # пятая координата — ПУТЬ (как у elegant), поэтому сопряжённая пара продольного блока — (−s, δ)
+    J6 = np.zeros((6, 6))
+    for _i in (0, 2):
+        J6[_i, _i + 1] = 1.0; J6[_i + 1, _i] = -1.0
+    J6[4, 5] = -1.0; J6[5, 4] = 1.0
+
+    def _sympl(self, R, tol=1e-12):
+        err = float(np.max(np.abs(R.T @ self.J6 @ R - self.J6)))
+        self.assertLess(err, tol, f"нарушение симплектичности: {err:.2e}")
+
+    def test_drift_and_quad_closed_form(self):
+        rm = self.rm
+        R = rm.drift(1.3)
+        self.assertAlmostEqual(R[0, 1], 1.3); self.assertAlmostEqual(R[4, 5], 0.0)
+        K, L = 2.462177415336321, 0.295                      # QF1A из .lte СИЛА
+        Q = rm.quad(L, K)
+        k = math.sqrt(K)
+        self.assertAlmostEqual(Q[0, 0], math.cos(k * L), places=12)
+        self.assertAlmostEqual(Q[1, 0], -k * math.sin(k * L), places=12)
+        self.assertAlmostEqual(Q[3, 2], k * math.sinh(k * L), places=12)   # вертикаль дефокусируется
+        self._sympl(Q)
+
+    def test_bend_matches_kernel_body(self):
+        """Матрица изгиба = якобиан тела ядра при сошедшемся интеграторе (40 срезов, порядок 6)."""
+        import importlib
+        os.environ["SS_SECTOR_NSL"] = "40"; os.environ["SS_SECTOR_ORDER"] = "6"
+        try:
+            importlib.reload(mt)
+            m = make_magnet("dq", 1.0, angle=0.0247680586728496, k1=-1.960219550894432,
+                            edge1=-0.0116800000099, edge2=-0.0116800000099)
+            _, R = self.rm.element_matrix(m)
+            base = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            F = np.zeros((4, 4)); h = 1e-6
+            for j in range(4):
+                sp = list(base); sp[j] += h; sm = list(base); sm[j] -= h
+                op, om = m.body(tuple(sp)), m.body(tuple(sm))
+                for i in range(4):
+                    F[i, j] = (op[i] - om[i]) / (2 * h)
+            err = float(np.max(np.abs(R[:4, :4] - F)))
+            self.assertLess(err, 2e-6, f"матрица изгиба vs тело ядра: {err:.2e}")
+            self._sympl(R, tol=1e-10)
+        finally:
+            os.environ.pop("SS_SECTOR_NSL", None); os.environ.pop("SS_SECTOR_ORDER", None)
+            importlib.reload(mt)
+
+    def test_junction_matches_modified_drift(self):
+        """Стык с НЕпараллельными гранями: аффинная матрица = точное отображение ядра (разности)."""
+        from beam_injection import PlaneMagnet
+        ax = np.array([1.0, 0.0, 0.0]); v = np.array([0.0, 0.0, 1.0])
+        for alpha, roll, off in ((0.0, 0.0, 0.0), (5e-3, 0.0, 0.0), (5e-2, 0.0, 1e-3), (2e-2, 3e-2, 5e-4)):
+            with self.subTest(alpha=alpha, roll=roll, off=off):
+                A = PlaneMagnet(np.zeros(3), ax)
+                b_ax = mt._rot(ax, v, alpha)
+                B = PlaneMagnet(np.array([0.8, off, 0.0]), b_ax)
+                if roll:
+                    u = mt._rot(B.uhat, b_ax, roll)
+                    B.uhat = u; B.vhat = np.cross(b_ax, u); B.fr_in = (B.center, B.axis, u, B.vhat)
+                C, R = self.rm.junction_matrix(A, B)
+                f = lambda z: np.array(mt.modified_drift(tuple(z), A, B), float)
+                z0 = np.zeros(6); Cn = f(z0)
+                Rn = np.zeros((6, 6)); h = 1e-6
+                for k in range(6):
+                    p = z0.copy(); p[k] += h; m_ = z0.copy(); m_[k] -= h
+                    Rn[:, k] = (f(p) - f(m_)) / (2 * h)
+                self.assertLess(float(np.max(np.abs(C - Cn))), 1e-12)
+                self.assertLess(float(np.max(np.abs(R - Rn))), 1e-8)
+                if alpha == 0.0 and off == 0.0 and roll == 0.0:
+                    self.assertLess(float(np.max(np.abs(C[:4]))), 1e-15,
+                                    "у параллельных граней поперечный C обязан быть нулевым")
+                    self.assertAlmostEqual(C[4], 0.8, places=12, msg="C[4] — путь опорной частицы")
+
+    def test_affine_composition(self):
+        """Композиция (C, R) двух отображений = применение их подряд."""
+        rm = self.rm
+        C1 = np.array([1e-3, 2e-4, -5e-4, 1e-4, 0.0, 0.0]); R1 = rm.quad(0.3, 1.7)
+        C2 = np.array([-2e-3, 1e-4, 1e-3, -3e-4, 0.0, 0.0]); R2 = rm.drift(0.9)
+        C, R = rm.compose((C1, R1), (C2, R2))
+        z = np.array([1e-3, 2e-4, -1e-3, 5e-5, 0.0, 1e-4])
+        np.testing.assert_allclose(C + R @ z, C2 + R2 @ (C1 + R1 @ z), atol=1e-15)
+
+
+_EXE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build",
+                    "MatrixTracker.exe" if sys.platform == "win32" else "MatrixTracker")
+
+
+@unittest.skipUnless(os.path.exists(_EXE), "нет собранного MatrixTracker")
+class TestRingCpp(unittest.TestCase):
+    """Сервер кольца на C++-ядре (ring_cpp.CppRing) против Python-эталона ring_analysis.Ring."""
+
+    LAT, LEAD, MEV, NSL = 2, 1.4335, 3000.0, 10              # решётка Сибири, короткий интегратор
+
+    @classmethod
+    def setUpClass(cls):
+        import ring_analysis as ra, ring_cpp as rc
+        cls.ra, cls.rc = ra, rc
+        os.environ["SS_SECTOR_NSL"] = str(cls.NSL); os.environ["SS_SECTOR_ORDER"] = "4"
+        try:
+            cls.py = ra.Ring(cls.LAT, start_before_first_m=cls.LEAD, design_mev=cls.MEV)
+        finally:
+            os.environ.pop("SS_SECTOR_NSL", None); os.environ.pop("SS_SECTOR_ORDER", None)
+        cls.cpp = rc.CppRing(cls.LAT, start_before_first_m=cls.LEAD, design_mev=cls.MEV, nsl=cls.NSL, order=4)
+        rng = np.random.default_rng(3)
+        cls.st = rng.normal(0, [1e-3, 1e-4, 1e-3, 1e-4, 1e-3, 1e-3], (4, 6))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.cpp.close()
+
+    def test_geometry(self):
+        self.assertEqual(self.cpp.n_mag, len(self.py.mags))
+        self.assertAlmostEqual(self.cpp.circumference, self.py.circumference, places=9)
+        self.assertEqual(self.cpp.names, self.py.names)
+
+    def test_turn_and_elements(self):
+        np.testing.assert_allclose(self.cpp.track(self.st, 2), self.py.track(self.st, 2), atol=1e-11)
+        np.testing.assert_allclose(self.cpp.track_elements(self.st), self.py.track_elements(self.st), atol=1e-11)
+
+    def test_kick_and_yaw(self):
+        import copy
+        j = next(i for i, k in enumerate(self.py.kinds) if k == "sext")
+        pert = self.ra.kicked(self.py, j, 1e-4)
+        ck = self.cpp.with_kick(j, 1e-4)
+        np.testing.assert_allclose(ck.track(self.st), pert.track(self.st), atol=1e-11)
+        ck.close()
+        q = next(i for i, k in enumerate(self.py.kinds) if k == "quad" and i > 5)
+        pert = copy.copy(self.py); pert.mags = list(self.py.mags)
+        pert.mags[q] = self.ra.yaw_element(copy.copy(self.py.mags[q]), 2e-4)
+        cy = self.cpp.with_yaw(q, 2e-4)
+        np.testing.assert_allclose(cy.track(self.st), pert.track(self.st), atol=1e-11)
+        cy.close()
+
+    def test_junction_command(self):
+        from beam_injection import PlaneMagnet
+        ax = np.array([1.0, 0.0, 0.0]); v = np.array([0.0, 0.0, 1.0])
+        A = PlaneMagnet(np.zeros(3), ax)
+        B = PlaneMagnet(np.array([0.8, 1e-3, 0.0]), mt._rot(ax, v, 5e-2))
+        got = self.cpp.junction(self.st, A.fr_out, B.fr_in)
+        ref = np.array([mt.modified_drift(tuple(z), A, B) for z in self.st])
+        np.testing.assert_allclose(got, ref, atol=1e-14)
+
+
+class TestRingMap(unittest.TestCase):
+    """Отображения высших порядков (ring_map): алгебра рядов, точные стыки, хроматичность."""
+
+    @classmethod
+    def setUpClass(cls):
+        import ring_map
+        cls.m = ring_map
+        cls.da = ring_map.DA(6, 4)
+
+    def _eval(self, a, z):
+        return sum(c * np.prod([zi ** e for zi, e in zip(z, ex)]) for c, ex in zip(a, self.da.monos))
+
+    def test_series_functions(self):
+        da = self.da
+        a = da.const(1.3) + 0.2 * da.var(0) - 0.1 * da.var(5) + 0.05 * da.mul(da.var(1), da.var(1))
+        z = np.array([1e-2, -2e-2, 0, 0, 0, 3e-2])
+        f = lambda z: 1.3 + 0.2 * z[0] - 0.1 * z[5] + 0.05 * z[1] ** 2
+        self.assertAlmostEqual(self._eval(da.sqrt(a), z), math.sqrt(f(z)), places=10)
+        self.assertAlmostEqual(self._eval(da.inv(a), z), 1 / f(z), places=10)
+
+    def test_linear_flow_equals_closed_form(self):
+        """Линейная часть точного решения квадруполя = матрица ring_matrix.quad."""
+        import ring_matrix as rm
+        da = self.da
+        K, L = 2.462177415336321, 0.295
+        M = self.m.flow(da, self.m.field_multipole(da, K, K, 0.0, 0.0), L)
+        R = np.array([[M[i][1 + j] for j in range(4)] for i in range(4)])
+        np.testing.assert_allclose(R, rm.quad(L, K)[:4, :4], atol=1e-13)
+
+    def test_junction_series_matches_kernel(self):
+        """Ряд клинового стыка = точный modified_drift ядра с остатком порядка N+1."""
+        from beam_injection import PlaneMagnet
+        da = self.da
+        ax = np.array([1.0, 0.0, 0.0]); v = np.array([0.0, 0.0, 1.0])
+        A = PlaneMagnet(np.zeros(3), ax)
+        B = PlaneMagnet(np.array([0.8, 1e-3, 0.0]), mt._rot(ax, v, 5e-2))
+        J = self.m.junction(da, da.identity(), A.fr_out, B.fr_in)
+        for scale in (1e-3, 5e-4):
+            z = scale * np.array([1.0, 0.5, -0.7, 0.3, 0.0, 0.8])
+            ref = np.array(mt.modified_drift(tuple(z), A, B))
+            got = np.array([self._eval(c, z) for c in J])
+            self.assertLess(float(np.max(np.abs(got - ref))), 50 * scale ** 5)
+
+    def test_chromaticity_matches_tracking(self):
+        """ξ1 кольца Сибири по отображению = производная ν(δ) трекинга (разности на ±1e-4)."""
+        import ring_analysis as ra
+        os.environ["SS_SECTOR_NSL"] = "40"; os.environ["SS_SECTOR_ORDER"] = "4"
+        try:
+            ring = ra.Ring(2, start_before_first_m=1.4335, design_mev=3000.0)
+        finally:
+            os.environ.pop("SS_SECTOR_NSL", None); os.environ.pop("SS_SECTOR_ORDER", None)
+        ch = self.m.RingMap(ring, 3).chromaticity()
+        qp, qm = ra.tunes_point(ring, 1e-4), ra.tunes_point(ring, -1e-4)
+        self.assertAlmostEqual(ch["xi_x"][1], (qp[0] - qm[0]) / 2e-4, delta=2e-3)
+        self.assertAlmostEqual(ch["xi_y"][1], (qp[1] - qm[1]) / 2e-4, delta=2e-3)
+
+    def test_normal_form_octupole(self):
+        """Нормальная форма на пробном отображении «поворот + тонкий октуполь» = формула −K₃Lβ²/(16π)."""
+        da = self.m.DA(4, 4)
+        mux, muy, bx, by, k3 = 2 * math.pi * 0.31, 2 * math.pi * 0.22, 5.0, 3.0, 100.0
+        R = np.zeros((4, 4))
+        R[:2, :2] = [[math.cos(mux), bx * math.sin(mux)], [-math.sin(mux) / bx, math.cos(mux)]]
+        R[2:, 2:] = [[math.cos(muy), by * math.sin(muy)], [-math.sin(muy) / by, math.cos(muy)]]
+        x, px, y, py = da.identity()
+        kick = [x, px + (k3 / 6.0) * da.mul(da.mul(x, x), x), y, py]
+        M = [sum(R[i, j] * kick[j] for j in range(4)) for i in range(4)]
+        nf = self.m.normal_form_of_map(da, M)
+        self.assertAlmostEqual(nf["nux"], 0.31, places=9)
+        self.assertAlmostEqual(nf["nuy"], 0.22, places=9)
+        self.assertAlmostEqual(nf["dnux/dJx"], -k3 * bx * bx / (16 * math.pi), delta=1e-6)
+        for k in ("dnux/dJy", "dnuy/dJx", "dnuy/dJy"):
+            self.assertAlmostEqual(nf[k], 0.0, places=9, msg=f"{k}: октуполь по x не трогает вертикаль")
+
+    def test_normal_form_matches_tracking(self):
+        """∂ν/∂J кольца Сибири по нормальной форме = наклон ν(J) по трекингу C++-ядра."""
+        import ring_analysis as ra, ring_matrix as rm
+        os.environ["SS_SECTOR_NSL"] = "40"; os.environ["SS_SECTOR_ORDER"] = "4"
+        try:
+            ring = ra.Ring(2, start_before_first_m=1.4335, design_mev=3000.0)
+        finally:
+            os.environ.pop("SS_SECTOR_NSL", None); os.environ.pop("SS_SECTOR_ORDER", None)
+        nf = self.m.normal_form(ring, 4)
+        tw = rm.twiss(ring); bx, ax = float(tw["betax"][-1]), float(tw["alphax"][-1])
+        co = ra.closed_orbit(ring)
+        q = []
+        for a in (2e-3, 4e-3):
+            st = co.copy(); st[0] += a; st[2] += 1e-5
+            tb = ring.track_tbt([st], 512)[0]
+            q.append((a * a * (1 + ax * ax) / (2 * bx), ra.tbt_tunes(tb, (bx, 1.0), (ax, 0.0), orbit=co)[0]))
+        slope = (q[1][1] - q[0][1]) / (q[1][0] - q[0][0])
+        self.assertAlmostEqual(nf["dnux/dJx"] / slope, 1.0, delta=2e-3)
+        self.assertAlmostEqual(nf["dnux/dJy"], nf["dnuy/dJx"], delta=1e-6,
+                               msg="перекрёстные коэффициенты обязаны совпадать")
+
+
+class TestRadiationIntegrals(unittest.TestCase):
+    """Интегралы излучения (ring_matrix.radiation_integrals) — против трекинга ядра и формул."""
+
+    @classmethod
+    def setUpClass(cls):
+        import ring_analysis as ra, ring_matrix as rm
+        cls.ra, cls.rm = ra, rm
+        os.environ["SS_SECTOR_NSL"] = "40"; os.environ["SS_SECTOR_ORDER"] = "4"
+        try:
+            cls.ring = ra.Ring(2, start_before_first_m=1.4335, design_mev=3000.0)
+            cls.ring_sr = ra.Ring(2, start_before_first_m=1.4335, design_mev=3000.0, sr=True)
+        finally:
+            os.environ.pop("SS_SECTOR_NSL", None); os.environ.pop("SS_SECTOR_ORDER", None)
+        cls.ri = rm.radiation_integrals(cls.ring)
+
+    def test_u0_matches_tracking(self):
+        """U₀ по интегралам = потеря энергии осевой частицы за оборот в ядре с излучением."""
+        u0_track = -float(self.ring_sr.track([np.zeros(6)])[0, 5]) * 3000.0
+        self.assertAlmostEqual(self.ri["U0"] / u0_track, 1.0, delta=1e-3)
+
+    def test_alphac_matches_matrices(self):
+        """αc = I₁/C совпадает с уплотнением орбит из перемножения матриц."""
+        self.assertAlmostEqual(self.ri["alphac"] / float(self.rm.twiss(self.ring)["alphac"]), 1.0, delta=1e-7)
+
+    def test_robinson_sum(self):
+        """Теорема Робинсона: Jx + Jy + Js = 4."""
+        self.assertAlmostEqual(self.ri["Jx"] + self.ri["Jy"] + self.ri["Jdelta"], 4.0, places=12)
+
+    def test_edge_term_present(self):
+        """Краевой член I₄: у решётки с наклонными гранями он меняет I₄ (у Сибири грани прямые)."""
+        import copy
+        ring = copy.copy(self.ring); ring.mags = [copy.copy(m) for m in self.ring.mags]
+        i4_0 = self.ri["I4"]
+        for m in ring.mags:
+            if getattr(m, "sector", False):
+                m.kEdge1 = m.kEdge2 = 0.05 * (-m.theta0 / m.Leff)          # tg(E) = 0.05
+        i4 = self.rm.radiation_integrals(ring)["I4"]
+        self.assertGreater(abs(i4 - i4_0), 1e-4, "краевой член обязан входить в I₄")
 
 
 if __name__ == "__main__":

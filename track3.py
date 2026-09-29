@@ -39,7 +39,15 @@ def run_kick(lattice, group, source, exp_id=None, n_turns=1, thin_eps=0.0, setti
     thin_eps>0 (м) ⇒ потоковое прореживание траектории по кривизне (лёгкие длинные многооборотные треки).
     save_local ⇒ доп. писать trajectories_local_exp{id}.npz — ЛОКАЛЬНЫЕ координаты (СЕКТОРНАЯ модель m.body,
     x=отклонение от опорной орбиты) для анализатора; глоб. .bin остаётся боксовым (body_global)."""
-    plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings)
+    # ГЛОБАЛЬНЫЙ путь боксовый: собираем магниты с ВЫКЛЮЧЕННЫМ сектором, иначе кики соседних срезов
+    # изгиба не гасятся поворотом рамки и пучок теряется на первом же семействе (см. body_global).
+    # Локальному пути сектор нужен — он строит своё кольцо ниже, уже с флагом.
+    _sector = mt.SECTOR
+    try:
+        mt.SECTOR = False
+        plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings)
+    finally:
+        mt.SECTOR = _sector
     finish = info.get("finish", plane); closed = info.get("closed", True)
     if n_turns > 1 and not closed:
         n_turns = 1                                        # открытый сегмент не зациклить

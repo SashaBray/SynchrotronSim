@@ -123,3 +123,25 @@ workspace/datasets/**/_harmonics_cache.json
 # отложенные к удалению данные и папка экспорта AEDT — большие, не для репозитория
 workspace/_на_удаление/
 workspace/aedt_exports/
+# сверка с elegant: всё в elegant_run/diag генерируется elegant_diag.py / verify_elegant.py
+elegant_run/diag/
+
+# --- добавлено при подготовке к публикации ---
+# 3D-модели: любой регистр расширения и вложенные папки (synthetic/*.STL обходили *.stl)
+*.stl
+*.STL
+*.obj
+*.OBJ
+workspace/geometry/
+
+# Справочные PDF (статьи/КД — не в репозиторий)
+*.pdf
+*.PDF
+
+# Рабочие/сгенерированные прогоны elegant новых решёток и диагностика
+elegant_run/newlat/
+elegant_run/*.sdds
+elegant_run/*.ele
+
+# Бэкапы с суффиксом через дефис (*.bak_* уже есть, добавляем *.bak-*)
+*.bak-*

@@ -36,13 +36,19 @@ def write_warmstart(lattice=1, lte_dir=None):
         matB = -c["angle"] / (QP * Leff) if is_bend else 0.0
         if matB: nbend += 1
         if c["G"] or c["S"] or c["O"]: nfoc += 1
+        # Сопоставление сохраняет интеграл K·L под длину УСТРОЙСТВА (коэф. × L_lte/L_dev). Изгибающим ниже
+        # ставится длина .lte, поэтому множитель надо снять — иначе интеграл завышен на L_lte/L_dev
+        # (у DQ2C 0.400001/0.4: +2.6e-6, νy +2.7e-5 против elegant).
+        G, S, O = c["G"], c["S"], c["O"]
+        if is_bend and Llte and "eff_length" in byid[g[0]["instance_id"]] and c.get("scale"):
+            G, S, O = G / c["scale"], S / c["scale"], O / c["scale"]
         for k, inst in enumerate(g):
             row = byid[inst["instance_id"]]
             if is_bend and Llte and "eff_length" in row:
                 row["eff_length"] = f"{Llte:.10g}"           # точная длина среза в БД (её читает ядро)
             if k == 0:
-                row["mat_B"] = f"{matB:.9g}"; row["mat_G"] = f"{c['G']:.9g}"
-                row["mat_S"] = f"{c['S']:.9g}"; row["mat_O"] = f"{c['O']:.9g}"
+                row["mat_B"] = f"{matB:.9g}"; row["mat_G"] = f"{G:.9g}"
+                row["mat_S"] = f"{S:.9g}"; row["mat_O"] = f"{O:.9g}"
             else:
                 row["mat_B"] = row["mat_G"] = row["mat_S"] = row["mat_O"] = "0"
 

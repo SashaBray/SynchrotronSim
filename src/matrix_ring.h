@@ -63,7 +63,7 @@ struct Node {
     Vec3   center, axis, uhat, vhat, entry, exit;   // «ящик» (для стыков)
     Frame  fr_in, fr_out;                            // рамки стыковки (у сектора — криволинейные)
     // Плоскость инжекции — тело=тождество; иначе физдвижок (Element::body сам даёт дрейф для не-sector/не-kick).
-    State  body(const State& s) const { return is_plane ? s : phys.body(s); }
+    State  body(const State& s, IsrRng* rng = nullptr) const { return is_plane ? s : phys.body(s, rng); }
 };
 
 // ---- CSV (';' разделитель, EU-запятая→точка, срез кавычек/пробелов) — как src/main.cpp ---------
@@ -114,8 +114,10 @@ inline Node makePlane(const Vec3& center, const Vec3& axisIn) {
 }
 
 // ---- СБОРКА КОЛЬЦА из БД (build_line + check_junctions) ----------------------------------------
+// nsl/order — срезы и порядок сектор/кик-тела (по умолчанию как elegant: 5 и 4); isr — квантовое возбуждение.
 inline std::vector<Node> buildLine(const std::string& ws, int lattice, double design_mev, bool sr,
-                                   const Settings& stg) {
+                                   const Settings& stg, int nsl_sector = SECTOR_NSLICES, int yoshida_order = 4,
+                                   bool isr = false) {
     Table lc = readTable(ws + "tables/lattice_configs.csv");
     Table cn = readTable(ws + "tables/element_connectivity.csv");
     int cLat = lc.col("lattice_id"), cInst = lc.col("instance_id");
@@ -155,10 +157,11 @@ inline std::vector<Node> buildLine(const std::string& ws, int lattice, double de
         Node nd;
         nd.dev = cell(*r0, cdev); nd.kind = cell(*r0, cKind);
         double Leff = cellD(*r0, cLeff);
-        int nsl = SECTOR_NSLICES;   // сектор/кик-тело = 5 срезов (_nsl_sector); n_slices из БД — для box-модели
+        int nsl = nsl_sector;       // сектор/кик-тело (_nsl_sector); n_slices из БД — для box-тела (кик корректора)
         double e1 = cellD(*r0, cE1), e2 = cellD(*r0, cE2);
-        (void)cNsl;
-        nd.phys = Element::make(nd.kind, Leff, B, G, Gv, S, O, e1, e2, nsl, design_mev, sr);
+        int nsl_box = (int)cellD(*r0, cNsl, 40.0);
+        nd.phys = Element::make(nd.kind, Leff, B, G, Gv, S, O, e1, e2, nsl, design_mev, sr, yoshida_order, isr,
+                                nsl_box > 0 ? nsl_box : 40);
         nd.sector = nd.phys.sector; nd.monitor = (nd.kind == "monitor");
         double yaw = cellD(*r0, cyaw), pitch = cellD(*r0, cpit), roll = cellD(*r0, crol);
         nd.center = { cellD(*r0, cx), cellD(*r0, cy), cellD(*r0, cz) };
