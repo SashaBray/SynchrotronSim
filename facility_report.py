@@ -315,7 +315,7 @@ def ensemble(lattice, inf, lin, turns, n_seeds, tol, cutoff, seed0=1000, correct
     fdiff_sum = np.zeros((len(fys_h), len(fxs))); fdiff_cnt = np.zeros_like(fdiff_sum)
     mom_sum = np.zeros(len(ds))
     co_x = []; co_y = []; nux = []; nuy = []; n_unstable = 0
-    co_x0 = []; co_y0 = []; kx = []; ky = []; kx_max = 0.0; ky_max = 0.0    # статистика коррекции
+    co_x0 = []; co_y0 = []; kx = []; ky = []; kx_max = 0.0; ky_max = 0.0; n_threaded = 0   # статистика коррекции
     root = tempfile.mkdtemp(prefix="ens_")
     try:
         for s in range(n_seeds):
@@ -325,12 +325,14 @@ def ensemble(lattice, inf, lin, turns, n_seeds, tol, cutoff, seed0=1000, correct
             if correct:                                       # выправить орбиту корректорами (стационарно)
                 import orbit_correct as oc
                 try:
-                    res = oc.correct(r, resp)
+                    res = oc.correct(r, resp, aperture=inf["loss_m"])
                 except Exception:
                     res = None
                 if res is None:
                     n_unstable += 1; r.close(); continue
                 co = res["co"]
+                if res.get("threaded"):
+                    n_threaded += 1
                 co_x0.append(oc.rms(res["orb_before"][0])); co_y0.append(oc.rms(res["orb_before"][1]))
                 co_x.append(oc.rms(res["orb_after"][0])); co_y.append(oc.rms(res["orb_after"][1]))
                 kx.append(oc.rms(res["thx"])); ky.append(oc.rms(res["thy"]))
@@ -376,7 +378,10 @@ def ensemble(lattice, inf, lin, turns, n_seeds, tol, cutoff, seed0=1000, correct
     mom = dict(ds=ds, prob=momp, turns=turns, ensemble=n_seeds,
                acc_pos=float(ds[(ds > 0) & (momp >= 0.5)].max()) if np.any((ds > 0) & (momp >= 0.5)) else 0.0,
                acc_neg=float(ds[(ds < 0) & (momp >= 0.5)].min()) if np.any((ds < 0) & (momp >= 0.5)) else 0.0)
-    _rms = lambda a: float(np.sqrt(np.mean(np.square(a)))) if a else float("nan")
+    def _rms(a):                                              # СКО по машинам, nan-безопасно (одна машина
+        a = np.asarray(a, float)                              # с потерянной частицей не должна портить агрегат)
+        a = a[np.isfinite(a)]
+        return float(np.sqrt(np.mean(a * a))) if a.size else float("nan")
     err = dict(n_seeds=n_seeds, n_unstable=n_unstable, n_stable=n_seeds - n_unstable,
                co_x_rms=_rms(co_x), co_y_rms=_rms(co_y),
                nux_mean=float(np.mean(nux)) if nux else float("nan"),
@@ -386,7 +391,8 @@ def ensemble(lattice, inf, lin, turns, n_seeds, tol, cutoff, seed0=1000, correct
                da_ideal_x=1.5 * xe, corrected=correct, n_corr=n_corr)
     if correct:                                               # орбита ДО коррекции и силы корректоров
         err.update(co_x_rms0=_rms(co_x0), co_y_rms0=_rms(co_y0),
-                   corr_x_rms=_rms(kx), corr_y_rms=_rms(ky), corr_x_max=kx_max, corr_y_max=ky_max)
+                   corr_x_rms=_rms(kx), corr_y_rms=_rms(ky), corr_x_max=kx_max, corr_y_max=ky_max,
+                   n_threaded=n_threaded)
     return dict(da=da, fma=fma, mom=mom, err=err)
 
 
@@ -687,6 +693,7 @@ def _tbl_errors(err, tol):
     if corr:
         rows += [
             ("Корректоров орбиты (гор.+верт.)", str(err["n_corr"])),
+            ("Машин через протяжку (threading)", str(err.get("n_threaded", 0))),
             ("СКО орбиты x: до → после коррекции",
              f"{_num(err['co_x_rms0'] * 1e3, 3)} → {_num(err['co_x_rms'] * 1e3, 3)} мм"),
             ("СКО орбиты y: до → после коррекции",
@@ -859,7 +866,7 @@ def build_html(d):
             (_tbl_detune(d["detune"], d.get("mom")), ta._table_h(5)),
             (_fig_tunes(lin, d.get("foot"), d.get("fma")), 620)]
     if err:                                                    # ансамбль машин с ошибками
-        n_erows = (9 if d["err"].get("corrected") else 6) + len(err["tol"])
+        n_erows = (10 if d["err"].get("corrected") else 6) + len(err["tol"])
         figs.append((_tbl_errors(d["err"], err["tol"]), ta._table_h(n_erows)))
     if err or not d["fast"]:                                   # ДА / диффузия / импульс (идеал или ансамбль)
         figs += [(_fig_da(d["da"]), 520),
@@ -919,8 +926,9 @@ def main():
     if a.errors:
         e = d["err"]
         if e.get("corrected"):
-            print(f"  ансамбль {e['n_seeds']} машин (коррекция, {e['n_corr']} корректоров): неустойчивых "
-                  f"{e['n_unstable']}, орбита СКО x {e['co_x_rms0']*1e3:.3f}→{e['co_x_rms']*1e3:.3f} / y "
+            print(f"  ансамбль {e['n_seeds']} машин (коррекция, {e['n_corr']} корректоров, протяжка "
+                  f"{e.get('n_threaded', 0)}): неустойчивых {e['n_unstable']}, орбита СКО x "
+                  f"{e['co_x_rms0']*1e3:.3f}→{e['co_x_rms']*1e3:.3f} / y "
                   f"{e['co_y_rms0']*1e3:.3f}→{e['co_y_rms']*1e3:.3f} мм; углы корр. СКО x "
                   f"{e['corr_x_rms']*1e6:.1f}/y {e['corr_y_rms']*1e6:.1f} мкрад; ДА +x "
                   f"{d['da']['edge_pos'].max()*1e3:.2f} мм (50% машин)", flush=True)

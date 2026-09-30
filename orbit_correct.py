@@ -17,6 +17,11 @@
 всему кольцу, а не в отдельных мониторах. Один сервер ядра переиспользуется через CppRing.apply_perturb
 (RESET сохраняет ошибки в ws, сбрасывает лишь кики), так что ни матрица отклика, ни итерации не плодят
 процессы.
+
+БУТСТРАП ПРОТЯЖКОЙ (threading): при больших ошибках замкнутой орбиты нет вовсе (Ньютон с нуля расходится,
+пучок теряется на первом же обороте). Тогда сначала выправляем ОДНООБОРОТНУЮ траекторию причинной
+матрицей отклика T (кик влияет лишь ниже по ходу) — сектор за сектором, пока пучок не пройдёт оборот и не
+появится замкнутая орбита, — и лишь затем переходим к штатному SVD по замкнутой орбите (см. _thread).
 """
 import os
 import pickle
@@ -68,6 +73,27 @@ def response_matrix(ideal, corr=None, bpm=None, theta=1e-5):
     return dict(corr=list(corr), bpm=bpm, Rx=Rx, Ry=Ry)
 
 
+def threading_response(ideal, corr, bpm, theta=1e-5):
+    """Траекторные (причинные) матрицы отклика Tx, Ty [м/рад]: смещение ОДНООБОРОТНОЙ траектории
+    частицы из 0 в точках наблюдения от единичного кика корректора. В отличие от замкнутой орбиты, кик
+    влияет лишь на BPM НИЖЕ по ходу (без обхода кольца) — этим и пользуется протяжка (threading), когда
+    замкнутой орбиты ещё нет. ideal мутируется и в конце сбрасывается."""
+    ideal.apply_perturb()
+    base = ideal.track_elements([np.zeros(6)])[0]
+    bx0, by0 = base[bpm, 0], base[bpm, 2]
+    Tx = np.zeros((len(bpm), len(corr)))
+    Ty = np.zeros((len(bpm), len(corr)))
+    for j, c in enumerate(corr):
+        ideal.apply_perturb(kicks=[(c, theta)])
+        tr = ideal.track_elements([np.zeros(6)])[0]
+        Tx[:, j] = (tr[bpm, 0] - bx0) / theta
+        ideal.apply_perturb(vkicks=[(c, theta)])
+        tr = ideal.track_elements([np.zeros(6)])[0]
+        Ty[:, j] = (tr[bpm, 2] - by0) / theta
+    ideal.apply_perturb()
+    return Tx, Ty
+
+
 def cached_response_matrix(ideal, lattice, theta=1e-5, rebuild=False):
     """Матрица отклика с кэшем на диске (workspace/results/orbit_resp_exp{lattice}_nsl{nsl}.pkl).
     Кэш свой на каждое число срезов nsl (отклик слегка зависит от точности интегратора). Инвалидируется,
@@ -80,11 +106,12 @@ def cached_response_matrix(ideal, lattice, theta=1e-5, rebuild=False):
             with open(path, "rb") as f:
                 r = pickle.load(f)
             if (r.get("n_mag") == ideal.n_mag and abs(r.get("circ", -1) - ideal.circumference) < 1e-6
-                    and r.get("corr") == list(corr) and r.get("nsl") == nsl):
+                    and r.get("corr") == list(corr) and r.get("nsl") == nsl and "Tx" in r):
                 return r
         except Exception:
             pass
     r = response_matrix(ideal, corr=corr, theta=theta)
+    r["Tx"], r["Ty"] = threading_response(ideal, corr, r["bpm"], theta=theta)   # для протяжки
     r["n_mag"] = ideal.n_mag; r["circ"] = ideal.circumference; r["nsl"] = nsl
     os.makedirs(RESP_DIR, exist_ok=True)
     with open(path, "wb") as f:
@@ -92,32 +119,102 @@ def cached_response_matrix(ideal, lattice, theta=1e-5, rebuild=False):
     return r
 
 
-def correct(ring, resp, iters=4, rcond=1e-2):
+def _closed_orbit_seeded(ring, seed=None, eps=1e-8, tol=1e-12, max_iter=20):
+    """Замкнутая орбита с ПОСЕВОМ (Ньютон из seed, а не из 0) — нужна после протяжки, когда орбита есть,
+    но далека от нуля и Ньютон с нуля расходится. seed — 4-вектор (x,px,y,py). Возврат 6-вектор или None."""
+    z = np.zeros(4) if seed is None else np.asarray(seed, float)[:4].copy()
+    for _ in range(max_iter):
+        pts = [np.r_[z, 0.0, 0.0]]
+        for k in range(4):
+            q = z.copy(); q[k] += eps; pts.append(np.r_[q, 0.0, 0.0])
+        fin = ring.track(pts)[:, :4]
+        if not np.all(np.isfinite(fin)):
+            return None
+        F = fin[0] - z
+        if np.max(np.abs(F)) < tol:
+            break
+        J = ((fin[1:] - fin[0]) / eps).T
+        try:
+            z = z - np.linalg.solve(J - np.eye(4), F)
+        except np.linalg.LinAlgError:
+            return None
+    co = np.r_[z, 0.0, 0.0]
+    return co if np.all(np.isfinite(co)) else None
+
+
+def _thread(ring, resp, aperture, passes=15, rcond=5e-2, relax=0.85):
+    """Протяжка (threading): гасить корректорами ОДНООБОРОТНУЮ траекторию частицы из 0, пока не появится
+    замкнутая орбита. Причинная матрица отклика T: решаем θ = −relax·T⁺·(траектория) по ДОСТИГНУТОЙ части
+    (BPM в пределах апертуры) — там работают лишь корректоры выше по ходу (ниже нулевые столбцы, SVD их не
+    трогает). Важно: гасим до МАЛОЙ траектории, а не «до апертуры» — большая орбита через секступоли даёт
+    feed-down, тюн уезжает на резонанс и устойчивой орбиты нет. После каждого прохода пробуем замкнуть.
+    Возврат (thx, thy, co) при успехе или (None, None, None). relax — недорелаксация для устойчивости
+    итераций при больших ошибках; aperture — апертура потери [м]."""
+    corr, bpm = resp["corr"], resp["bpm"]
+    Tx, Ty = resp["Tx"], resp["Ty"]
+    thx = np.zeros(len(corr)); thy = np.zeros(len(corr))
+    for _ in range(passes):
+        ring.apply_perturb(kicks=list(zip(corr, thx.tolist())), vkicks=list(zip(corr, thy.tolist())))
+        tr = ring.track_elements([np.zeros(6)])[0]
+        x, y = tr[bpm, 0], tr[bpm, 2]
+        within = np.isfinite(x) & np.isfinite(y) & (np.abs(x) <= aperture) & (np.abs(y) <= aperture)
+        reach = int(np.argmin(within)) if not within.all() else len(bpm)
+        if reach == 0:                                          # теряется сразу — корректоры не помогут
+            return None, None, None
+        rr = np.arange(reach)
+        co = _closed_orbit_seeded(ring, np.array([np.mean(x[rr]), 0.0, np.mean(y[rr]), 0.0]))
+        if co is not None:                                      # орбита замкнулась — протяжка окончена
+            return thx, thy, co
+        thx = thx - relax * (np.linalg.pinv(Tx[rr], rcond=rcond) @ x[rr])
+        thy = thy - relax * (np.linalg.pinv(Ty[rr], rcond=rcond) @ y[rr])
+    return None, None, None
+
+
+def correct(ring, resp, iters=4, rcond=1e-2, aperture=0.012):
     """Скорректировать орбиту кольца ring (с ошибками в ws) корректорами по матрице отклика resp.
     ring мутируется: в конце на нём применены итоговые кики (готов для трекинга ДА/диффузии). Возврат
-    dict(co, thx, thy, orb_before, orb_after) или None, если машина неустойчива даже в ходе коррекции.
-      thx, thy — углы корректоров [рад]; orb_before/after — (ox, oy) в точках наблюдения [м]."""
+    dict(co, thx, thy, orb_before, orb_after, threaded) или None, если орбиту вернуть не удалось.
+
+    БУТСТРАП: если замкнутой орбиты из 0 нет (сильные ошибки), сначала ПРОТЯЖКА (_thread) выправляет
+    однооборотную траекторию, пока не появится замкнутая орбита, затем — штатный SVD по замкнутой орбите.
+      thx, thy — углы корректоров [рад]; orb_before/after — (ox, oy) в точках наблюдения [м];
+      threaded — понадобилась ли протяжка."""
     corr, bpm = resp["corr"], resp["bpm"]
     Px = np.linalg.pinv(resp["Rx"], rcond=rcond)
     Py = np.linalg.pinv(resp["Ry"], rcond=rcond)
     thx = np.zeros(len(corr))
     thy = np.zeros(len(corr))
+    threaded = False
+    ring.apply_perturb()                                        # чистое кольцо (только ошибки ws)
+    co = ra.closed_orbit(ring, dims=4)
+    if not np.all(np.isfinite(co)):                             # замкнутой орбиты нет → протяжка
+        if "Tx" not in resp:
+            return None
+        thx, thy, co = _thread(ring, resp, aperture)
+        if co is None:
+            return None                                         # орбиту вернуть не удалось
+        threaded = True
+    seed = co[:4]                                               # посев Ньютона в цикле — из найденной орбиты
     orb_before = None
-    for _ in range(iters):
+    for _ in range(iters):                                      # штатный SVD по замкнутой орбите
         ring.apply_perturb(kicks=list(zip(corr, thx.tolist())), vkicks=list(zip(corr, thy.tolist())))
-        co, orb = _orbit(ring, bpm)
+        co = _closed_orbit_seeded(ring, seed)
         if co is None:
             return None
+        seed = co[:4]                                           # следующий Ньютон — из текущей орбиты
+        orb = ring.track_elements([co])[0]
         ox, oy = orb[bpm, 0], orb[bpm, 2]
-        if orb_before is None:                                  # первый проход: кики нулевые → орбита ДО
-            orb_before = (ox.copy(), oy.copy())
+        if orb_before is None:
+            orb_before = (ox.copy(), oy.copy())                 # орбита до SVD (после протяжки, если была)
         thx = thx - Px @ ox
         thy = thy - Py @ oy
     ring.apply_perturb(kicks=list(zip(corr, thx.tolist())), vkicks=list(zip(corr, thy.tolist())))
-    co, orb = _orbit(ring, bpm)
+    co = _closed_orbit_seeded(ring, seed)
     if co is None:
         return None
-    return dict(co=co, thx=thx, thy=thy, orb_before=orb_before, orb_after=(orb[bpm, 0], orb[bpm, 2]))
+    orb = ring.track_elements([co])[0]
+    return dict(co=co, thx=thx, thy=thy, orb_before=orb_before,
+                orb_after=(orb[bpm, 0], orb[bpm, 2]), threaded=threaded)
 
 
 def rms(a):
