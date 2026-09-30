@@ -69,21 +69,23 @@ def response_matrix(ideal, corr=None, bpm=None, theta=1e-5):
 
 
 def cached_response_matrix(ideal, lattice, theta=1e-5, rebuild=False):
-    """Матрица отклика с кэшем на диске (workspace/results/orbit_resp_exp{lattice}.pkl). Инвалидируется,
+    """Матрица отклика с кэшем на диске (workspace/results/orbit_resp_exp{lattice}_nsl{nsl}.pkl).
+    Кэш свой на каждое число срезов nsl (отклик слегка зависит от точности интегратора). Инвалидируется,
     если сменились геометрия (n_mag/периметр) или число корректоров — считается заново (≈2-3 мин)."""
-    path = os.path.join(RESP_DIR, f"orbit_resp_exp{int(lattice)}.pkl")
+    nsl = int(getattr(ideal, "nsl", 40))
+    path = os.path.join(RESP_DIR, f"orbit_resp_exp{int(lattice)}_nsl{nsl}.pkl")
     corr = corrector_indices(ideal)
     if not rebuild and os.path.exists(path):
         try:
             with open(path, "rb") as f:
                 r = pickle.load(f)
             if (r.get("n_mag") == ideal.n_mag and abs(r.get("circ", -1) - ideal.circumference) < 1e-6
-                    and r.get("corr") == list(corr)):
+                    and r.get("corr") == list(corr) and r.get("nsl") == nsl):
                 return r
         except Exception:
             pass
     r = response_matrix(ideal, corr=corr, theta=theta)
-    r["n_mag"] = ideal.n_mag; r["circ"] = ideal.circumference
+    r["n_mag"] = ideal.n_mag; r["circ"] = ideal.circumference; r["nsl"] = nsl
     os.makedirs(RESP_DIR, exist_ok=True)
     with open(path, "wb") as f:
         pickle.dump(r, f)

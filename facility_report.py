@@ -288,7 +288,7 @@ def _edge_prob(xs, ys, prob, level=0.5):
     return np.array(ep), np.array(en)
 
 
-def ensemble(lattice, inf, lin, turns, n_seeds, tol, cutoff, seed0=1000, correct=False):
+def ensemble(lattice, inf, lin, turns, n_seeds, tol, cutoff, seed0=1000, correct=False, nsl=40):
     """Ансамбль из n_seeds случайных машин с ошибками. Возврат агрегатов: ДА как ВЕРОЯТНОСТЬ выживания
     по seed'ам, средняя диффузия, импульсная как доля выживших, и статистика влияния ошибок (искажение
     орбиты, разброс частот, доля неустойчивых машин). Сетки фиксируются по ИДЕАЛЬНОЙ машине (1.5× границ),
@@ -298,7 +298,7 @@ def ensemble(lattice, inf, lin, turns, n_seeds, tol, cutoff, seed0=1000, correct
     коррекции (орбита до/после, СКО и максимум углов корректоров)."""
     import shutil
     import tempfile
-    ideal = _ring(inf)
+    ideal = _ring(inf, nsl=nsl)
     co0, xe, ye, dpos, dneg = auto_ranges(ideal, inf, turns)
     xs = np.linspace(-1.5 * xe, 1.5 * xe, 41); ys_h = np.linspace(0.0, 1.5 * ye, 16)
     fxs = np.linspace(-1.5 * xe, 1.5 * xe, 61); fys_h = np.linspace(0.0, 1.5 * ye, 16)
@@ -321,7 +321,7 @@ def ensemble(lattice, inf, lin, turns, n_seeds, tol, cutoff, seed0=1000, correct
         for s in range(n_seeds):
             wsdir = os.path.join(root, f"s{s}")
             errmod.perturbed_workspace(lattice, seed0 + s, tol, wsdir, cutoff)
-            r = _ring(inf, ws=wsdir)
+            r = _ring(inf, ws=wsdir, nsl=nsl)
             if correct:                                       # выправить орбиту корректорами (стационарно)
                 import orbit_correct as oc
                 try:
@@ -497,12 +497,14 @@ def _lin(t):
     return (t[0], t[1], int(t[2]))
 
 
-def analyze(lattice, turns=512, fast=False, track_cache=None, errors_cfg=None):
+def analyze(lattice, turns=512, fast=False, track_cache=None, errors_cfg=None, nsl=40):
     """Полный расчёт установки. Аналитика (геометрия/оптика/структура/footprint) — всегда мгновенно.
     Трекинг (ДА/карта частот/импульс) считается, если не fast; track_cache подставляет готовый трекинг
-    (--rebuild). errors_cfg={n_seeds, tol, cutoff} — ансамбль машин с ошибками вместо идеального трекинга."""
+    (--rebuild). errors_cfg={n_seeds, tol, cutoff} — ансамбль машин с ошибками вместо идеального трекинга.
+    nsl — число срезов магнита в трекинге (40 для «геройских» паспортов; для ансамбля хватает ~12,
+    граница ДА не сдвигается, но в ~3× быстрее — см. бенчмарк nsl)."""
     inf = dict(info_of(lattice)); inf["_id"] = lattice
-    ring = _ring(inf)
+    ring = _ring(inf, nsl=nsl)
     out = dict(lattice=lattice, label=inf["label"], turns=turns,
                fast=fast and track_cache is None and errors_cfg is None)
     out["geom"] = geometry(ring, inf)
@@ -516,7 +518,8 @@ def analyze(lattice, turns=512, fast=False, track_cache=None, errors_cfg=None):
     out["foot"] = footprint(out["lin"], out["detune"])
     if errors_cfg is not None:                                # ансамбль машин с ошибками (± коррекция орбиты)
         out.update(ensemble(lattice, inf, out["lin"], turns, errors_cfg["n_seeds"],
-                            errors_cfg["tol"], errors_cfg["cutoff"], correct=errors_cfg.get("correct", False)))
+                            errors_cfg["tol"], errors_cfg["cutoff"],
+                            correct=errors_cfg.get("correct", False), nsl=nsl))
         out["errors"] = errors_cfg
     elif track_cache is not None:                             # готовый трекинг из кэша (--rebuild)
         out.update(track_cache); out["turns"] = int(track_cache.get("turns", turns))
@@ -883,6 +886,9 @@ def main():
     ap.add_argument("--correct", action="store_true",
                     help="выправить замкнутую орбиту корректорами на каждой машине (только с --errors)")
     ap.add_argument("--seeds", type=int, default=32, help="машин в ансамбле ошибок (--errors)")
+    ap.add_argument("--nsl", type=int, default=40,
+                    help="срезов магнита в трекинге (40 — паспорт идеала; ~12 для ансамбля: ×3 быстрее, "
+                         "граница ДА не сдвигается)")
     ap.add_argument("--cutoff", type=float, default=2.5, help="обрезка гауссовых ошибок, ед. σ")
     ap.add_argument("--errors-table", default=None, help="путь к таблице допусков (по умолч. element_errors.csv)")
     ap.add_argument("--out", default=None)
@@ -893,7 +899,8 @@ def main():
     if a.errors:                                             # ансамбль машин с ошибками
         tol = errmod.load_tolerances(a.errors_table)
         print(f"  допуски: {errmod.error_summary(tol)}", flush=True)
-        d = analyze(a.lattice, turns=a.turns,
+        print(f"  срезов магнита nsl={a.nsl}", flush=True)
+        d = analyze(a.lattice, turns=a.turns, nsl=a.nsl,
                     errors_cfg=dict(n_seeds=a.seeds, tol=tol, cutoff=a.cutoff, correct=a.correct))
     elif a.rebuild:                                          # быстрая пересборка: трекинг из кэша
         cp = _cache_path(a.lattice)
@@ -902,7 +909,7 @@ def main():
         with open(cp, "rb") as f:
             d = analyze(a.lattice, track_cache=pickle.load(f))
     else:
-        d = analyze(a.lattice, turns=a.turns, fast=a.fast)
+        d = analyze(a.lattice, turns=a.turns, fast=a.fast, nsl=a.nsl)
         if not a.fast:                                        # сохранить трекинг для будущих --rebuild
             with open(_cache_path(a.lattice), "wb") as f:
                 pickle.dump({k: d[k] for k in ("da", "fma", "mom", "ranges", "turns")}, f)
