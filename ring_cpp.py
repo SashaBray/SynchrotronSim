@@ -35,13 +35,14 @@ class CppRing:
     label = "SynchrotronSim"
 
     def __init__(self, lattice=1, start_before_first_m=None, settings=None, sr=False, isr=False, rf=None,
-                 design_mev=6000.0, nsl=None, order=None, seed=12345, ws=None):
+                 design_mev=6000.0, nsl=None, order=None, seed=12345, ws=None, timeout=None):
         dn, do = _default_slices()
         self.lattice = int(lattice)
         self.lead = start_before_first_m
         self.sr, self.isr, self.rf, self.design_mev = bool(sr or isr), bool(isr), rf, float(design_mev)
         self.nsl = int(nsl or dn); self.order = int(order or do); self.seed = int(seed)
         self.ws = ws                            # путь к workspace с ВОЗМУЩЁННОЙ решёткой (ансамбли ошибок); None — обычная БД
+        self.timeout = timeout                  # сторож: команда дольше timeout с → убить процесс (защита от зависаний)
         self.settings = settings
         self._perturb = []                      # [("KICK"|"YAW", j, value)] — для копий и описания магнитов
         self._py = None
@@ -89,6 +90,17 @@ class CppRing:
         except Exception:
             pass
 
+    def _watch(self):
+        """Сторож: таймер, убивающий процесс через self.timeout с, если команда зависла (защита ансамбля
+        от патологичной машины — убитый процесс даёт EOF, чтение падает, ансамбль метит машину неустойчивой).
+        Возврат таймера (его .cancel() по завершении команды) или None, если таймаут не задан."""
+        if not self.timeout:
+            return None
+        import threading
+        t = threading.Timer(self.timeout, lambda p=self._proc: p.kill())
+        t.daemon = True; t.start()
+        return t
+
     def _send(self, line, payload=None):
         payload = b"" if payload is None else np.ascontiguousarray(payload, dtype="<f8").tobytes()
         self._proc.stdin.write(line.encode() + b"\n" + payload); self._proc.stdin.flush()
@@ -98,18 +110,29 @@ class CppRing:
         return int(head[1])
 
     def _doubles(self, line, payload):
-        m = self._send(line, payload)
-        need = m * 8; buf = bytearray()
-        while len(buf) < need:
-            chunk = self._proc.stdout.read(need - len(buf))
-            if not chunk:
-                raise RuntimeError("сервер кольца оборвал ответ")
-            buf += chunk
+        w = self._watch()
+        try:
+            m = self._send(line, payload)
+            need = m * 8; buf = bytearray()
+            while len(buf) < need:
+                chunk = self._proc.stdout.read(need - len(buf))
+                if not chunk:
+                    raise RuntimeError("сервер кольца оборвал ответ")
+                buf += chunk
+        finally:
+            if w:
+                w.cancel()
         return np.frombuffer(bytes(buf), dtype="<f8")
 
     def _text(self, line):
-        k = self._send(line)
-        return [self._proc.stdout.readline().decode("utf-8", "replace").rstrip("\n") for _ in range(k)]
+        w = self._watch()
+        try:
+            k = self._send(line)
+            out = [self._proc.stdout.readline().decode("utf-8", "replace").rstrip("\n") for _ in range(k)]
+        finally:
+            if w:
+                w.cancel()
+        return out
 
     # ---- интерфейс трекера (как ring_analysis.Ring) -------------------------------------------------
     @staticmethod

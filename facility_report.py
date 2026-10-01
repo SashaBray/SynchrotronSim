@@ -67,12 +67,14 @@ def info_of(lattice):
     return LATTICE_INFO[lattice]
 
 
-def _ring(inf, nsl=40, order=4, rf=False, ws=None):
+def _ring(inf, nsl=40, order=4, rf=False, ws=None, timeout=None):
     kw = dict(lattice=inf["_id"], design_mev=inf["energy_mev"], nsl=nsl, order=order)
     if rf:
         kw["rf"] = dict(volt_mv=inf["rf"][0], harmonic=inf["rf"][1])
     if ws:                                                    # возмущённая рабочая папка (ансамбль ошибок)
         kw["ws"] = ws
+    if timeout:                                               # сторож от зависаний (ансамбли с коррекцией)
+        kw["timeout"] = timeout
     return ring_cpp.CppRing(**kw)
 
 
@@ -321,7 +323,7 @@ def ensemble(lattice, inf, lin, turns, n_seeds, tol, cutoff, seed0=1000, correct
         for s in range(n_seeds):
             wsdir = os.path.join(root, f"s{s}")
             errmod.perturbed_workspace(lattice, seed0 + s, tol, wsdir, cutoff)
-            r = _ring(inf, ws=wsdir, nsl=nsl)
+            r = _ring(inf, ws=wsdir, nsl=nsl, timeout=300 if correct else None)
             if correct:                                       # выправить орбиту корректорами (стационарно)
                 import orbit_correct as oc
                 try:
