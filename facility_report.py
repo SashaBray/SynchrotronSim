@@ -317,6 +317,7 @@ def ensemble(lattice, inf, lin, turns, n_seeds, tol, cutoff, seed0=1000, correct
     fdiff_sum = np.zeros((len(fys_h), len(fxs))); fdiff_cnt = np.zeros_like(fdiff_sum)
     mom_sum = np.zeros(len(ds))
     co_x = []; co_y = []; nux = []; nuy = []; n_unstable = 0
+    da_pos_i = []; da_neg_i = []                              # ДА +x/−x КАЖДОЙ машины (для медианы/квартилей)
     co_x0 = []; co_y0 = []; kx = []; ky = []; kx_max = 0.0; ky_max = 0.0; n_threaded = 0   # статистика коррекции
     root = tempfile.mkdtemp(prefix="ens_")
     try:
@@ -358,7 +359,10 @@ def ensemble(lattice, inf, lin, turns, n_seeds, tol, cutoff, seed0=1000, correct
                     nux.append(qx); nuy.append(qy)
             except Exception:
                 pass
-            da_sum += _da_alive(r, inf, turns, co, xs, ys_h).astype(float)
+            alive = _da_alive(r, inf, turns, co, xs, ys_h)
+            da_sum += alive.astype(float)
+            dpi, dni = _da_scalar(alive, xs)                   # ДА этой машины (пиковый вылет по строкам y)
+            da_pos_i.append(dpi); da_neg_i.append(dni)
             st = _grid_states(co, fxs, fys_h)
             tbt = r.track_tbt(st, 2 * n_half, limit=inf["loss_m"])
             _, _, diff = ra.frequency_map(tbt, beta, alpha, co, n_half)
@@ -374,7 +378,10 @@ def ensemble(lattice, inf, lin, turns, n_seeds, tol, cutoff, seed0=1000, correct
     ep, en = _edge_prob(xs, ys, prob, 0.5)
     fdiff = np.where(fdiff_cnt > 0, fdiff_sum / np.maximum(fdiff_cnt, 1), np.nan)
     fys, fdiff = _mirror_y(fys_h, fdiff)
-    da = dict(xs=xs, ys=ys, prob=prob, turns=turns, edge_pos=ep, edge_neg=en, ensemble=n_seeds)
+    _pct = lambda a, q: float(np.percentile(a, q)) if a else float("nan")
+    da = dict(xs=xs, ys=ys, prob=prob, turns=turns, edge_pos=ep, edge_neg=en, ensemble=n_seeds,
+              da_pos_med=_pct(da_pos_i, 50), da_neg_med=_pct(da_neg_i, 50),      # медиана по восстановл. машинам
+              da_pos_q1=_pct(da_pos_i, 25), da_pos_q3=_pct(da_pos_i, 75), n_da=len(da_pos_i))
     fma = dict(xs=fxs, ys=fys, diff2d=fdiff, ensemble=n_seeds)
     momp = mom_sum / max(n_seeds - n_unstable, 1)
     mom = dict(ds=ds, prob=momp, turns=turns, ensemble=n_seeds,
@@ -401,6 +408,20 @@ def ensemble(lattice, inf, lin, turns, n_seeds, tol, cutoff, seed0=1000, correct
 def _da_alive(ring, inf, turns, co, xs, ys):
     tbt = ring.track_tbt(_grid_states(co, xs, ys), turns, limit=inf["loss_m"])
     return ra.survived_turns(tbt, limit=inf["loss_m"]).reshape(len(ys), len(xs)) >= turns
+
+
+def _da_scalar(alive, xs):
+    """ДА одной машины из её булевой сетки выживания (ys×xs, полусетка): пиковый вылет по |x| по строкам y.
+    Возврат (+x, |−x|) [м]. Это скаляр ДА на машину — для медианы/квартилей по восстановленным машинам
+    (устойчивее к доле выживших, чем контур «50% машин», который схлопывается при <50%)."""
+    x0 = int(np.argmin(np.abs(xs))); pos = 0.0; neg = 0.0
+    for row in alive:
+        rp = xs[x0:][row[x0:]]; rn = xs[:x0 + 1][row[:x0 + 1]]
+        if rp.size:
+            pos = max(pos, float(rp.max()))
+        if rn.size:
+            neg = min(neg, float(rn.min()))
+    return pos, abs(neg)
 
 
 def _mom_alive(ring, inf, turns, co, xe, ds):
@@ -629,7 +650,10 @@ def _fig_da(da):
         z = da["prob"]; cb = dict(title="доля машин", thickness=12, len=0.9)
         hm = go.Heatmap(x=da["xs"] * 1e3, y=da["ys"] * 1e3, z=z, colorscale="Viridis",
                         zmin=0, zmax=1, zsmooth="best", colorbar=cb)
-        ttl = f"Динамическая апертура: доля выживших из {ens} машин с ошибками ({da['turns']} об.)"
+        med = da.get("da_pos_med")
+        med_s = (f"; медиана ДА+x {med*1e3:.2f} мм по {da.get('n_da', 0)} восст. машинам"
+                 if med is not None and math.isfinite(med) else "")
+        ttl = f"Динамическая апертура: доля выживших из {ens} машин ({da['turns']} об.){med_s}"
     else:
         hm = go.Heatmap(x=da["xs"] * 1e3, y=da["ys"] * 1e3, z=da["surv"],
                         colorscale="Viridis", colorbar=dict(title="оборотов", thickness=12, len=0.9))
@@ -933,11 +957,13 @@ def main():
                   f"{e['co_x_rms0']*1e3:.3f}→{e['co_x_rms']*1e3:.3f} / y "
                   f"{e['co_y_rms0']*1e3:.3f}→{e['co_y_rms']*1e3:.3f} мм; углы корр. СКО x "
                   f"{e['corr_x_rms']*1e6:.1f}/y {e['corr_y_rms']*1e6:.1f} мкрад; ДА +x "
-                  f"{d['da']['edge_pos'].max()*1e3:.2f} мм (50% машин)", flush=True)
+                  f"{d['da']['edge_pos'].max()*1e3:.2f} мм (50% машин), медиана "
+                  f"{d['da'].get('da_pos_med', float('nan'))*1e3:.2f} мм", flush=True)
         else:
             print(f"  ансамбль {e['n_seeds']} машин: неустойчивых {e['n_unstable']}, орбита СКО "
                   f"x {e['co_x_rms']*1e3:.3f}/y {e['co_y_rms']*1e3:.3f} мм; ДА +x "
-                  f"{d['da']['edge_pos'].max()*1e3:.2f} мм (50% машин)", flush=True)
+                  f"{d['da']['edge_pos'].max()*1e3:.2f} мм (50% машин), медиана "
+                  f"{d['da'].get('da_pos_med', float('nan'))*1e3:.2f} мм", flush=True)
     elif not a.fast:
         print(f"  динамическая апертура +x {d['da']['edge_pos'].max()*1e3:.2f} мм, "
               f"импульсная +{d['mom']['acc_pos']*100:.2f}/{d['mom']['acc_neg']*100:.2f} %", flush=True)
