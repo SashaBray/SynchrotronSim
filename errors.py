@@ -56,6 +56,25 @@ def _trunc_normal(rng, sigma, cutoff):
             return v
 
 
+def _rotate(vec, axis, ang):
+    """Поворот вектора vec вокруг единичной оси axis на угол ang (Родригес)."""
+    import math
+    vec = np.asarray(vec, float); axis = np.asarray(axis, float)
+    c, s = math.cos(ang), math.sin(ang)
+    return vec * c + np.cross(axis, vec) * s + axis * float(np.dot(axis, vec)) * (1.0 - c)
+
+
+def _angles_from_frame(axis, uhat):
+    """Глобальные (yaw, pitch, roll), согласованные с mt.frame, из ортонормальной тройки.
+    Ось зависит только от yaw/pitch; roll берём по развороту uhat относительно бескреновой тройки."""
+    import math
+    yaw = math.atan2(axis[1], axis[0])
+    pitch = -math.asin(max(-1.0, min(1.0, axis[2])))
+    _, u2, v2 = mt.frame(yaw, pitch, 0.0)                       # бескреновая тройка тех же yaw/pitch
+    roll = math.atan2(float(np.dot(uhat, v2)), float(np.dot(uhat, u2)))
+    return yaw, pitch, roll
+
+
 def perturbed_workspace(lattice, seed, tol, out_dir, cutoff=2.5):
     """Записать возмущённую рабочую папку для одной случайной машины (seed). Возврат пути (для ws=...).
 
@@ -67,30 +86,49 @@ def perturbed_workspace(lattice, seed, tol, out_dir, cutoff=2.5):
         rows = list(csv.reader(f, delimiter=";"))
     hdr = rows[0]; ci = {c: i for i, c in enumerate(hdr)}
     li = ci["lattice_id"]; ki = ci["kind"]
+    truth = []                                                 # ИСТИНА по каждому магниту (в порядке кольца) — только для валидации
     for r in rows[1:]:
         if not r or r[li] != str(lattice):
             continue
         kind = r[ki].strip()
+        rec = dict(kind=kind, dx=0.0, dy=0.0, dz=0.0, dyaw=0.0, dpitch=0.0, droll=0.0, field=0.0)
+        truth.append(rec)                                      # запись на КАЖДЫЙ магнит решётки (нули, если без допуска)
         t = tol.get(kind)
         if not t:
             continue
-        # геометрия: локальная рамка по НОМИНАЛЬНЫМ yaw/pitch/roll, сдвиг в глобальные x/y/z
+        # НОМИНАЛЬНАЯ орбитная рамка элемента (ось — вдоль пучка, uhat/vhat — поперечные)
         yaw, pitch, roll = (float(r[ci[c]] or 0) for c in ("yaw", "pitch", "roll"))
         axis, uhat, vhat = mt.frame(yaw, pitch, roll)
+        # СДВИГ в локальной рамке: dx·uhat (попереч. гор.) + dy·vhat (попереч. верт.) + dz·axis (продольн.)
         dx = _trunc_normal(rng, t.get("dx", 0), cutoff)
         dy = _trunc_normal(rng, t.get("dy", 0), cutoff)
         dz = _trunc_normal(rng, t.get("dz", 0), cutoff)
+        rec["dx"], rec["dy"], rec["dz"] = dx, dy, dz
         shift = dx * np.asarray(uhat) + dy * np.asarray(vhat) + dz * np.asarray(axis)
         for a, s in zip(("x", "y", "z"), shift):
             r[ci[a]] = repr(float(r[ci[a]] or 0) + float(s))
-        for ang in ("yaw", "pitch", "roll"):
-            d = _trunc_normal(rng, t.get("d" + ang, 0), cutoff)
-            if d:
-                r[ci[ang]] = repr(float(r[ci[ang]] or 0) + d)
+        # ОРИЕНТАЦИЯ: повороты в ЛОКАЛЬНОЙ рамке (рыскание вокруг vhat, тангаж вокруг uhat, крен вокруг оси),
+        # скомпонованы с номинальной тройкой → извлекаем новые глобальные yaw/pitch/roll для симулятора.
+        dyaw = _trunc_normal(rng, t.get("dyaw", 0), cutoff)
+        dpitch = _trunc_normal(rng, t.get("dpitch", 0), cutoff)
+        droll = _trunc_normal(rng, t.get("droll", 0), cutoff)
+        rec["dyaw"], rec["dpitch"], rec["droll"] = dyaw, dpitch, droll
+        if dyaw or dpitch or droll:
+            ax, uu, vv = np.asarray(axis, float), np.asarray(uhat, float), np.asarray(vhat, float)
+            if dyaw:
+                ax, uu = _rotate(ax, vv, dyaw), _rotate(uu, vv, dyaw)
+            if dpitch:
+                ax, vv = _rotate(ax, uu, dpitch), _rotate(vv, uu, dpitch)
+            if droll:
+                uu, vv = _rotate(uu, ax, droll), _rotate(vv, ax, droll)
+            ny, npi, nro = _angles_from_frame(ax, uu)
+            r[ci["yaw"]] = repr(ny); r[ci["pitch"]] = repr(npi); r[ci["roll"]] = repr(nro)
         # поле: один множитель возбуждения на магнит
         fpct = t.get("field_pct", 0)
         if fpct:
-            gain = 1.0 + _trunc_normal(rng, fpct / 100.0, cutoff)
+            delta = _trunc_normal(rng, fpct / 100.0, cutoff)
+            rec["field"] = delta
+            gain = 1.0 + delta
             for c in _FIELD:
                 if c in ci and r[ci[c]] not in (None, "", "0"):
                     r[ci[c]] = repr(float(r[ci[c]]) * gain)
@@ -101,6 +139,12 @@ def perturbed_workspace(lattice, seed, tol, out_dir, cutoff=2.5):
         csv.writer(f, delimiter=";").writerows(rows)
     for t2 in ("element_connectivity.csv", "particle_groups.csv"):
         shutil.copyfile(os.path.join(TB, t2), os.path.join(dst_tb, t2))
+    with open(os.path.join(dst_tb, "errors_truth.csv"), "w", encoding="utf-8", newline="") as f:   # эталон для валидации
+        w = csv.writer(f, delimiter=";")
+        w.writerow(["idx", "kind", "dx", "dy", "dz", "dyaw", "dpitch", "droll", "field"])
+        for i, rec in enumerate(truth):
+            w.writerow([i, rec["kind"], repr(rec["dx"]), repr(rec["dy"]), repr(rec["dz"]),
+                        repr(rec["dyaw"]), repr(rec["dpitch"]), repr(rec["droll"]), repr(rec["field"])])
     return out_dir
 
 
