@@ -111,12 +111,13 @@ def main():
         # (приближение) и крутила th += ang (зеркально) — решётка выходила несогласованной с СИЛОЙ.
         xc, yc, yaw_c, x, y, th = _geom.step(x, y, th, L, ang)
         if MONITORS and e["type"] in ("MONI", "MARK") and nm not in devs:
-            # датчик положения: длины нет, физики нет — только точка съёма центроида ([[bpm-monitor-element]])
+            # датчик положения: поля нет (дрейф). Длина из .lte (обычно 0 → плоскость); при L>0 — тонкий
+            # ящик, чтение по центральной плоскости. Съём центроида, см. [[bpm-monitor-element]].
             iid += 1
             r = {c: "" for c in lc_hdr}
             r.update(lattice_id=LAT_ID, instance_id=str(iid), device_type_id=MONI_DEV,
                      x=f"{xc:.12f}", y=f"{yc:.12f}", z="0", yaw=f"{yaw_c:.12f}", pitch="0", roll="0",
-                     arg_val="0", correct_coeff="1", eff_length="0", kind="monitor", n_slices="1",
+                     arg_val="0", correct_coeff="1", eff_length=f"{L:.12f}", kind="monitor", n_slices="1",
                      mat_B="0", mat_G="0", mat_S="0", mat_O="0")
             lc_rows.append(r)
             continue

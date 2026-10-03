@@ -321,11 +321,24 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out, edges=None, co
         fig.add_trace(go.Scatter3d(x=mc[:, 0], y=mc[:, 1], z=mc[:, 2], mode="markers",
                                    marker=dict(size=2.5, color="rgba(70,70,70,0.35)"), name="магниты",
                                    text=mh, hovertemplate="%{text}<extra>магнит</extra>", showlegend=False))
-    # BPM — маркеры на датчиках положения (kind=monitor)
-    bpm = np.array([(float(r["x"]), float(r["y"]), float(r["z"])) for r in lc if kind.get(r["device_type_id"]) == "monitor"], np.float32)
-    if len(bpm):
-        fig.add_trace(go.Scatter3d(x=bpm[:, 0], y=bpm[:, 1], z=bpm[:, 2], mode="markers",
-                                   marker=dict(size=3, color="black", symbol="diamond"), name=f"BPM ({len(bpm)})"))
+    # BPM — датчики положения: полупрозрачные экраны ⊥ оси пучка (kind=monitor); при L>0 — ящик длиной L
+    mons = [r for r in lc if kind.get(r["device_type_id"]) == "monitor"]
+    if mons:
+        import matrix_tracker as mt
+        s = 0.09; VX = []; FI = []; FJ = []; FK = []
+        for r in mons:
+            c = np.array([float(r["x"]), float(r["y"]), float(r["z"])])
+            ax, u, v = (np.asarray(w, float) for w in
+                        mt.frame(float(r.get("yaw", 0) or 0), float(r.get("pitch", 0) or 0), float(r.get("roll", 0) or 0)))
+            off = 0.5 * float(r.get("eff_length", 0) or 0) * ax                 # экран в центре ящика (±L/2)
+            for cen in ((c - off, c + off) if np.any(off) else (c,)):
+                b = len(VX)
+                VX += [cen - s * u - s * v, cen + s * u - s * v, cen + s * u + s * v, cen - s * u + s * v]
+                FI += [b, b]; FJ += [b + 1, b + 2]; FK += [b + 2, b + 3]
+        VX = np.array(VX, np.float32)
+        fig.add_trace(go.Mesh3d(x=VX[:, 0], y=VX[:, 1], z=VX[:, 2], i=FI, j=FJ, k=FK,
+                                color="#00bfff", opacity=0.4, name=f"BPM ({len(mons)})",
+                                hoverinfo="name", flatshading=True))
 
     # ТРАЕКТОРИЯ = пробный пучок (глоб. X,Y,Z из dev[:,3:6]); ховер «имя · № · суперпериод · s»
     traj_idx, traj_col = [], []                              # индексы/цвета трасс — для кометной анимации

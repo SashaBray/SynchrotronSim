@@ -69,6 +69,8 @@ def build_scene(plotter, exp_id, hi_mag=None):
         plotter.add_mesh(big, color="silver",
                          opacity=float(op.get("EM", 0.25) if active else op.get("PM", 0.4)),
                          show_edges=True)
+    # ДАТЧИКИ ПОЛОЖЕНИЯ (BPM): полупрозрачные экраны ⊥ оси пучка в точке съёма (общий помощник).
+    V.add_monitor_screens(plotter, cur)
     # опорный путь
     rpts = V.load_reference_path_points(WS, exp_id)
     if rpts is not None and len(rpts) >= 2:

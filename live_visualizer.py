@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 import pyvista as pv
 
-from visualize import build_combined_mesh, load_trajectories, rotation_matrix_zyx
+from visualize import build_combined_mesh, load_trajectories, rotation_matrix_zyx, add_monitor_screens
 from _common import tracker_exe, project_root, workspace_dir
 from _common import no_window
 
@@ -159,6 +159,10 @@ class LiveVisualizer:
                 show_edges=True,
                 label=f"{dev} ({'EM' if is_active else 'PM'}, x{len(tlist)})",
             )
+        # ДАТЧИКИ ПОЛОЖЕНИЯ (BPM): полупрозрачные экраны ⊥ оси пучка
+        n_mon = add_monitor_screens(self.plotter, current_lat)
+        if n_mon:
+            print(f"  датчиков положения: {n_mon}")
 
     # =========================================================================
     # Trajectory refresh (UI only -- быстро)
