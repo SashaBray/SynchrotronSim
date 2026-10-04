@@ -235,19 +235,18 @@ struct RingModel {
     }
 
     // ---- возмущения (как ring_analysis: кик корректора, поворот магнита) --------------------------
-    void kick(int j, double theta) {
+    void kick(int j, double theta) {                 // доп. гор. кик; body() применяет его к любому элементу
         if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("KICK: нет магнита");
-        if (mags[j].phys.sector) throw std::runtime_error("KICK: изгиб не корректор");
-        mags[j].phys.hkick = theta;
+        mags[j].phys.hkick = theta;                  // (включая секторные — для отклика DQ/диполей в orbit_infer)
     }
-    void vkick(int j, double theta) {                // вертикальный кик корректора (орбитальная коррекция)
+    void vkick(int j, double theta) {                // доп. верт. кик (корректор орбиты; и отклик секторных)
         if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("VKICK: нет магнита");
-        if (mags[j].phys.sector) throw std::runtime_error("VKICK: изгиб не корректор");
         mags[j].phys.vkick = theta;
     }
     void dk(int j, double dq) {                       // BBA: транзитно изменить нормальный градиент k1 (обе плоскости)
         if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("DK: нет магнита");
         mags[j].phys.k1 += dq; mags[j].phys.k1v += dq;
+        mags[j].phys.precache();                      // у секторного обновит b1=k1·ρ (body_sector читает прекэш)
     }
     void yaw(int j, double alpha) {                  // ring_analysis.yaw_element: поворот рамок вокруг v входа
         if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("YAW: нет магнита");
