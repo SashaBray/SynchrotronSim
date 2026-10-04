@@ -168,10 +168,14 @@ struct Element {
     // Диспетчер тела: изгиб → секторный интегратор; прямой мультиполь → кик; корректор с киком → «ящик»
     // (дрейф–кик–дрейф, n_slices из БД — как box-тело matrix_tracker для θ0 у неизгибающего); иначе дрейф.
     State body(const State& st, IsrRng* rng = nullptr) const {
-        if (sector) return body_sector(st, rng);
-        if ((hkick != 0.0 || vkick != 0.0) && !kick) return body_kicker(st);
-        if (kick)   return body_kick(st);
-        return drift(st, Leff);
+        // полевой-свободный корректор (kind=kicker) — отдельным путём дрейф–кик–дрейф (НЕ меняется)
+        if ((hkick != 0.0 || vkick != 0.0) && !kick && !sector) return body_kicker(st);
+        State out = sector ? body_sector(st, rng) : (kick ? body_kick(st) : drift(st, Leff));
+        // hkick/vkick на ПОЛЕВОМ элементе (квадруполь/секступоль/изгиб) = доп. дипольный кик: смещённый
+        // магнит (feed-down K1·L·Δ) или ошибка поля. В обычных прогонах поле-элементы кика не несут —
+        // поведение не меняется; нужно для отклика орбиты на сдвиг (orbit_infer).
+        if (hkick != 0.0 || vkick != 0.0) { out.px += hkick; out.py += vkick; }
+        return out;
     }
 
 private:

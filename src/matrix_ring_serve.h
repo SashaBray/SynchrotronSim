@@ -14,7 +14,7 @@
 //   PIECES n             + n·6           → OK m + n·(n_pieces+1)·6 (старт + после каждого куска)
 //   JUNCTION n           + 24 + n·6      → OK m + n·6 (стык плоскостей A→B: p, axis, u, v каждой)
 //   PIECEMETA / INFO                     → OK k + k текстовых строк
-//   KICK j theta | VKICK j theta | YAW j alpha | RESET   → OK 0
+//   KICK j theta | VKICK j theta | YAW j alpha | DK j dk | RESET   → OK 0
 #pragma once
 #include "matrix_ring.h"
 #include <cstdio>
@@ -245,6 +245,10 @@ struct RingModel {
         if (mags[j].phys.sector) throw std::runtime_error("VKICK: изгиб не корректор");
         mags[j].phys.vkick = theta;
     }
+    void dk(int j, double dq) {                       // BBA: транзитно изменить нормальный градиент k1 (обе плоскости)
+        if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("DK: нет магнита");
+        mags[j].phys.k1 += dq; mags[j].phys.k1v += dq;
+    }
     void yaw(int j, double alpha) {                  // ring_analysis.yaw_element: поворот рамок вокруг v входа
         if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("YAW: нет магнита");
         Node& m = mags[j];
@@ -347,6 +351,8 @@ inline int serveRing(RingModel& R) {
                 int j; double th; is >> j >> th; R.vkick(j, th); sendText({});
             } else if (cmd == "YAW") {
                 int j; double a; is >> j >> a; R.yaw(j, a); sendText({});
+            } else if (cmd == "DK") {                        // транзитно изменить градиент квадруполя (для BBA)
+                int j; double dk; is >> j >> dk; R.dk(j, dk); sendText({});
             } else if (cmd == "RESET") {
                 R.build(); sendText({});
             } else {

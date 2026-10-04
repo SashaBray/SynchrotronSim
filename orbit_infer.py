@@ -49,11 +49,13 @@ def shift_basis(ideal, elems=None, bpm=None, theta=1e-5, lattice=None, nsl=None,
         try:
             with open(path, "rb") as f:
                 b = pickle.load(f)
-            if b.get("elems") == elems and len(b.get("bpm", [])) == len(bpm) and b.get("n_mag") == ideal.n_mag:
+            if (b.get("elems") == elems and len(b.get("bpm", [])) == len(bpm)
+                    and b.get("n_mag") == ideal.n_mag and "k1" in b):
                 return b
         except Exception:
             pass
-    k1l = np.array([float(ideal.mags[j].k1) * float(ideal.mags[j].Leff) for j in elems])
+    k1 = np.array([float(ideal.mags[j].k1) for j in elems])
+    k1l = np.array([k1[i] * float(ideal.mags[j].Leff) for i, j in enumerate(elems)])
     ideal.apply_perturb()
     co0 = ra.closed_orbit(ideal, dims=4)
     base = ideal.track_elements([co0])[0]
@@ -68,7 +70,7 @@ def shift_basis(ideal, elems=None, bpm=None, theta=1e-5, lattice=None, nsl=None,
         co = ra.closed_orbit(ideal, dims=4); orb = ideal.track_elements([co])[0]
         By[:, k] = -k1l[k] * (orb[bpm, 2] - by0) / theta         # сдвиг dy → θy=−K1L·dy
     ideal.apply_perturb()
-    b = dict(elems=elems, bpm=bpm, Bx=Bx, By=By, k1l=k1l, n_mag=ideal.n_mag, nsl=nsl)
+    b = dict(elems=elems, bpm=bpm, Bx=Bx, By=By, k1l=k1l, k1=k1, n_mag=ideal.n_mag, nsl=nsl)
     if path:
         os.makedirs(CACHE, exist_ok=True)
         with open(path, "wb") as f:
@@ -80,6 +82,11 @@ def bpm_rows_at_quads(ring):
     """Строки track_elements (выходы квадруполей) как реалистичный набор точек наблюдения ~322, по BPM
     на квадруполь (естественная пара к BBA). Выход магнита i — строка i+1."""
     return np.array([i + 1 for i in quad_indices(ring)])
+
+
+def monitor_rows(ring):
+    """Строки track_elements на РЕАЛЬНЫХ датчиках (kind=monitor) — проектные позиции BPM из .lte."""
+    return np.array([i + 1 for i, k in enumerate(ring.kinds) if k == "monitor"])
 
 
 def draw_bpm_offsets(n_bpm, seed, sigma, cutoff=2.5):
@@ -119,6 +126,56 @@ def infer_shifts(basis, ox, oy, rcond=1e-2):
     dx = np.linalg.pinv(basis["Bx"], rcond=rcond) @ ox
     dy = np.linalg.pinv(basis["By"], rcond=rcond) @ oy
     return dx, dy
+
+
+def bba(ring, basis, delta=0.05):
+    """Beam-based alignment: для КАЖДОГО квадруполя транзитно меняем нормальный градиент k1 на δ·k1 (DK),
+    по сдвигу замкнутой орбиты Δo находим положение пучка в квадруполе. Проекция Δo на столбец базиса
+    (отклик на кик в этом квадруполе): x_beam = −(1/δ)·(Bxᵀ·Δo)/|Bx|². ПРЕИМУЩЕСТВО перед инверсом по
+    одной орбите: каждый квадруполь НЕЗАВИСИМО (нет глобальной вырожденности) и Δo = разность орбит
+    ⇒ смещение BPM сокращается. Возврат (xb, yb) [м] — положение пучка в каждом квадруполе, или None.
+    ring — возмущённая машина; δ — относительное изменение градиента."""
+    elems, bpm = basis["elems"], basis["bpm"]
+    Bx, By, k1 = basis["Bx"], basis["By"], basis["k1"]
+    ring.apply_perturb()
+    co0 = ra.closed_orbit(ring, dims=4)
+    if not np.all(np.isfinite(co0)):
+        return None
+    o0 = ring.track_elements([co0])[0]; ox0, oy0 = o0[bpm, 0], o0[bpm, 2]
+    xb = np.full(len(elems), np.nan); yb = np.full(len(elems), np.nan)
+    for k, q in enumerate(elems):
+        dk = delta * k1[k]
+        if dk == 0.0:
+            continue
+        ring.apply_perturb(dks=[(q, dk)])
+        co = ra.closed_orbit(ring, dims=4)
+        if not np.all(np.isfinite(co)):
+            continue
+        o1 = ring.track_elements([co])[0]
+        dox, doy = o1[bpm, 0] - ox0, o1[bpm, 2] - oy0
+        bx, by = Bx[:, k], By[:, k]
+        nbx, nby = float(bx @ bx), float(by @ by)
+        if nbx > 0:
+            xb[k] = -(1.0 / delta) * float(bx @ dox) / nbx
+        if nby > 0:
+            yb[k] = -(1.0 / delta) * float(by @ doy) / nby
+    ring.apply_perturb()
+    return xb, yb
+
+
+def beam_in_quads_true(ring, basis):
+    """ИСТИННОЕ положение пучка в квадруполях (для валидации BBA): центр орбиты в квадруполе − его сдвиг.
+    Берётся из трекинга возмущённой машины (орбита) и errors_truth (сдвиг). ring — возмущённая машина с ws."""
+    elems = basis["elems"]
+    co = ra.closed_orbit(ring, dims=4)
+    if not np.all(np.isfinite(co)):
+        return None, None
+    o = ring.track_elements([co])[0]                           # (n_mag+1, 6)
+    cx = 0.5 * (o[np.array(elems), 0] + o[np.array(elems) + 1, 0])   # орбита в центре квадруполя (вход+выход)/2
+    cy = 0.5 * (o[np.array(elems), 2] + o[np.array(elems) + 1, 2])
+    ws = ring.ws
+    dxt, dyt = load_truth(ws, elems)
+    return cx - dxt, cy - dyt                                  # положение пучка в рамке квадруполя
 
 
 def load_truth(ws, elems):
