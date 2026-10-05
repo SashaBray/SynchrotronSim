@@ -221,11 +221,11 @@ class CppRing:
         """Кольцо с магнитом j, повёрнутым на α вокруг вертикали входа (ring_analysis.yaw_element)."""
         return self._copy_with("YAW", j, alpha)
 
-    def apply_perturb(self, kicks=(), vkicks=(), dks=()):
-        """Применить возмущения НА ТОМ ЖЕ сервере (RESET + KICK/VKICK/DK), без нового процесса. Для матрицы
-        отклика, итераций коррекции орбиты и BBA. RESET пересобирает кольцо из ws (ошибки рассогласования
-        СОХРАНЯЮТСЯ, сбрасываются только прежние возмущения). dks=[(j, dk)] — транзитное изменение градиента
-        k1 квадруполя j (BBA). Возврат self."""
+    def apply_perturb(self, kicks=(), vkicks=(), dks=(), dsks=()):
+        """Применить возмущения НА ТОМ ЖЕ сервере (RESET + KICK/VKICK/DK/DSK), без нового процесса. Для матрицы
+        отклика, итераций коррекции орбиты, BBA и коррекции связи. RESET пересобирает кольцо из ws (ошибки
+        рассогласования СОХРАНЯЮТСЯ, сбрасываются только прежние возмущения). dks=[(j, dk)] — транзитное
+        изменение градиента k1 квадруполя j (BBA); dsks=[(j, dks)] — скью-градиент (коррекция связи). Возврат self."""
         self._text("RESET")
         for j, v in kicks:
             self._text(f"KICK {int(j)} {float(v)!r}")
@@ -233,6 +233,8 @@ class CppRing:
             self._text(f"VKICK {int(j)} {float(v)!r}")
         for j, v in dks:
             self._text(f"DK {int(j)} {float(v)!r}")
+        for j, v in dsks:
+            self._text(f"DSK {int(j)} {float(v)!r}")
         self._py = None
         return self
 

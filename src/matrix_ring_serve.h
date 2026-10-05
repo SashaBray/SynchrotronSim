@@ -248,6 +248,11 @@ struct RingModel {
         mags[j].phys.k1 += dq; mags[j].phys.k1v += dq;
         mags[j].phys.precache();                      // у секторного обновит b1=k1·ρ (body_sector читает прекэш)
     }
+    void dsk(int j, double dq) {                       // коррекция связи: транзитно изменить скью-градиент ks
+        if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("DSK: нет магнита");
+        mags[j].phys.ks += dq;                         // киковый путь читает ks напрямую, прекэш не нужен
+        mags[j].phys.precache();
+    }
     void yaw(int j, double alpha) {                  // ring_analysis.yaw_element: поворот рамок вокруг v входа
         if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("YAW: нет магнита");
         Node& m = mags[j];
@@ -352,6 +357,8 @@ inline int serveRing(RingModel& R) {
                 int j; double a; is >> j >> a; R.yaw(j, a); sendText({});
             } else if (cmd == "DK") {                        // транзитно изменить градиент квадруполя (для BBA)
                 int j; double dk; is >> j >> dk; R.dk(j, dk); sendText({});
+            } else if (cmd == "DSK") {                       // транзитно изменить скью-градиент (коррекция связи)
+                int j; double dk; is >> j >> dk; R.dsk(j, dk); sendText({});
             } else if (cmd == "RESET") {
                 R.build(); sendText({});
             } else {

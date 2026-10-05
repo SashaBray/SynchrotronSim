@@ -110,6 +110,7 @@ struct Element {
     double Leff = 0.0;
     int    nsl  = 5;
     double theta0 = 0, k1 = 0, k1v = 0, k2 = 0, k3 = 0;   // силы по опорной жёсткости
+    double ks = 0;                                        // скью-квадрупольный градиент (связь x↔y)
     double kEdge1 = 0, kEdge2 = 0;                        // краевые линзы E1/E2
     bool   sector = false;                                // изгиб (dipole/dq) с theta0≠0 → секторный интегратор
     bool   kick   = false;                                // прямой мультиполь (quad/sext/oct)
@@ -258,9 +259,9 @@ private:
                 if (ys.k[j] == 0.0) break;
                 double kf = ds * ys.k[j];
                 double x = p.x, y = p.y;
-                p.px += (-k1 * x - 0.5 * k2 * (x * x - y * y)
+                p.px += (-k1 * x - ks * y - 0.5 * k2 * (x * x - y * y)
                          - (k3 / 6.0) * (x * x * x - 3.0 * x * y * y)) * kf;
-                p.py += (k1v * y + k2 * x * y
+                p.py += (k1v * y - ks * x + k2 * x * y
                          + (k3 / 6.0) * (3.0 * x * x * y - y * y * y)) * kf;
             }
         }
