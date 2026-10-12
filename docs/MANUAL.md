@@ -276,10 +276,13 @@ Python больше **не считает** — только БД/анализ/�
   — **сервер кольца для анализа** (`src/matrix_ring_serve.h`): порт `ring_analysis.Ring` (плоскость наблюдения
   перед первым магнитом, ВЧ как RFCA с FIDUCIAL=light, СИ и ISR по срезам изгибов, у каждой частицы свой
   генератор). Двоичный протокол по stdin/stdout: `TRACK`/`TBT`/`ELEM`/`PIECES`/`JUNCTION` + float64,
-  `INFO`/`PIECEMETA`, возмущения `KICK j θ` / `YAW j α` / `RESET`. Частицы параллельно (OpenMP). Python-обёртка —
+  `INFO`/`PIECEMETA`, возмущения `KICK`/`VKICK j θ` (гор./верт. доп. кик) / `DK j dk` (±Δ нормального
+  градиента k1 обеих плоскостей — BBA) / `DSK j dks` (скью-градиент ks, связь x↔y — коррекция связи) /
+  `YAW j α` / `RESET`. Частицы параллельно (OpenMP). Python-обёртка —
   `ring_cpp.CppRing` (интерфейс как у `ring_analysis.Ring`: `track`, `track_tbt`, `track_elements`,
-  `track_pieces`, `with_kick`, `with_yaw`, `perturbed`, `junction`); сверка с Python-эталоном — до 1e-11,
-  быстрее в 150–450 раз.
+  `track_pieces`, `with_kick`, `with_yaw`, `perturbed`, `junction`; `apply_perturb(kicks, vkicks, dks, dsks)`
+  — RESET + набор возмущений на том же сервере, ошибки рассогласования сохраняются); сверка с
+  Python-эталоном — до 1e-11, быстрее в 150–450 раз.
 
 Python-ядро `matrix_tracker.py` — **эталон** для разработки/опытов: новое явление сначала в Python, потом порт
 в C++; регрессия `test_matrix_core_cpp.py` (элемент, бит-в-бит) и `test_matrix_core_ring.py` (кольцо+npz,
