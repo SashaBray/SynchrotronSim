@@ -253,6 +253,16 @@ struct RingModel {
         mags[j].phys.ks += dq;                         // киковый путь читает ks напрямую, прекэш не нужен
         mags[j].phys.precache();
     }
+    void dk2(int j, double dq) {                       // нелинейный тюнер: транзитно изменить секступольную силу k2
+        if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("DK2: нет магнита");
+        mags[j].phys.k2 += dq;                         // у секторного precache обновит b2=k2·ρ
+        mags[j].phys.precache();
+    }
+    void dk3(int j, double dq) {                       // нелинейный тюнер: транзитно изменить октупольную силу k3
+        if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("DK3: нет магнита");
+        mags[j].phys.k3 += dq;                         // у секторного precache обновит b3=k3·ρ
+        mags[j].phys.precache();
+    }
     void yaw(int j, double alpha) {                  // ring_analysis.yaw_element: поворот рамок вокруг v входа
         if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("YAW: нет магнита");
         Node& m = mags[j];
@@ -359,6 +369,10 @@ inline int serveRing(RingModel& R) {
                 int j; double dk; is >> j >> dk; R.dk(j, dk); sendText({});
             } else if (cmd == "DSK") {                       // транзитно изменить скью-градиент (коррекция связи)
                 int j; double dk; is >> j >> dk; R.dsk(j, dk); sendText({});
+            } else if (cmd == "DK2") {                       // транзитно изменить секступольную силу (нелин. тюнер)
+                int j; double dk; is >> j >> dk; R.dk2(j, dk); sendText({});
+            } else if (cmd == "DK3") {                       // транзитно изменить октупольную силу (нелин. тюнер)
+                int j; double dk; is >> j >> dk; R.dk3(j, dk); sendText({});
             } else if (cmd == "RESET") {
                 R.build(); sendText({});
             } else {

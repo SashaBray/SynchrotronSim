@@ -221,11 +221,12 @@ class CppRing:
         """Кольцо с магнитом j, повёрнутым на α вокруг вертикали входа (ring_analysis.yaw_element)."""
         return self._copy_with("YAW", j, alpha)
 
-    def apply_perturb(self, kicks=(), vkicks=(), dks=(), dsks=()):
-        """Применить возмущения НА ТОМ ЖЕ сервере (RESET + KICK/VKICK/DK/DSK), без нового процесса. Для матрицы
-        отклика, итераций коррекции орбиты, BBA и коррекции связи. RESET пересобирает кольцо из ws (ошибки
-        рассогласования СОХРАНЯЮТСЯ, сбрасываются только прежние возмущения). dks=[(j, dk)] — транзитное
-        изменение градиента k1 квадруполя j (BBA); dsks=[(j, dks)] — скью-градиент (коррекция связи). Возврат self."""
+    def apply_perturb(self, kicks=(), vkicks=(), dks=(), dsks=(), dk2s=(), dk3s=()):
+        """Применить возмущения НА ТОМ ЖЕ сервере (RESET + KICK/VKICK/DK/DSK/DK2/DK3), без нового процесса. Для
+        матрицы отклика, коррекции орбиты, BBA, коррекции связи и нелинейного тюнера. RESET пересобирает кольцо
+        из ws (ошибки рассогласования СОХРАНЯЮТСЯ, сбрасываются только прежние возмущения). dks=[(j,dk)] — k1
+        квадруполя (BBA); dsks=[(j,ks)] — скью (связь); dk2s=[(j,dk2)]/dk3s=[(j,dk3)] — секступ./октуп. силы
+        (нелинейный тюнер ν(δ)). Возврат self."""
         self._text("RESET")
         for j, v in kicks:
             self._text(f"KICK {int(j)} {float(v)!r}")
@@ -235,6 +236,10 @@ class CppRing:
             self._text(f"DK {int(j)} {float(v)!r}")
         for j, v in dsks:
             self._text(f"DSK {int(j)} {float(v)!r}")
+        for j, v in dk2s:
+            self._text(f"DK2 {int(j)} {float(v)!r}")
+        for j, v in dk3s:
+            self._text(f"DK3 {int(j)} {float(v)!r}")
         self._py = None
         return self
 
