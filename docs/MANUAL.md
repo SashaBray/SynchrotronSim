@@ -278,11 +278,12 @@ Python больше **не считает** — только БД/анализ/�
   генератор). Двоичный протокол по stdin/stdout: `TRACK`/`TBT`/`ELEM`/`PIECES`/`JUNCTION` + float64,
   `INFO`/`PIECEMETA`, возмущения `KICK`/`VKICK j θ` (гор./верт. доп. кик) / `DK j dk` (±Δ нормального
   градиента k1 обеих плоскостей — BBA) / `DSK j dks` (скью-градиент ks, связь x↔y — коррекция связи) /
-  `YAW j α` / `RESET`. Частицы параллельно (OpenMP). Python-обёртка —
-  `ring_cpp.CppRing` (интерфейс как у `ring_analysis.Ring`: `track`, `track_tbt`, `track_elements`,
-  `track_pieces`, `with_kick`, `with_yaw`, `perturbed`, `junction`; `apply_perturb(kicks, vkicks, dks, dsks)`
-  — RESET + набор возмущений на том же сервере, ошибки рассогласования сохраняются); сверка с
-  Python-эталоном — до 1e-11, быстрее в 150–450 раз.
+  `DK2 j dk2` / `DK3 j dk3` (±Δ секступольной k2 / октупольной k3 — нелинейный тюнер ν(δ), коррекция
+  хроматизма: ξ1 семействами SF/SD, ξ2 октуполями) / `YAW j α` / `RESET`. Частицы параллельно (OpenMP).
+  Python-обёртка — `ring_cpp.CppRing` (интерфейс как у `ring_analysis.Ring`: `track`, `track_tbt`,
+  `track_elements`, `track_pieces`, `with_kick`, `with_yaw`, `perturbed`, `junction`;
+  `apply_perturb(kicks, vkicks, dks, dsks, dk2s, dk3s)` — RESET + набор возмущений на том же сервере,
+  ошибки рассогласования сохраняются); сверка с Python-эталоном — до 1e-11, быстрее в 150–450 раз.
 
 Python-ядро `matrix_tracker.py` — **эталон** для разработки/опытов: новое явление сначала в Python, потом порт
 в C++; регрессия `test_matrix_core_cpp.py` (элемент, бит-в-бит) и `test_matrix_core_ring.py` (кольцо+npz,
