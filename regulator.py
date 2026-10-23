@@ -106,6 +106,101 @@ if __name__ == "__main__":
                 b = (v, g)
         return b
 
+    def rpinv(m):
+        return Vc.T @ ((Uc.T @ m) / Sc)                       # помодовая псевдообратная R⁺·m
+
+    if "twoloop" in sys.argv:
+        # МЕХАНИКА #1: двухтемповые контуры на спектре дрейф+вибрация. Контур на темпе M тактов,
+        # интегральный по средней за такт орбите. M=1 — FOFB (быстрый), M=100 — SOFB (медленный).
+        RHO_S, SIG_S = 0.9999, 2e-8      # дрейф: корр. время ~10⁴ тактов
+        RHO_F, SIG_F = 0.90, 1e-8        # вибрация: декоррелирует ~10 тактов
+        NOISE = 0.1e-6; T = 20000
+
+        def run_loop(M, g, seed=1):
+            rng = np.random.default_rng(seed)
+            th = np.zeros(ncorr); ds = np.zeros(nquad); df = np.zeros(nquad)
+            acc = np.zeros(nmon); cnt = 0; src = np.empty(T)
+            for k in range(T):
+                ds = RHO_S * ds + np.sqrt(1 - RHO_S ** 2) * SIG_S * rng.standard_normal(nquad)
+                df = RHO_F * df + np.sqrt(1 - RHO_F ** 2) * SIG_F * rng.standard_normal(nquad)
+                kq = K1L * (ds + df)
+                src[k] = hc @ th + hq @ kq
+                m = Hc @ th + Hq @ kq + NOISE * rng.standard_normal(nmon)
+                acc += m; cnt += 1
+                if (k + 1) % M == 0:
+                    th = th - g * rpinv(acc / cnt); acc[:] = 0; cnt = 0
+            return src
+
+        def bands(src, tau=30.0):
+            e = src[0]; b = np.exp(-1.0 / tau); ema = np.empty_like(src)
+            for k, v in enumerate(src):
+                e = b * e + (1 - b) * v; ema[k] = e
+            sl = slice(len(src) // 4, None)
+            return np.std(src[sl]) * 1e6, np.std(ema[sl]) * 1e6, np.std((src - ema)[sl]) * 1e6
+
+        print(f"активных мод SVD: {na}/{len(S)};  помеха: дрейф(ρ={RHO_S}) + вибрация(ρ={RHO_F})", flush=True)
+        print(f"\n{'режим':>18} | {'итог σ':>7} | {'дрейф-полоса':>12} | {'вибр-полоса':>11}  (мкм)")
+        for name, M, g in [("разомкнуто", 1, 0.0), ("только SOFB (M=100)", 100, 1.0),
+                           ("только FOFB (M=1)", 1, 0.5)]:
+            tot, slow, fast = bands(run_loop(M, g))
+            print(f"{name:>18} | {tot:7.3f} | {slow:12.3f} | {fast:11.3f}", flush=True)
+        print("\n[готово twoloop]", flush=True); sys.exit(0)
+
+    if "offload" in sys.argv:
+        # МЕХАНИКА #2: быстрые корректоры ограничены ПО ХОДУ. FOFB копит DC на дрейф → насыщается →
+        # дрейф прорывается. SOFB (медл.) разгружает DC FOFB в сильные корректоры, держа его в диапазоне.
+        RHO_S, SIG_S = 0.9999, 2e-8; RHO_F, SIG_F = 0.90, 1e-8
+        NOISE = 0.1e-6; T = 20000; MS = 100; GF = 0.5
+
+        def run_two(stroke=np.inf, offload=False, seed=1):
+            rng = np.random.default_rng(seed)
+            th_f = np.zeros(ncorr); th_s = np.zeros(ncorr); ds = np.zeros(nquad); df = np.zeros(nquad)
+            src = np.empty(T); thf_sum = np.zeros(ncorr); sat = 0.0
+            for k in range(T):
+                ds = RHO_S * ds + np.sqrt(1 - RHO_S ** 2) * SIG_S * rng.standard_normal(nquad)
+                df = RHO_F * df + np.sqrt(1 - RHO_F ** 2) * SIG_F * rng.standard_normal(nquad)
+                kq = K1L * (ds + df); th = th_f + th_s
+                src[k] = hc @ th + hq @ kq
+                m = Hc @ th + Hq @ kq + NOISE * rng.standard_normal(nmon)
+                th_f = th_f - GF * rpinv(m)                        # FOFB быстрый интеграл
+                if np.isfinite(stroke):
+                    cl = np.clip(th_f, -stroke, stroke); sat += float(np.mean(cl != th_f)); th_f = cl
+                thf_sum += th_f
+                if offload and (k + 1) % MS == 0:
+                    mean_f = thf_sum / MS                         # DC-часть FOFB → в сильные корректоры (орбита-нейтрально)
+                    th_s = th_s + mean_f; th_f = th_f - mean_f
+                    thf_sum[:] = 0.0
+            return src, sat / T
+
+        def bands(src, tau=30.0):
+            e = src[0]; b = np.exp(-1.0 / tau); ema = np.empty_like(src)
+            for k, v in enumerate(src):
+                e = b * e + (1 - b) * v; ema[k] = e
+            sl = slice(len(src) // 4, None)
+            return np.std(src[sl]) * 1e6, np.std(ema[sl]) * 1e6, np.std((src - ema)[sl]) * 1e6
+
+        su, _ = run_two(stroke=np.inf)                            # ход неограничен — замер спроса
+        rms_f = 0.0
+        # оценим потребный ход по RMS уставок FOFB в неограниченном прогоне
+        rng = np.random.default_rng(1); th_f = np.zeros(ncorr); ds = np.zeros(nquad); df = np.zeros(nquad); acc = []
+        for k in range(T):
+            ds = RHO_S * ds + np.sqrt(1 - RHO_S ** 2) * SIG_S * rng.standard_normal(nquad)
+            df = RHO_F * df + np.sqrt(1 - RHO_F ** 2) * SIG_F * rng.standard_normal(nquad)
+            m = Hc @ th_f + Hq @ (K1L * (ds + df)) + NOISE * rng.standard_normal(nmon)
+            th_f = th_f - GF * rpinv(m)
+            if k > T // 2:
+                acc.append(np.max(np.abs(th_f)))
+        demand = float(np.median(acc)); stroke = 0.35 * demand
+        print(f"активных мод SVD: {na}/{len(S)}; спрос хода FOFB (медиана max|θ|) {demand:.2e} рад; "
+              f"лимит хода = {stroke:.2e} рад (35%)", flush=True)
+        print(f"\n{'режим':>26} | {'итог':>6} | {'дрейф':>6} | {'вибр':>6} | насыщ.FOFB")
+        for name, stk, off in [("FOFB, ход ∞", np.inf, False), ("FOFB, ход огранич.", stroke, False),
+                               ("SOFB+FOFB (offload)", stroke, True)]:
+            src, sat = run_two(stroke=stk, offload=off)
+            tot, slow, fast = bands(src)
+            print(f"{name:>26} | {tot:6.3f} | {slow:6.3f} | {fast:6.3f} | {sat*100:5.1f}%", flush=True)
+        print("\n[готово offload]", flush=True); sys.exit(0)
+
     if "pid" in sys.argv or "act" in sys.argv:
         print(f"активных мод SVD: {na}/{len(S)}", flush=True)
         if "act" in sys.argv:                                 # профили привода (дрейф ρ=0.99)
