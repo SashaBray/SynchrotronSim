@@ -1,0 +1,4 @@
+name;target;plane;form;amplitude;freq_hz;phase_deg;correlation
+thermal_drift;quad;both;walk;0.0000005;0.01;0;independent
+ground_vibration;quad;both;tone;0.0000003;12;0;girder
+fast_tone;quad;x;tone;0.0000001;40;0;independent
