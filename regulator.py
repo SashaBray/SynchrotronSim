@@ -64,52 +64,69 @@ if __name__ == "__main__":
     U, S, Vt = np.linalg.svd(Hc, full_matrices=False)
     print(f"сингулярные числа Hc: макс {S[0]:.2e}, мин {S[-1]:.2e}, число обусл {S[0]/S[-1]:.1e}", flush=True)
 
-    if "pid" in sys.argv:
-        # помодовый PID в пространстве мод SVD (каналы развязаны): eps=Uᵀm/S, θ=V·PID(eps)
-        rc = 1e-2; act = S >= rc * S[0]
-        Uc = U[:, act]; Sc = S[act]; Vc = Vt[act, :]; na = int(act.sum())
-        print(f"активных мод SVD (rcond={rc}): {na}/{len(S)}", flush=True)
+    # помодовый регулятор в пространстве мод SVD (каналы развязаны): eps=Uᵀm/S, θ=V·PID(eps)
+    amask = S >= 1e-2 * S[0]
+    Uc = U[:, amask]; Sc = S[amask]; Vc = Vt[amask, :]; na = int(amask.sum())
 
-        def run_pid(Kp, Ki, Kd, T=3000, rho=0.99, sigd=2e-8, sign=0.1e-6, seed=1):
-            rng = np.random.default_rng(seed)
-            theta = np.zeros(ncorr); drift = np.zeros(nquad); a = np.sqrt(1 - rho ** 2)
-            integ = np.zeros(na); eprev = np.zeros(na); src = np.empty(T)
-            for k in range(T):
-                drift = rho * drift + a * sigd * rng.standard_normal(nquad)
-                kq = K1L * drift
-                src[k] = hc @ theta + hq @ kq                 # источник по θ прошлого такта (задержка)
-                m = Hc @ theta + Hq @ kq + sign * rng.standard_normal(nmon)
-                eps = (Uc.T @ m) / Sc                         # ошибка в координатах мод (единицы корректора)
-                integ += eps
-                cmode = -(Kp * eps + Ki * integ + Kd * (eps - eprev))   # PID по каждой моде
-                eprev = eps
-                theta = Vc.T @ cmode
-                if not np.all(np.isfinite(theta)) or np.max(np.abs(theta)) > 1e-2:
-                    return float("inf")
-            return float(np.std(src[T // 4:]))
+    def run_pid(Kp, Ki, Kd, T=3000, rho=0.99, sigd=2e-8, sign=0.1e-6, seed=1,
+                slew=np.inf, tau=0.0, Ld=0):
+        """Помодовый PID на eps=Uᵀm/S, θ=V·PID. ПРИВОД (поле не мгновенно): команда → задержка Ld тактов
+        → slew-лимит (|Δθ|≤slew за такт) → лаг 1-го порядка (пост. времени tau тактов). Пучок видит
+        ФАКТИЧЕСКОЕ поле th_act. slew=inf, tau=0, Ld=0 — идеальный мгновенный привод."""
+        rng = np.random.default_rng(seed)
+        drift = np.zeros(nquad); a = np.sqrt(1 - rho ** 2)
+        integ = np.zeros(na); eprev = np.zeros(na); src = np.empty(T)
+        th_slew = np.zeros(ncorr); th_act = np.zeros(ncorr)
+        buf = [np.zeros(ncorr) for _ in range(Ld)]
+        alpha = np.exp(-1.0 / tau) if tau > 0 else 0.0
+        for k in range(T):
+            drift = rho * drift + a * sigd * rng.standard_normal(nquad)
+            kq = K1L * drift
+            src[k] = hc @ th_act + hq @ kq                    # пучок видит ФАКТИЧЕСКОЕ поле привода
+            m = Hc @ th_act + Hq @ kq + sign * rng.standard_normal(nmon)
+            eps = (Uc.T @ m) / Sc
+            integ += eps
+            u = Vc.T @ (-(Kp * eps + Ki * integ + Kd * (eps - eprev)))   # команда PID (корректорное простр.)
+            eprev = eps
+            if Ld:
+                buf.append(u); u = buf.pop(0)                 # задержка обработки
+            th_slew = th_slew + np.clip(u - th_slew, -slew, slew)        # slew-лимит
+            th_act = alpha * th_act + (1 - alpha) * th_slew   # лаг 1-го порядка (полоса БП/вихр.токи)
+            if not np.all(np.isfinite(th_act)) or np.max(np.abs(th_act)) > 1e-2:
+                return float("inf")
+        return float(np.std(src[T // 4:]))
 
-        KI = [0.2, 0.4, 0.6, 0.8, 1.0, 1.2]; KP = [0.0, 0.2, 0.4, 0.6, 0.8]; KD = [0.0, 0.1, 0.2, 0.4]
+    KI = [0.2, 0.4, 0.6, 0.8, 1.0, 1.2]; KP = [0.0, 0.2, 0.4, 0.6, 0.8]; KD = [0.0, 0.1, 0.2, 0.4]
 
-        def best(gen, **kw):
-            b = (float("inf"), None)
-            for g in gen:
-                v = run_pid(*g, **kw)
-                if v < b[0]:
-                    b = (v, g)
-            return b
+    def best(gen, **kw):
+        b = (float("inf"), None)
+        for g in gen:
+            v = run_pid(*g, **kw)
+            if v < b[0]:
+                b = (v, g)
+        return b
 
-        for rho, sign, tag in [(0.99, 0.1e-6, "дрейф ρ=0.99, шум BPM 0.1 мкм"),
-                               (0.90, 0.1e-6, "быстрее ρ=0.90, шум BPM 0.1 мкм"),
-                               (0.99, 0.5e-6, "дрейф ρ=0.99, ШУМ ×5 = 0.5 мкм")]:
-            ol = run_pid(0, 0, 0, rho=rho, sign=sign)
-            bI = best(((0, ki, 0) for ki in KI), rho=rho, sign=sign)
-            bPI = best(((kp, ki, 0) for kp in KP for ki in KI), rho=rho, sign=sign)
-            bPID = best(((kp, ki, kd) for kp in KP for ki in KI for kd in KD), rho=rho, sign=sign)
-            print(f"\n=== {tag} ===  (разомкнуто {ol*1e6:.3f} мкм)", flush=True)
+    if "pid" in sys.argv or "act" in sys.argv:
+        print(f"активных мод SVD: {na}/{len(S)}", flush=True)
+        if "act" in sys.argv:                                 # профили привода (дрейф ρ=0.99)
+            cases = [("идеальный привод (мгновенный)", dict()),
+                     ("лаг τ=1 такт + задержка 1", dict(tau=1.0, Ld=1)),
+                     ("лаг τ=2 + задержка 2 (медленный БП/вихр.токи)", dict(tau=2.0, Ld=2)),
+                     ("slew-лимит 2e-4/такт + лаг τ=1", dict(slew=2e-4, tau=1.0, Ld=1))]
+        else:                                                 # идеальный привод, разные помехи/шум
+            cases = [("дрейф ρ=0.99, шум BPM 0.1 мкм", dict()),
+                     ("быстрее ρ=0.90", dict(rho=0.90)),
+                     ("дрейф, ШУМ ×5 = 0.5 мкм", dict(sign=0.5e-6))]
+        for name, kw in cases:
+            ol = run_pid(0, 0, 0, **kw)
+            bI = best(((0, ki, 0) for ki in KI), **kw)
+            bPI = best(((kp, ki, 0) for kp in KP for ki in KI), **kw)
+            bPID = best(((kp, ki, kd) for kp in KP for ki in KI for kd in KD), **kw)
+            print(f"\n=== {name} ===  (разомкнуто {ol*1e6:.3f} мкм)", flush=True)
             print(f"  I   : {bI[0]*1e6:.3f} мкм   Ki={bI[1][1]}", flush=True)
             print(f"  PI  : {bPI[0]*1e6:.3f} мкм   Kp={bPI[1][0]}, Ki={bPI[1][1]}", flush=True)
             print(f"  PID : {bPID[0]*1e6:.3f} мкм   Kp={bPID[1][0]}, Ki={bPID[1][1]}, Kd={bPID[1][2]}", flush=True)
-        print("\n[готово pid]", flush=True); sys.exit(0)
+        print("\n[готово]", flush=True); sys.exit(0)
 
     Pinv2 = np.linalg.pinv(Hc, rcond=1e-2)               # наивный, консервативное отсечение мод
     Pinv3 = np.linalg.pinv(Hc, rcond=1e-3)               # наивный, жадное (слабые моды внутри → шум/расходимость)
