@@ -117,6 +117,42 @@ if __name__ == "__main__":
     def rpinv(m):
         return Vc.T @ ((Uc.T @ m) / Sc)                       # помодовая псевдообратная R⁺·m
 
+    if "golden" in sys.argv:
+        # ПУНКТ 1: фидбэк на ИСТОЧНИК — добавляем рентгеновский BPM источника в цель регулятора,
+        # чтобы пробить пол утечки RF-BPM→источник. Сравнение «только RF-BPM» vs «источник-таргет»,
+        # развёртка по шуму X-ray BPM. Помеха — типовая (дрейф+вибрация), быстрый контур.
+        FREV = 2.99792458e8 / 1110.0; TACT_F = 135 / FREV
+        SIG_S, RHO_S = 0.5e-6, 0.99999
+        FVIB = 50.0; SIG_F = 30e-9; RHO_F = float(np.cos(2 * np.pi * FVIB * TACT_F))
+        NOISE, GF, T, WSRC = 0.1e-6, 0.5, 40000, 200.0
+        Raug = np.vstack([Hc, WSRC * hc[None, :]])                  # RF-BPM + взвешенный источник
+        Pbpm = np.linalg.pinv(Hc, rcond=1e-2)
+        Paug = np.linalg.pinv(Raug, rcond=1e-2)
+
+        def run_g(targeted, sig_x, seed=1):
+            rng = np.random.default_rng(seed); ds = np.zeros(nquad); dv = np.zeros(nquad)
+            th = np.zeros(ncorr); src = np.empty(T)
+            for k in range(T):
+                ds = RHO_S * ds + np.sqrt(1 - RHO_S ** 2) * SIG_S * rng.standard_normal(nquad)
+                dv = RHO_F * dv + np.sqrt(1 - RHO_F ** 2) * SIG_F * rng.standard_normal(nquad)
+                kq = K1L * (ds + dv); st = hc @ th + hq @ kq; src[k] = st
+                m_bpm = Hc @ th + Hq @ kq + NOISE * rng.standard_normal(nmon)
+                if targeted:
+                    m_aug = np.concatenate([m_bpm, [WSRC * (st + sig_x * rng.standard_normal())]])
+                    th = th - GF * (Paug @ m_aug)
+                else:
+                    th = th - GF * (Pbpm @ m_bpm)
+            return float(np.std(src[T // 4:])) * 1e6
+
+        print(f"активных мод {na}/{len(S)}; пол утечки (только RF-BPM) = опорный", flush=True)
+        floor = run_g(False, 0.0)
+        print(f"\n  только RF-BPM (пол утечки): {floor:.3f} мкм", flush=True)
+        print(f"\n  источник-таргет, развёртка по шуму X-ray BPM:")
+        print(f"  {'шум X-ray BPM, мкм':>18} | {'источник σ, мкм':>15}")
+        for sx in [0.0, 0.02e-6, 0.05e-6, 0.1e-6, 0.2e-6]:
+            print(f"  {sx*1e6:18.2f} | {run_g(True, sx):15.3f}", flush=True)
+        print("\n[готово golden]", flush=True); sys.exit(0)
+
     if "realistic" in sys.argv:
         # РЕАЛИЗМ: типовые значения 4-го поколения (6 ГэВ, класс СИЛА-26) — ПРЕДПОЛОЖЕНИЯ.
         # Дрейф (тепло) + вибрация (грунт/гирдеры ~50 Гц) + шум BPM; FOFB с лагом привода и ходом, SOFB offload.
