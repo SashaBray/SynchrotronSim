@@ -201,6 +201,76 @@ if __name__ == "__main__":
             print(f"{name:>26} | {tot:6.3f} | {slow:6.3f} | {fast:6.3f} | {sat*100:5.1f}%", flush=True)
         print("\n[готово offload]", flush=True); sys.exit(0)
 
+    if "lqg" in sys.argv:
+        # МЕХАНИКА #3 (капстоун): помодовый LQG (steady-state Калман + LQR) против I/PI. Модель на моду
+        # (орбитные ед.): помеха d — AR(1,ρ); привод a_{k+1}=α·a+(1−α)·u_{k−L}; y=d+a; z=d+a+ν.
+        from scipy.linalg import solve_discrete_are as dare
+        RHO, SIG, NOISE, T = 0.99, 2e-8, 0.1e-6, 10000
+        hcm = hc @ Vc.T
+        HqU = Hq.T @ Uc
+        s2d_unit = ((K1L[:, None] * HqU) ** 2).sum(axis=0)        # дисперсия δ_i на единичную SIG
+
+        def lqg_gains(alpha, L, Rctrl):
+            n = 2 + L
+            A = np.zeros((n, n)); A[0, 0] = RHO; A[1, 1] = alpha
+            B = np.zeros((n, 1)); G = np.zeros((n, 1)); G[0, 0] = 1.0
+            if L >= 1:
+                A[1, n - 1] = 1 - alpha
+                for j in range(1, L):
+                    A[2 + j, 2 + j - 1] = 1.0
+                B[2, 0] = 1.0
+            else:
+                B[1, 0] = 1 - alpha
+            C = np.zeros((1, n)); C[0, 0] = 1.0; C[0, 1] = 1.0
+            Sx = dare(A, B, C.T @ C, np.array([[Rctrl]]))
+            Klqr = np.linalg.solve(np.array([[Rctrl]]) + B.T @ Sx @ B, B.T @ Sx @ A).ravel()
+            Lf = np.zeros((na, n))
+            for i in range(na):
+                W = (1 - RHO ** 2) * (s2d_unit[i] * SIG ** 2)
+                M = dare(A.T, C.T, G @ np.array([[W]]) @ G.T, np.array([[NOISE ** 2]]))
+                Lf[i] = (M @ C.T / (C @ M @ C.T + NOISE ** 2)).ravel()           # фильтрационная форма
+            return A, B.ravel(), Klqr, Lf
+
+        def sim(mode, alpha=0.0, L=0, gi=1.0, kp=0.0, Rctrl=1e-6, seed=1):
+            rng = np.random.default_rng(seed)
+            drift = np.zeros(nquad); a = np.zeros(na); qbuf = [np.zeros(na) for _ in range(L)]
+            integ = np.zeros(na); src = np.empty(T)
+            if mode == "LQG":
+                A, Bf, Kl, Lf = lqg_gains(alpha, L, Rctrl); xhat = np.zeros((na, 2 + L))
+            for k in range(T):
+                drift = RHO * drift + np.sqrt(1 - RHO ** 2) * SIG * rng.standard_normal(nquad)
+                delta = Uc.T @ (Hq @ (K1L * drift))
+                src[k] = hcm @ (a / Sc) + hq @ (K1L * drift)
+                z = a + delta + NOISE * (Uc.T @ rng.standard_normal(nmon))
+                if mode == "LQG":
+                    innov = z - (xhat[:, 0] + xhat[:, 1]); xf = xhat + Lf * innov[:, None]
+                    u = -(xf @ Kl); xhat = xf @ A.T + np.outer(u, Bf)
+                else:
+                    integ += z; u = -(gi * integ + kp * z)
+                ud = u
+                if L:
+                    qbuf.append(u.copy()); ud = qbuf.pop(0)
+                a = alpha * a + (1 - alpha) * ud
+                if not np.all(np.isfinite(a)) or np.max(np.abs(a)) > 1.0:
+                    return float("inf")
+            return float(np.std(src[T // 4:])) * 1e6
+
+        def bestc(mode, **kw):
+            if mode == "I":
+                return min(sim("I", gi=g, **kw) for g in [0.2, 0.4, 0.6, 0.8, 1.0, 1.2])
+            if mode == "PI":
+                return min(sim("PI", gi=g, kp=p, **kw)
+                           for g in [0.2, 0.4, 0.6, 0.8, 1.0, 1.2] for p in [0.0, 0.2, 0.4, 0.6, 0.8])
+            return min(sim("LQG", Rctrl=rc, **kw) for rc in [1e-6, 1e-5, 1e-4, 1e-3, 1e-2])
+
+        print(f"активных мод SVD: {na}/{len(S)}; помеха AR(1) ρ={RHO}", flush=True)
+        print(f"\n{'профиль привода':>30} | {'разомкн':>7} | {'I':>6} | {'PI':>6} | {'LQG':>6}  (мкм)")
+        for name, alpha, L in [("идеальный", 0.0, 0), ("лаг τ=2 (α=0.607)+задержка 2", float(np.exp(-0.5)), 2)]:
+            ol = sim("I", gi=0.0, alpha=alpha, L=L)
+            print(f"{name:>30} | {ol:7.3f} | {bestc('I',alpha=alpha,L=L):6.3f} | "
+                  f"{bestc('PI',alpha=alpha,L=L):6.3f} | {bestc('LQG',alpha=alpha,L=L):6.3f}", flush=True)
+        print("\n[готово lqg]", flush=True); sys.exit(0)
+
     if "pid" in sys.argv or "act" in sys.argv:
         print(f"активных мод SVD: {na}/{len(S)}", flush=True)
         if "act" in sys.argv:                                 # профили привода (дрейф ρ=0.99)
