@@ -117,6 +117,71 @@ if __name__ == "__main__":
     def rpinv(m):
         return Vc.T @ ((Uc.T @ m) / Sc)                       # помодовая псевдообратная R⁺·m
 
+    if "realistic" in sys.argv:
+        # РЕАЛИЗМ: типовые значения 4-го поколения (6 ГэВ, класс СИЛА-26) — ПРЕДПОЛОЖЕНИЯ.
+        # Дрейф (тепло) + вибрация (грунт/гирдеры ~50 Гц) + шум BPM; FOFB с лагом привода и ходом, SOFB offload.
+        FREV = 2.99792458e8 / 1110.0; TACT_F = 135 / FREV           # FOFB такт ≈ 0.5 мс (2 кГц)
+        SIG_S, RHO_S = 0.5e-6, 0.99999                              # дрейф квадруполей ~0.5 мкм, минуты
+        FVIB = 50.0; SIG_F = 30e-9; RHO_F = float(np.cos(2 * np.pi * FVIB * TACT_F))  # вибрация ~30 нм, 50 Гц
+        NOISE = 0.1e-6; MSOFB = 200; GF = 0.5; ALPHA = 0.1; LD = 1  # BPM шум; SOFB 10 Гц; лаг БП+вихр.токи
+        TGT_Y = 0.1e-6; T = 40000                                   # цель верт. ~10% σ_y(1мкм)
+        print(f"активных мод {na}/{len(S)}; вибрация 50 Гц → ρ_f={RHO_F:.4f}; цель {TGT_Y*1e6:.2f} мкм", flush=True)
+
+        GS = 0.5                                                    # усиление SOFB (медленный интеграл)
+
+        def run_full(sofb, fofb, stroke=np.inf, seed=1):
+            rng = np.random.default_rng(seed)
+            ds = np.zeros(nquad); dv = np.zeros(nquad)
+            th_s = np.zeros(ncorr); thf = np.zeros(ncorr); thf_act = np.zeros(ncorr)
+            qbuf = [np.zeros(ncorr) for _ in range(LD)]; acc = np.zeros(nmon); nacc = 0; sat = 0.0
+            src = np.empty(T)
+            for k in range(T):
+                ds = RHO_S * ds + np.sqrt(1 - RHO_S ** 2) * SIG_S * rng.standard_normal(nquad)
+                dv = RHO_F * dv + np.sqrt(1 - RHO_F ** 2) * SIG_F * rng.standard_normal(nquad)
+                kq = K1L * (ds + dv); th = thf_act + th_s
+                src[k] = hc @ th + hq @ kq
+                m = Hc @ th + Hq @ kq + NOISE * rng.standard_normal(nmon)
+                if fofb:                                            # быстрый интеграл + лаг привода + ход
+                    thf = thf - GF * rpinv(m); ud = thf
+                    if LD:
+                        qbuf.append(thf.copy()); ud = qbuf.pop(0)
+                    thf_act = ALPHA * thf_act + (1 - ALPHA) * ud
+                    if np.isfinite(stroke):
+                        cl = np.clip(thf_act, -stroke, stroke); sat += float(np.mean(cl != thf_act)); thf_act = cl
+                if sofb:                                            # медленный интеграл по усреднённой орбите
+                    acc += m; nacc += 1
+                    if (k + 1) % MSOFB == 0:
+                        th_s = th_s - GS * rpinv(acc / nacc); acc[:] = 0; nacc = 0
+            return src, sat / max(T, 1)
+
+        def rms(s, tau=30.0):
+            e = s[0]; b = np.exp(-1.0 / tau); ema = np.empty_like(s)
+            for k, v in enumerate(s):
+                e = b * e + (1 - b) * v; ema[k] = e
+            sl = slice(T // 4, None)
+            return np.std(s[sl]) * 1e6, np.std(ema[sl]) * 1e6, np.std((s - ema)[sl]) * 1e6
+
+        # ход быстрого корректора: 35% от спроса (замер по FOFB-only ход∞)
+        _, _ = run_full(False, True)
+        demand = []
+        rng = np.random.default_rng(1); thf = np.zeros(ncorr); ds = np.zeros(nquad); dv = np.zeros(nquad)
+        for k in range(T):
+            ds = RHO_S * ds + np.sqrt(1 - RHO_S ** 2) * SIG_S * rng.standard_normal(nquad)
+            dv = RHO_F * dv + np.sqrt(1 - RHO_F ** 2) * SIG_F * rng.standard_normal(nquad)
+            thf = thf - GF * rpinv(Hc @ thf + Hq @ (K1L * (ds + dv)) + NOISE * rng.standard_normal(nmon))
+            if k > T // 2:
+                demand.append(np.max(np.abs(thf)))
+        stroke = 0.35 * float(np.median(demand))
+        print(f"ход быстрого корректора: лимит {stroke:.2e} рад (35% спроса)", flush=True)
+        print(f"\n{'режим':>22} | {'источник σ':>10} | {'дрейф':>6} | {'вибр':>6} | насыщ | цель 0.1")
+        for name, so, fo in [("выкл", False, False), ("только SOFB", True, False),
+                             ("только FOFB", False, True), ("SOFB+FOFB", True, True)]:
+            s, sat = run_full(so, fo, stroke=stroke if fo else np.inf)
+            tot, dr, vb = rms(s)
+            ok = "✓" if tot < TGT_Y * 1e6 else "✗"
+            print(f"{name:>22} | {tot:10.3f} | {dr:6.3f} | {vb:6.3f} | {sat*100:4.1f}% | {ok}", flush=True)
+        print("\n[готово realistic]", flush=True); sys.exit(0)
+
     if "twoloop" in sys.argv:
         # МЕХАНИКА #1: двухтемповые контуры на спектре дрейф+вибрация. Контур на темпе M тактов,
         # интегральный по средней за такт орбите. M=1 — FOFB (быстрый), M=100 — SOFB (медленный).
