@@ -32,13 +32,21 @@ def build_response():
     gaps = np.append((s_out - Lel)[1:] - s_out[:-1], 0.0)
     SIDX = np.where(gaps > 5.0)[0]; DVEC = gaps[SIDX] / 2.0
 
+    def src_of(o):
+        return float(np.mean(o[SIDX, 0] + o[SIDX, 1] * DVEC))
+
+    r.apply_perturb()                                               # базовая (невозмущённая) орбита
+    o0 = r.track_elements([ra.closed_orbit(r, dims=4)])[0]
+    base_mon = o0[mon, 0].copy(); base_src = src_of(o0)
+    print(f"базовая орбита в мониторах: норма {np.linalg.norm(base_mon):.2e} м — вычитаем", flush=True)
+
     def resp_of(indices):
         H = np.zeros((len(mon), len(indices))); hs = np.zeros(len(indices))
         for j, idx in enumerate(indices):
             r.apply_perturb(kicks=[(int(idx), EPS)])
             o = r.track_elements([ra.closed_orbit(r, dims=4)])[0]
-            H[:, j] = o[mon, 0] / EPS
-            hs[j] = float(np.mean(o[SIDX, 0] + o[SIDX, 1] * DVEC)) / EPS
+            H[:, j] = (o[mon, 0] - base_mon) / EPS                  # ВЫЧЕТ базовой орбиты (иначе o(0)/ε забивает отклик)
+            hs[j] = (src_of(o) - base_src) / EPS
             if j % 50 == 0:
                 print(f"   отклик {j}/{len(indices)}", flush=True)
         return H, hs
