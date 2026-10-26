@@ -32,31 +32,38 @@ def build_response():
     gaps = np.append((s_out - Lel)[1:] - s_out[:-1], 0.0)
     SIDX = np.where(gaps > 5.0)[0]; DVEC = gaps[SIDX] / 2.0
 
-    def src_of(o):
-        return float(np.mean(o[SIDX, 0] + o[SIDX, 1] * DVEC))
+    def sx_of(o):
+        return float(np.mean(o[SIDX, 0] + o[SIDX, 1] * DVEC))       # источник X (с дисперсионным углом)
+
+    def sy_of(o):
+        return float(np.mean(o[SIDX, 2]))                          # источник Y (верт. дисперсия ~0)
 
     r.apply_perturb()                                               # базовая (невозмущённая) орбита
     o0 = r.track_elements([ra.closed_orbit(r, dims=4)])[0]
-    base_mon = o0[mon, 0].copy(); base_src = src_of(o0)
-    print(f"базовая орбита в мониторах: норма {np.linalg.norm(base_mon):.2e} м — вычитаем", flush=True)
+    bmx = o0[mon, 0].copy(); bmy = o0[mon, 2].copy(); bsx = sx_of(o0); bsy = sy_of(o0)
+    print(f"базовая орбита: |x| {np.linalg.norm(bmx):.2e}, |y| {np.linalg.norm(bmy):.2e} м — вычитаем", flush=True)
 
-    def resp_of(indices):
-        H = np.zeros((len(mon), len(indices))); hs = np.zeros(len(indices))
+    def resp_of(indices):                                           # kick→X, vkick→Y с того же элемента
+        Hx = np.zeros((len(mon), len(indices))); hx = np.zeros(len(indices))
+        Hy = np.zeros((len(mon), len(indices))); hy = np.zeros(len(indices))
         for j, idx in enumerate(indices):
             r.apply_perturb(kicks=[(int(idx), EPS)])
             o = r.track_elements([ra.closed_orbit(r, dims=4)])[0]
-            H[:, j] = (o[mon, 0] - base_mon) / EPS                  # ВЫЧЕТ базовой орбиты (иначе o(0)/ε забивает отклик)
-            hs[j] = (src_of(o) - base_src) / EPS
+            Hx[:, j] = (o[mon, 0] - bmx) / EPS; hx[j] = (sx_of(o) - bsx) / EPS
+            r.apply_perturb(vkicks=[(int(idx), EPS)])
+            o = r.track_elements([ra.closed_orbit(r, dims=4)])[0]
+            Hy[:, j] = (o[mon, 2] - bmy) / EPS; hy[j] = (sy_of(o) - bsy) / EPS
             if j % 50 == 0:
                 print(f"   отклик {j}/{len(indices)}", flush=True)
-        return H, hs
+        return Hx, hx, Hy, hy
 
-    print("строю отклик корректоров ...", flush=True); Hc, hc = resp_of(corr)
-    print("строю отклик квадруполей (feed-down) ...", flush=True); Hq, hq = resp_of(list(quads))
+    print("строю отклик корректоров (X+Y) ...", flush=True); Hc, hc, Hcy, hcy = resp_of(corr)
+    print("строю отклик квадруполей feed-down (X+Y) ...", flush=True); Hq, hq, Hqy, hqy = resp_of(list(quads))
     r.apply_perturb(); r.close()
-    np.savez(CACHE, Hc=Hc, hc=hc, Hq=Hq, hq=hq, K1L=K1L)
-    print(f"сохранено: {CACHE}", flush=True)
-    return dict(Hc=Hc, hc=hc, Hq=Hq, hq=hq, K1L=K1L)
+    out = dict(Hc=Hc, hc=hc, Hq=Hq, hq=hq, Hcy=Hcy, hcy=hcy, Hqy=Hqy, hqy=hqy, K1L=K1L)
+    np.savez(CACHE, **out)
+    print(f"сохранено: {CACHE} (обе плоскости)", flush=True)
+    return out
 
 
 if __name__ == "__main__":
@@ -68,6 +75,72 @@ if __name__ == "__main__":
     nmon, ncorr = Hc.shape; nquad = Hq.shape[1]
     print(f"отклик: {nmon} мониторов, {ncorr} корректоров, {nquad} квадруполей; "
           f"усиление орбиты в BPM на кик квадруполя ~×{np.linalg.norm(Hq)/np.linalg.norm(Hc)*np.median(np.abs(K1L)):.0f}", flush=True)
+    if "report" in sys.argv:
+        # #3: ОС в ДВУХ плоскостях + отчёт с переходными процессами (петля ВЫКЛ→ВКЛ→ступень).
+        if "Hcy" not in R:
+            print("в кэше нет вертикали — пересобираю обе плоскости ...", flush=True); R = build_response()
+        Hcy, Hqy, hcy, hqy = R["Hcy"], R["Hqy"], R["hcy"], R["hqy"]
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+        Px = np.linalg.pinv(Hc, rcond=1e-2); Py = np.linalg.pinv(Hcy, rcond=1e-2)
+        FREV = 2.99792458e8 / 1110.0; DT = 135 / FREV              # такт ≈ 0.5 мс (2 кГц)
+        RS, SS = 0.99999, 0.5e-6; FV = 50.0; SF = 30e-9; RF = float(np.cos(2 * np.pi * FV * DT))
+        NOISE, GF, ALPHA, LD = 0.1e-6, 0.5, 0.1, 1
+        T1, T2, T = 1000, 3000, 5000                               # ВЫКЛ / ВКЛ / +ступень
+        rng = np.random.default_rng(7)
+        STX = rng.normal(0, 0.3e-6, nquad); STY = rng.normal(0, 0.3e-6, nquad)  # ступень позиций квадруполей
+
+        def sim():
+            rng = np.random.default_rng(1)
+            dsx = np.zeros(nquad); dvx = np.zeros(nquad); dsy = np.zeros(nquad); dvy = np.zeros(nquad)
+            thx = np.zeros(ncorr); thy = np.zeros(ncorr); tax = np.zeros(ncorr); tay = np.zeros(ncorr)
+            bx = [np.zeros(ncorr) for _ in range(LD)]; by = [np.zeros(ncorr) for _ in range(LD)]
+            sx = np.empty(T); sy = np.empty(T)
+            for k in range(T):
+                dsx = RS * dsx + np.sqrt(1 - RS ** 2) * SS * rng.standard_normal(nquad)
+                dvx = RF * dvx + np.sqrt(1 - RF ** 2) * SF * rng.standard_normal(nquad)
+                dsy = RS * dsy + np.sqrt(1 - RS ** 2) * SS * rng.standard_normal(nquad)
+                dvy = RF * dvy + np.sqrt(1 - RF ** 2) * SF * rng.standard_normal(nquad)
+                qx = K1L * (dsx + dvx); qy = -K1L * (dsy + dvy)
+                if k >= T2:
+                    qx = qx + K1L * STX; qy = qy - K1L * STY        # ступень
+                sx[k] = hc @ tax + hq @ qx; sy[k] = hcy @ tay + hqy @ qy
+                mx = Hc @ tax + Hq @ qx + NOISE * rng.standard_normal(nmon)
+                my = Hcy @ tay + Hqy @ qy + NOISE * rng.standard_normal(nmon)
+                if k >= T1:
+                    thx = thx - GF * (Px @ mx); thy = thy - GF * (Py @ my)
+                udx = thx; udy = thy
+                if LD:
+                    bx.append(thx.copy()); udx = bx.pop(0); by.append(thy.copy()); udy = by.pop(0)
+                tax = ALPHA * tax + (1 - ALPHA) * udx; tay = ALPHA * tay + (1 - ALPHA) * udy
+            return sx * 1e6, sy * 1e6
+
+        sx, sy = sim(); tms = np.arange(T) * DT * 1e3
+        rms = lambda a, i, j: float(np.std(a[i:j]))
+        offx, onx = rms(sx, 0, T1), rms(sx, T2 - 500, T2); offy, ony = rms(sy, 0, T1), rms(sy, T2 - 500, T2)
+        print(f"X: ВЫКЛ {offx:.3f} → ВКЛ {onx:.3f} мкм (×{offx/max(onx,1e-9):.1f});  "
+              f"Y: ВЫКЛ {offy:.3f} → ВКЛ {ony:.3f} мкм (×{offy/max(ony,1e-9):.1f})", flush=True)
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+            subplot_titles=(f"Источник X:  ВЫКЛ {offx:.3f} → ВКЛ {onx:.3f} мкм",
+                            f"Источник Y:  ВЫКЛ {offy:.3f} → ВКЛ {ony:.3f} мкм"))
+        for row, s, col in ((1, sx, "#2a78d6"), (2, sy, "#eb6834")):
+            fig.add_trace(go.Scatter(x=tms, y=s, line=dict(color=col, width=1), name=("X" if row == 1 else "Y")), row=row, col=1)
+            for xt, lab in ((tms[T1], "петля ВКЛ"), (tms[T2], "ступень")):
+                fig.add_vline(x=xt, line=dict(color="#888", dash="dash", width=1), row=row, col=1)
+                fig.add_annotation(x=xt, y=0, text=lab, showarrow=False, yshift=8, row=row, col=1, font=dict(size=11, color="#888"))
+        fig.update_layout(title="Переходные процессы ОС орбиты (2 плоскости): ВЫКЛ → ВКЛ → ступень возмущения",
+            height=640, showlegend=False, template="plotly_white", margin=dict(t=90))
+        fig.update_xaxes(title_text="модельное время, мс", row=2, col=1)
+        fig.update_yaxes(title_text="положение источника, мкм")
+        out = os.path.join("workspace", "results", "fb_transient_report.html")
+        fig.write_html(out, include_plotlyjs=True)
+        import csv as _csv
+        with open(os.path.join("workspace", "results", "fb_transient.csv"), "w", newline="", encoding="utf-8") as fh:
+            w = _csv.writer(fh, delimiter=";"); w.writerow(["t_ms", "src_x_um", "src_y_um"])
+            for i in range(T):
+                w.writerow([f"{tms[i]:.4f}", f"{sx[i]:.4f}", f"{sy[i]:.4f}"])
+        print(f"отчёт: {out}\n[готово report]", flush=True); sys.exit(0)
+
     # SVD отклика корректор→монитор (пространственные моды)
     U, S, Vt = np.linalg.svd(Hc, full_matrices=False)
     print(f"сингулярные числа Hc: макс {S[0]:.2e}, мин {S[-1]:.2e}, число обусл {S[0]/S[-1]:.1e}", flush=True)
