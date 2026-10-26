@@ -134,5 +134,6 @@
 | `regulator.py offload` | DC-offload (разгрузка хода быстрых корректоров) |
 | `regulator.py realistic` | типовые числа: SOFB+FOFB vs цель |
 | `regulator.py golden` | фидбэк на источник (X-ray BPM), пробитие пола утечки |
+| `regulator.py report` | ОС в ДВУХ плоскостях, переходные процессы ВЫКЛ→ВКЛ→ступень → HTML (plotly) |
 
 Прочее: `fofb_sim.py` (turn-by-turn FOFB, S(f)), `sofb_realistic.py` (SOFB на реалистичной помехе), `disturbance.py` (модель возмущений), `tuner.py` (статическая настройка).
