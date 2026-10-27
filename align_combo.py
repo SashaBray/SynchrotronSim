@@ -37,9 +37,16 @@ DA_MIN = 0.3e-3                              # пригодная машина: 
 # свип: поперечный (главный, несёт стену бутстрапа) гуще и дальше старой стены ~25-80 мкм; поле/рыскание/крен
 # по нескольку уровней — показать, что слепая юстировка их НЕ трогает (DOF-специфичность)
 SMOKE = len(sys.argv) > 1 and sys.argv[1] == "smoke"
-LEVELS = {
-    "trans": [20e-6, 40e-6, 60e-6, 80e-6],
-}
+if "other" in sys.argv:                                      # #2: не-поперечные DOF (ждём combo≈baseline)
+    LEVELS = {
+        "field": [0.15, 0.5, 1.0],                           # % (ошибка поля)
+        "yaw":   [3e-4, 7.5e-4, 1.5e-3],                     # рад (рыскание)
+        "roll":  [5e-4, 1.5e-3, 3e-3],                       # рад (крен)
+    }
+else:
+    LEVELS = {
+        "trans": [20e-6, 40e-6, 60e-6, 80e-6],
+    }
 COL = {"trans": ("dx", "dy"), "field": ("field_pct",), "yaw": ("dyaw",), "roll": ("droll",)}
 KINDS = ("dipole", "dq", "quad", "sext", "oct")   # допуск вешаем на все магниты (как в tol_sweep3)
 
@@ -49,6 +56,7 @@ resp = oc.cached_response_matrix(ideal, LAT)
 corr = resp["corr"]; bpm_all = np.asarray(resp["bpm"])
 Px = np.linalg.pinv(resp["Rx"], rcond=1e-2); Py = np.linalg.pinv(resp["Ry"], rcond=1e-2)
 IDEAL_DIAG = "ideal" in sys.argv                                  # ideal → орбита известна на КАЖДОМ элементе
+HOMO = "homo" in sys.argv                                         # homo → гомотопия-рамп на стене (60-100 мкм)
 bpm_mon = oi.monitor_rows(ideal)                                  # реальные датчики (kind=monitor)
 abpm = bpm_all if IDEAL_DIAG else bpm_mon                         # где юстировка «видит» орбиту
 aelems_idx = oi.quad_indices(ideal, kinds=("quad", "dq"))         # сильные градиенты: их двигаем
@@ -172,6 +180,90 @@ def run_machine(etype, v, seed, align):
         r.close(); shutil.rmtree(ws, ignore_errors=True)
 
 
+FR = [0.3, 0.5, 0.7, 0.85, 1.0]                              # доли ошибки для гомотопии (мягкий рамп)
+_CORR_SET = set(corr)
+
+
+def thread_base(r, KK, VV, passes=15, rcond=5e-2, relax=0.85):
+    """Протяжка корректорами, СОХРАНЯЯ кики юстировки (индексы quad/dq) как фикс. базу (корректоры — индексы
+    kicker, непересекающиеся). Копия oc._thread с базой. Возврат co (и корректорные углы записаны в KK/VV) или None."""
+    base_k = [(j, x) for j, x in KK.items() if j not in _CORR_SET]
+    base_v = [(j, x) for j, x in VV.items() if j not in _CORR_SET]
+    Tx, Ty, bpm = resp["Tx"], resp["Ty"], resp["bpm"]
+    thx = np.zeros(len(corr)); thy = np.zeros(len(corr))
+    for _ in range(passes):
+        r.apply_perturb(kicks=base_k + list(zip(corr, thx.tolist())), vkicks=base_v + list(zip(corr, thy.tolist())))
+        tr = r.track_elements([np.zeros(6)])[0]
+        x, y = tr[bpm, 0], tr[bpm, 2]
+        within = np.isfinite(x) & np.isfinite(y) & (np.abs(x) <= APER) & (np.abs(y) <= APER)
+        reach = int(np.argmin(within)) if not within.all() else len(bpm)
+        if reach == 0:
+            return None
+        rr = np.arange(reach)
+        co = oc._closed_orbit_seeded(r, np.array([np.mean(x[rr]), 0.0, np.mean(y[rr]), 0.0]))
+        if co is not None:
+            for i, c in enumerate(corr):
+                KK[c] = float(thx[i]); VV[c] = float(thy[i])
+            return co
+        thx = thx - relax * (np.linalg.pinv(Tx[rr], rcond=rcond) @ x[rr])
+        thy = thy - relax * (np.linalg.pinv(Ty[rr], rcond=rcond) @ y[rr])
+    return None
+
+
+def bring_up_homotopy(etype, v, seed, align, rng):
+    """ГОМОТОПИЯ-с-юстировкой: включаем ошибку долями f (та же машина ×f), на каждой доле — тёплый старт
+    корректоров+юстировки, коррекция (протяжка при нужде, с сохранением киков юстировки), [юстировка];
+    к f=1.0 магниты уже частично поставлены и орбита жива там, где холодная протяжка падала. Возврат
+    (r, co, KK, VV) на полной машине (co=None если не поднялась). r НЕ закрыт — закрыть у вызывающего."""
+    KK, VV, DKS = {}, {}, []
+    r = None; seed_co = np.zeros(4)
+    for fi, f in enumerate(FR):
+        ws = os.path.join(SCR, f"homo_{etype}_{int(round(v*1e9))}_{seed}_{fi}")
+        errmod.perturbed_workspace(LAT, 8000 + seed, tol_for(etype, v * f), ws, CUTOFF)
+        if r is not None:
+            r.close()
+        r = fr._ring(inf, ws=ws, nsl=NSL)
+        apply_all(r, KK, VV, DKS)
+        co = oc._closed_orbit_seeded(r, seed_co)
+        if co is None:                                       # тёплый старт не дал орбиты → протяжка (с базой юстировки)
+            co = thread_base(r, KK, VV)
+            if co is None:
+                shutil.rmtree(ws, ignore_errors=True); return r, None, KK, VV
+        co, seed_co = correct_orbit(r, KK, VV, DKS, co[:4])
+        if co is None:
+            shutil.rmtree(ws, ignore_errors=True); return r, None, KK, VV
+        if align:
+            for _ in range(NALIGN):
+                meas = oi.measure_orbit(r, abpm, BPM_NOISE, None, rng)
+                if meas is None:
+                    break
+                ex, ey = oi.infer_shifts(abasis, meas[0], meas[1])
+                dx = np.clip(SGN_X * RELAX * k1l * ex, -MOVE_CLIP, MOVE_CLIP)
+                dy = np.clip(SGN_Y * RELAX * k1l * ey, -MOVE_CLIP, MOVE_CLIP)
+                KKs, VVs = dict(KK), dict(VV)
+                for i, j in enumerate(aelems):
+                    KK[j] = KK.get(j, 0.0) + float(dx[i]); VV[j] = VV.get(j, 0.0) + float(dy[i])
+                co2, seed2 = correct_orbit(r, KK, VV, DKS, seed_co)
+                if co2 is None:
+                    KK, VV = KKs, VVs; apply_all(r, KK, VV, DKS)
+                    co = oc._closed_orbit_seeded(r, seed_co); break
+                co, seed_co = co2, seed2
+        shutil.rmtree(ws, ignore_errors=True)
+    return r, co, KK, VV
+
+
+def run_machine_homo(etype, v, seed, align):
+    rng = np.random.default_rng(100 + seed)
+    r, co, KK, VV = bring_up_homotopy(etype, v, seed, align, rng)
+    try:
+        if r is None or co is None:
+            return None
+        return dict(da=da_x(r, co), orb=orbit_rms(r, co))
+    finally:
+        if r is not None:
+            r.close()
+
+
 if SMOKE:
     print("\n[smoke] проверка знака юстировки (остаток орбиты должен ПАДАТЬ) + одна машина baseline vs combo", flush=True)
     ws = os.path.join(SCR, "smoke")
@@ -189,6 +281,36 @@ if SMOKE:
     sys.exit(0)
 
 os.makedirs(SCR, exist_ok=True)
+
+if HOMO and "quick" in sys.argv:                                 # быстрая проверка пути: 1 машина, 60 мкм
+    print("\n[homo quick] trans 60 мкм, seed0", flush=True)
+    import time as _t
+    for al in (False, True):
+        t0 = _t.time(); r = run_machine_homo("trans", 60e-6, 0, al)
+        tag = "ГОМО+ЮСТ" if al else "ГОМО-только"
+        if r is None:
+            print(f"  {tag}: НЕ поднято ({_t.time()-t0:.0f} c)", flush=True)
+        else:
+            print(f"  {tag}: ДА {r['da']*1e3:.2f} мм, орбита {r['orb']:.0f} мкм ({_t.time()-t0:.0f} c)", flush=True)
+    ideal.close(); sys.exit(0)
+
+if HOMO:                                                         # СТЕНА: гомотопия-только vs гомотопия+юстировка
+    HLEV = [60e-6, 70e-6, 80e-6]; NH = 5
+    print(f"\n[ГОМОТОПИЯ-РАМП {FR}] диагностика {'ИДЕАЛ' if IDEAL_DIAG else f'{len(bpm_mon)} датчиков'}", flush=True)
+    print(f"\n{'σ, мкм':>6} | {'ГОМО-только подн·ДА':>20} | {'ГОМО+ЮСТ подн·ДА':>20} | {'орбита Г→ГЮ мкм':>16}", flush=True)
+    for v in HLEV:
+        ho = [run_machine_homo("trans", v, s, False) for s in range(NH)]
+        hj = [run_machine_homo("trans", v, s, True) for s in range(NH)]
+        def aggh(rr):
+            up = [x for x in rr if x is not None and x["da"] > DA_MIN]
+            return len(up), (np.median([x["da"] for x in up]) * 1e3 if up else 0.0), \
+                   (np.median([x["orb"] for x in up]) if up else float("nan"))
+        uo, do, oo = aggh(ho); uj, dj, oj = aggh(hj)
+        print(f"{v*1e6:6.0f} | {f'{uo}/{NH}':>8} {do:11.2f} | {f'{uj}/{NH}':>8} {dj:11.2f} | {oo:6.0f}→{oj:<6.0f}", flush=True)
+    ideal.close()
+    print("\n[готово] где ГОМО+ЮСТ поднято>ГОМО-только — там юстировка пробивает стену дальше рампа", flush=True)
+    sys.exit(0)
+
 print(f"\n{'тип':>6} {'уровень':>9} | {'BASELINE поднято ДА+x мед':>26} | {'COMBO поднято ДА+x мед':>24} | {'орбита B→C мкм':>14}", flush=True)
 for etype, levs in LEVELS.items():
     for v in levs:
