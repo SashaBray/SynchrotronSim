@@ -11,7 +11,9 @@ import numpy as np
 import ring_cpp, facility_report as fr, orbit_correct as oc, orbit_infer as oi, ring_analysis as ra
 import errors as er, tuner as tn
 
-R = 20e-6; NSEED = 6; APER = 0.012
+SMOKE = len(sys.argv) > 1 and sys.argv[1] == "smoke"
+RS = [20e-6] if SMOKE else [5e-6, 10e-6, 15e-6, 20e-6]
+NSEED = 6; APER = 0.012; GOCT = tn.OCTUPOLE_PARETO_G             # g=+0.25 (бесплатная ДА, Парето)
 KINDS = ("quad", "dipole", "sext", "oct", "dq")                  # геодезия юстирует все магниты до R
 inf = dict(fr.info_of(26)); inf["_id"] = 26
 ideal = fr._ring(inf, nsl=8)
@@ -19,7 +21,21 @@ resp = oc.cached_response_matrix(ideal, 26)
 loco = tn.load_loco(26, 8); octx = tn.octupole_context(ideal)
 bpm = oi.monitor_rows(ideal)
 corr = np.array(resp["corr"])
+Px = np.linalg.pinv(resp["Rx"][bpm - 1], rcond=1e-2); Py = np.linalg.pinv(resp["Ry"][bpm - 1], rcond=1e-2)
 SCR = os.path.join("workspace", "results", "_ws")
+
+
+def orbit_recorrect(ring, out):
+    """Финальный орбитный шаг ПОСЛЕ LOCO: LOCO-подстройки градиентов заново искажают орбиту (feed-down),
+    добавляем корректорные кики, чтобы занулить остаточную орбиту в BPM (точность)."""
+    o = ring.track_elements([out["co"]])[0]
+    dthx = -(Px @ o[bpm, 0]); dthy = -(Py @ o[bpm, 2])
+    kk = dict(out["bk"]); vv = dict(out["bv"])
+    for j, c in enumerate(corr):
+        kk[c] = kk.get(c, 0.0) + float(dthx[j]); vv[c] = vv.get(c, 0.0) + float(dthy[j])
+    ring.apply_perturb(kicks=list(kk.items()), vkicks=list(vv.items()), dks=out["bd"], dk3s=out["dk3"])
+    co = ra.closed_orbit(ring, dims=4)
+    return co if np.all(np.isfinite(co)) else None
 
 
 def da_x(ring, co, nturns=384, amax=0.012):
@@ -45,27 +61,44 @@ def resid_orbit(ring, co):
     return float(np.sqrt(np.mean(o[bpm, 0] ** 2 + o[bpm, 2] ** 2)))
 
 
-# идеал (R=0) для опоры
 ide = da_x(ideal, ra.closed_orbit(ideal, dims=4))
-print(f"R={R*1e6:.0f} мкм на {KINDS}; идеальная ДА+x {ide*1e3:.2f} мм, ансамбль {NSEED}\n", flush=True)
-print(f"{'seed':>4} | {'ok':>3} | {'ДА+x, мм':>8} | {'ост.орбита, мкм':>15} | {'корр СКО, мкрад':>15} | стадии", flush=True)
-res_ok = 0; das = []; orbs = []; cks = []
-for s in range(NSEED):
-    tol = {k: {"dx": R, "dy": R} for k in KINDS}
-    wsd = os.path.join(SCR, f"ws_surv_{s}")
-    er.perturbed_workspace(26, 1000 + s, tol, wsd)
+print(f"идеальная ДА+x {ide*1e3:.2f} мм; октуполь g={GOCT:+.2f}; юстируемые {KINDS}", flush=True)
+
+
+def one(sigma, seed):
+    tol = {k: {"dx": sigma, "dy": sigma} for k in KINDS}
+    wsd = os.path.join(SCR, f"ws_surv_{int(sigma*1e9)}_{seed}")
+    er.perturbed_workspace(26, 1000 + seed, tol, wsd)
     ring = ring_cpp.CppRing(lattice=26, ws=wsd, design_mev=inf["energy_mev"], nsl=8)
-    out = tn.tune(ring, resp, APER, loco=loco, oct_ctx=octx, octupole_g=0.0)
+    out = tn.tune(ring, resp, APER, loco=loco, oct_ctx=octx, octupole_g=GOCT)
     if not out["ok"]:
-        print(f"{s:4d} | {'НЕТ':>3} | {'—':>8} | {'бутстрап-стена':>15} | {'':>15} | {'+'.join(out['stages'])}", flush=True)
-        ring.close(); continue
-    co = out["co"]; da = da_x(ring, co); orb = resid_orbit(ring, co)
-    ck = float(np.sqrt(np.mean(np.array([v for _, v in out["bk"]]) ** 2 + np.array([v for _, v in out["bv"]]) ** 2)))
-    res_ok += 1; das.append(da); orbs.append(orb); cks.append(ck)
-    print(f"{s:4d} | {'да':>3} | {da*1e3:8.2f} | {orb*1e6:15.1f} | {ck*1e6:15.1f} | {'+'.join(out['stages'])}", flush=True)
-    ring.close()
+        ring.close(); return None
+    co2 = orbit_recorrect(ring, out)                            # финальный орбитный шаг после LOCO
+    co = co2 if co2 is not None else out["co"]
+    r = (da_x(ring, co), resid_orbit(ring, co), resid_orbit(ring, out["co"]))
+    ring.close(); return r
+
+
+if SMOKE:                                                        # сравнить с/без финальной перекоррекции (R=20, seed0)
+    tol = {k: {"dx": 20e-6, "dy": 20e-6} for k in KINDS}
+    wsd = os.path.join(SCR, "ws_surv_sm")
+    er.perturbed_workspace(26, 1000, tol, wsd)
+    ring = ring_cpp.CppRing(lattice=26, ws=wsd, design_mev=inf["energy_mev"], nsl=8)
+    out = tn.tune(ring, resp, APER, loco=loco, oct_ctx=octx, octupole_g=GOCT)
+    orb0 = resid_orbit(ring, out["co"]); da0 = da_x(ring, out["co"])
+    co2 = orbit_recorrect(ring, out)
+    orb1 = resid_orbit(ring, co2); da1 = da_x(ring, co2)
+    print(f"[smoke R=20 seed0 g={GOCT:+.2f}] БЕЗ финала: орбита {orb0*1e6:.1f} мкм, ДА {da0*1e3:.2f} мм; "
+          f"С финалом: орбита {orb1*1e6:.1f} мкм, ДА {da1*1e3:.2f} мм", flush=True)
+    ring.close(); ideal.close(); sys.exit(0)
+
+print(f"\n{'R, мкм':>6} | {'поднялось':>9} | {'ДА+x мед, мм':>12} | {'ост.орбита мед, мкм':>19}", flush=True)
+for sig in RS:
+    rr = [one(sig, s) for s in range(NSEED)]
+    ok = [x for x in rr if x is not None]
+    if not ok:
+        print(f"{sig*1e6:6.0f} | {f'0/{NSEED}':>9} | {'—':>12} | {'—':>19}", flush=True); continue
+    da = np.median([x[0] for x in ok]) * 1e3; orb = np.median([x[1] for x in ok]) * 1e6
+    print(f"{sig*1e6:6.0f} | {f'{len(ok)}/{NSEED}':>9} | {da:12.2f} | {orb:19.1f}", flush=True)
 ideal.close()
-print(f"\nИТОГ R=20 мкм: поднялось {res_ok}/{NSEED}; ДА+x медиана {np.median(das)*1e3 if das else float('nan'):.2f} мм "
-      f"(идеал {ide*1e3:.2f}); ост.орбита мед {np.median(orbs)*1e6 if orbs else float('nan'):.1f} мкм; "
-      f"корр СКО мед {np.median(cks)*1e6 if cks else float('nan'):.1f} мкрад", flush=True)
-print("[готово] требование к геодезии: доля поднявшихся + ДА при остатке R", flush=True)
+print(f"\n[готово] требование к геодезии: ДА+x (идеал {ide*1e3:.2f} мм) и орбита как функция R", flush=True)
