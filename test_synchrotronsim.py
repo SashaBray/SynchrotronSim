@@ -1525,5 +1525,55 @@ class TestLiveStructures(unittest.TestCase):
         self.assertAlmostEqual(a2[i] - a[i], 1e-2 * dt)        # новый кап подхвачен тем же apply
 
 
+class TestFacilityState(unittest.TestCase):
+    """Расширенная структура установки: BeamSnapshot (пучок по линии, запрос по имени магнита) и
+    MachineView (lazy положение/поле магнита). Быстрые тесты на фейковых кольце/plant'е — без трекинга."""
+
+    def test_magnet_entries_unique_and_roundtrip(self):
+        import types
+        from control.bpm_map import magnet_entries, BpmMap
+        n = 8
+        ring = types.SimpleNamespace(
+            circumference=800.0, n_mag=n, s_out=[100.0 * i for i in range(n)],
+            mags=[types.SimpleNamespace(center=[float(i), 0.0, 0.0], dev=f"Q{i % 3}", kind="quad")
+                  for i in range(n)])          # dev повторяются (Q0/Q1/Q2) → нужен ординал
+        mm = BpmMap(magnet_entries(ring, n_superperiods=2))
+        self.assertEqual(len(mm), n)
+        self.assertEqual(len(set(mm.names)), n, "имена магнитов обязаны быть уникальны (ординал при повторе dev)")
+        for i in range(n):
+            self.assertEqual(mm.index(mm.name(i)), i)         # round-trip имя↔индекс
+
+    def test_beam_snapshot_query_by_magnet(self):
+        from collections import deque
+        from control import BeamSnapshot
+        from control.bpm_map import BpmMap
+        mm = BpmMap([{"index": 0, "name": "m0"}, {"index": 1, "name": "m1"}, {"index": 2, "name": "m2"}])
+        s1 = np.arange(4 * 6, dtype=float).reshape(4, 6)      # 4 границы (3 магнита + вход)
+        s2 = s1 + 10.0
+        bs = BeamSnapshot(deque([s1, s2], maxlen=9), mm)
+        np.testing.assert_array_equal(bs.snap, s2)            # snap = последний
+        np.testing.assert_allclose(bs.avg, (s1 + s2) / 2)     # avg = среднее по окну
+        self.assertEqual(bs.plane(1, "x"), s2[1][0])
+        np.testing.assert_array_equal(bs.at_magnet("m1", "entry"), s2[1])   # вход m1 = строка 1
+        np.testing.assert_array_equal(bs.at_magnet("m1", "exit"), s2[2])    # выход m1 = строка 2
+
+    def test_machine_view_position_and_field(self):
+        import types
+        from control.bpm_map import BpmMap
+        from control.tbt_plant import MachineView
+        mm = BpmMap([{"index": 0, "name": "d0"}, {"index": 1, "name": "q1"}])
+        ring = types.SimpleNamespace(mags=[
+            types.SimpleNamespace(center=[1.0, 0.0, 0.0], theta0=0.01, k1=0.0, k2=0.0, k3=0.0),
+            types.SimpleNamespace(center=[2.0, 0.0, 0.0], theta0=0.0, k1=1.5, k2=0.0, k3=0.0)])
+        fake = types.SimpleNamespace(magnets=mm, ring=ring,
+                                     _applied={"dx": np.array([0.0, 3e-6]), "dy": np.array([0.0, -2e-6]),
+                                               "field": {"dks": np.array([0.0, 0.1])}})
+        mv = MachineView(fake)
+        px, py, pz = mv.position("q1")                        # центр + сдвиг возмущения
+        self.assertAlmostEqual(px, 2.0 + 3e-6); self.assertAlmostEqual(py, -2e-6)
+        self.assertAlmostEqual(mv.field("q1")["k1"], 1.5 + 0.1)   # номинал k1 + Δ из dks (рябь)
+        self.assertAlmostEqual(mv.field("d0")["theta0"], 0.01)    # без применённой Δ — номинал
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")

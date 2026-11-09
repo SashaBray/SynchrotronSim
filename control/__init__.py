@@ -11,13 +11,13 @@
 Диффурное ядро и инструменты полей/токов НЕ трогаются — это отдельная ветка.
 """
 from .state import (Schema, StateVector, Limits, History, ExperimentState, StateView,
-                    SensorConfig, NoiseModel)
+                    SensorConfig, NoiseModel, BeamSnapshot)
 from .controller import Controller, Resources, ResponseMatrix
 from .scheduler import Scheduler, LoopSpec
 from .plant import Plant, DemoPlant
 from .registry import discover
 
 __all__ = ["Schema", "StateVector", "Limits", "History", "ExperimentState", "StateView",
-           "SensorConfig", "NoiseModel",
+           "SensorConfig", "NoiseModel", "BeamSnapshot",
            "Controller", "Resources", "ResponseMatrix", "Scheduler", "LoopSpec",
            "Plant", "DemoPlant", "discover"]

@@ -51,13 +51,37 @@ def corrector_entries(ring, corr, n_superperiods=10):
     return out
 
 
+def magnet_entries(ring, n_superperiods=10):
+    """Записи ВСЕХ элементов кольца: имя SP<nn>.<dev> (+ .<k> при повторе dev в СП) ↔ индекс элемента +
+    dev/kind/s/x,y. index = индекс в ring.mags (= строка входа в снимке track_elements; выход = index+1).
+    Для адресного запроса положения/поля произвольного магнита по имени (state.machine / state.beam)."""
+    from collections import defaultdict
+    n = ring.n_mag
+    per_s = float(ring.circumference) / max(1, n_superperiods)
+    sp_of = [max(1, min(n_superperiods, int(float(ring.s_out[i]) / per_s) + 1)) for i in range(n)]
+    counts = defaultdict(int)
+    for i in range(n):
+        counts[(sp_of[i], str(getattr(ring.mags[i], "dev", "") or "el"))] += 1
+    seen = defaultdict(int)
+    out = []
+    for i in range(n):
+        m = ring.mags[i]
+        dev = str(getattr(m, "dev", "") or "el")
+        key = (sp_of[i], dev); seen[key] += 1
+        name = f"SP{sp_of[i]:02d}.{dev}" if counts[key] == 1 else f"SP{sp_of[i]:02d}.{dev}.{seen[key]}"
+        c = [float(x) for x in getattr(m, "center", [0.0, 0.0, 0.0])]
+        out.append({"index": i, "name": name, "dev": dev, "kind": str(getattr(m, "kind", "") or ""),
+                    "s": round(float(ring.s_out[i]), 4), "x": round(c[0], 6), "y": round(c[1], 6)})
+    return out
+
+
 class BpmMap:
     """Резолвер имя↔индекс поверх списка записей. Обращение: index(name|sensor_id|int), name(index), named(vec)."""
 
     def __init__(self, entries):
         self.entries = list(entries)
         self._by_name = {e["name"]: e["index"] for e in self.entries}
-        self._by_sid = {e["sensor_id"]: e["index"] for e in self.entries if e["sensor_id"]}
+        self._by_sid = {e["sensor_id"]: e["index"] for e in self.entries if e.get("sensor_id")}
         self._name = {e["index"]: e["name"] for e in self.entries}
 
     def __len__(self):

@@ -32,7 +32,7 @@ import facility_report as fr
 import ring_analysis as ra
 import disturbance as dist
 
-from .state import Schema, History
+from .state import Schema, History, BeamSnapshot
 from .controller import ResponseMatrix
 from .ring_model import RingModel
 
@@ -63,6 +63,7 @@ class TbtPlant:
         self.DVEC = float(model.photon_d)                              # плечо источник→экран, м
         self.bpm = model.bpm                                           # карта имён BPM ↔ индексов орбиты
         self.correctors = model.correctors                             # карта имён корректоров ↔ индексов актуаторов
+        self.magnets = model.magnets                                   # карта имён ВСЕХ магнитов ↔ индексов элементов
         if resp_dims == 4:
             self.Hc = model.response(self.hk_ids, ["ebpm.x"])["ebpm.x"]    # 4D-модель корректор→орбита (δ=0)
             self.Hcy = model.response(self.vk_ids, ["ebpm.y"])["ebpm.y"]
@@ -88,6 +89,7 @@ class TbtPlant:
         self.dist_seed = dist_seed
         self.dist = dist.Disturbance(disturbance_spec, self.ring, seed=dist_seed) if disturbance_spec else None
         self._noise_rev = None                               # ревизия ЖИВОГО закона шума (state.noise), подхват на лету
+        self._applied = {}                                   # последнее применённое возмущение (offsets/field) — read-only для state.machine
         self._t = 0.0; self._dt = self.stride * self.TREV    # время/шаг для временных законов возмущения
         rb = np.random.default_rng(seed + 4)
         self._bunch0 = np.array([self.CO + np.array(
@@ -104,6 +106,7 @@ class TbtPlant:
         self._last_kick = None                                # кэш применённого набора (пропуск apply_perturb)
         self.centroid_tbt = []                                # пооборотный центроид (x,px,y,py) — фазовый портрет
         self._buf = deque(maxlen=self.avg_chunks)             # окно орбит для усреднения бетатрона (как такт в fofb_sim)
+        self._snap_buf = deque(maxlen=self.avg_chunks)        # окно снимков ВСЕЙ линии → state.beam (снимок+среднее)
 
     def _trev_from_ring(self):
         C = float(getattr(self.ring, "circumference", 1110.089))
@@ -199,11 +202,13 @@ class TbtPlant:
             dkx = self.K1L * (self.PATX * self._amp); dky = -self.K1L * (self.PATY * self._amp)
             kk += [(self.quads[j], float(dkx[j])) for j in range(self.n_quad)]
             vv += [(self.quads[j], float(dky[j])) for j in range(self.n_quad)]
+            self._applied = {}
         else:                                                 # многоканальная Disturbance (режим 4)
             dx, dy = self.dist.offsets(self._t, self._dt)     # сдвиги магнитов [м] → feed-down квадруполей
+            fld = self.dist.field(self._t, self._dt)          # рябь поля (вызвать РАЗ: walk продвигает интегратор)
             kk += [(self.quads[j], float(self.K1L[j] * dx[self.quads[j]])) for j in range(self.n_quad)]
             vv += [(self.quads[j], float(-self.K1L[j] * dy[self.quads[j]])) for j in range(self.n_quad)]
-            for key, vec in self.dist.field(self._t, self._dt).items():   # рябь поля: прямые каналы apply_perturb
+            for key, vec in fld.items():                      # рябь поля: прямые каналы apply_perturb
                 rows = [(int(i), float(vec[i])) for i in np.nonzero(vec)[0]]
                 if key == "kicks":
                     kk += rows
@@ -211,6 +216,7 @@ class TbtPlant:
                     vv += rows
                 else:
                     extra[key] = extra.get(key, []) + rows
+            self._applied = {"dx": dx, "dy": dy, "field": fld}   # read-only снимок возмущения для state.machine
         return kk, vv, extra
 
     def _apply(self, state):
@@ -228,6 +234,7 @@ class TbtPlant:
         return np.mean(np.asarray(self.ring.track_elements(self.bunch.tolist())), axis=0)
 
     def _measure(self, state, snap):
+        self._snap_buf.append(snap)                           # окно снимков ВСЕЙ линии → state.beam (снимок+среднее)
         # history — МГНОВЕННЫЙ истинный снимок пучка (бетатрон виден): фазовый портрет и плоскостные датчики
         state.history.data[:, 0] = snap[self.mon, 0]; state.history.data[:, 1] = snap[self.mon, 1]
         state.history.data[:, 2] = snap[self.mon, 2]; state.history.data[:, 3] = snap[self.mon, 3]
@@ -260,13 +267,15 @@ class TbtPlant:
     def reset(self, state):
         self.bunch = self._bunch0.copy(); self.alive = True; self.turn = 0
         self._last_kick = None; self.centroid_tbt = []; self._amp = self.dist_amp
-        self._buf.clear(); self._t = 0.0                      # возмущение держим в t=0 на время декогеренции
+        self._buf.clear(); self._snap_buf.clear(); self._t = 0.0   # возмущение держим в t=0 на время декогеренции
         self._sync_noise(state)                               # подхватить закон шума из доски (state.noise)
         self._apply(state)                                    # корректоры=0 + возмущение
         n_settle = max(0, int(round(self.settle_turns / self.stride)))
         for _ in range(n_settle):                             # декогеренция бетатрона к искажённой орбите
             self._track()
         self._measure(state, self._snapshot())
+        state.beam = BeamSnapshot(self._snap_buf, self.magnets)    # пучок по всей линии (снимок+среднее), окно обновляется на месте
+        state.machine = MachineView(self)                          # lazy-доступ к положению/полю магнитов
 
     def step(self, state, dt):
         self._t = float(state.t); self._dt = float(dt)        # время/шаг для временных законов Disturbance
@@ -281,3 +290,36 @@ class TbtPlant:
             self.ring.apply_perturb(); self.ring.close()
         except Exception:
             pass
+
+
+class MachineView:
+    """Lazy-доступ к состоянию МАГНИТОВ для контура: позиция и поле на ТЕКУЩИЙ такт, по имени/индексу.
+    Считает ТОЛЬКО запрошенное из живых данных plant'а (кольцо + последнее применённое возмущение) —
+    ничего не материализуется заранее. Адресация через карту plant.magnets (SP<nn>.<dev>)."""
+
+    _FKEY = {"theta0": "kicks", "k1": "dks", "k2": "dk2s", "k3": "dk3s"}   # поле → канал возмущения
+
+    def __init__(self, plant):
+        self._p = plant
+
+    def index(self, magnet):
+        return self._p.magnets.index(magnet)
+
+    def position(self, magnet):
+        """Положение магнита (x, y, z), м: номинальное выравнивание + динамический сдвиг возмущения."""
+        i = self.index(magnet)
+        c = [float(v) for v in getattr(self._p.ring.mags[i], "center", [0.0, 0.0, 0.0])]
+        ap = self._p._applied
+        if ap:
+            c[0] += float(ap["dx"][i]); c[1] += float(ap["dy"][i])
+        return tuple(c)
+
+    def field(self, magnet):
+        """Силы магнита на текущий такт: {theta0,k1,k2,k3} = номинал + применённая Δ (рябь поля возмущения)."""
+        i = self.index(magnet); m = self._p.ring.mags[i]
+        out = {k: float(getattr(m, k, 0.0) or 0.0) for k in self._FKEY}
+        fld = (self._p._applied or {}).get("field", {})
+        for k, chan in self._FKEY.items():
+            if chan in fld:
+                out[k] += float(fld[chan][i])
+        return out

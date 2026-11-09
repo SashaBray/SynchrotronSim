@@ -151,6 +151,38 @@ class NoiseModel:
         return self
 
 
+class BeamSnapshot:
+    """Пучок по ВСЕЙ линии: центроид (x,px,y,py,z,δ) на КАЖDОЙ границе элемента + бегущее среднее по окну.
+    Хранит ОКНО снимков (ссылки на массивы plant'а, не копии); `snap` = последний, `avg` считается lazy.
+    Запрос по строке или по имени магнита (вход = строка index, выход = index+1) через карту magnets.
+    Принцип «текущее + агрегат, без истории»: окно ограничено (deque maxlen)."""
+
+    _COMP = {"x": 0, "px": 1, "y": 2, "py": 3, "z": 4, "delta": 5}
+
+    def __init__(self, window, magnets=None):
+        self._win = window            # deque снимков (ndarray (n_mag+1, 6)); обновляется plant'ом на месте
+        self.magnets = magnets        # карта имён магнитов (name→index) или None
+
+    @property
+    def snap(self):
+        return self._win[-1]
+
+    @property
+    def avg(self):
+        return np.mean(np.asarray(self._win), axis=0)         # бегущее среднее по окну (lazy)
+
+    def at(self, row, avg=False):
+        return (self.avg if avg else self.snap)[int(row)]
+
+    def plane(self, row, comp, avg=False):
+        return float(self.at(row, avg)[self._COMP[comp]])
+
+    def at_magnet(self, magnet, where="entry", avg=False):
+        """Центроид на входе/выходе магнита (по имени/индексу через карту magnets)."""
+        i = self.magnets.index(magnet)
+        return self.at(i if where == "entry" else i + 1, avg)
+
+
 class ExperimentState:
     """Blackboard эксперимента. См. модуль-docstring."""
 
@@ -165,6 +197,8 @@ class ExperimentState:
         self.refs = {}                               # уставки между контурами (напр. golden orbit): имя -> ndarray
         self.sensors = {}                            # id сенсора/группы -> SensorConfig (ЖИВЫЕ настройки сенсоров)
         self.noise = None                            # NoiseModel — ЗАКОН генерации шума (живой), или None
+        self.beam = None                             # BeamSnapshot — пучок по всей линии (снимок+среднее), ставит plant
+        self.machine = None                          # lazy-доступ к магнитам (позиция/поле), ставит plant
         self.history = history                       # History или None
         self.t = 0.0
 
@@ -206,6 +240,21 @@ class StateView:
     @property
     def history(self):
         return self._s.history
+
+    @property
+    def beam(self):
+        """BeamSnapshot: пучок по всей линии (снимок/среднее), запрос по плоскости/имени магнита. Или None."""
+        return self._s.beam
+
+    @property
+    def machine(self):
+        """Lazy-доступ к магнитам: .position(magnet)/.field(magnet) по имени/индексу. Или None."""
+        return self._s.machine
+
+    @property
+    def sensors(self):
+        """Живые настройки сенсоров (id → SensorConfig)."""
+        return self._s.sensors
 
     def read(self, observable_id):
         """Показание сенсора (ndarray) или None, если ещё не измерено."""

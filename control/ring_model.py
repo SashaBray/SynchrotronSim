@@ -36,6 +36,7 @@ class RingModel:
         _sp = bpm_map.DEFAULT_SP.get(lattice, 10)
         self.bpm = bpm_map.BpmMap(bpm_map.from_ring(self.ring, self.mon, _sp))              # BPM: SP<nn>.BPM<mm>
         self.correctors = bpm_map.BpmMap(bpm_map.corrector_entries(self.ring, self.corr, _sp))  # корректоры: SP<nn>.COR<mm>
+        self.magnets = bpm_map.BpmMap(bpm_map.magnet_entries(self.ring, _sp))               # ВСЕ элементы: SP<nn>.<dev>
         self.quads = oi.quad_indices(self.ring, kinds=("quad",))
         self.K1L = np.array([float(self.ring.mags[q].k1) * float(self.ring.mags[q].Leff) for q in self.quads])
         self.hk_ids = [f"corr.{i:03d}.hkick" for i in range(len(self.corr))]
