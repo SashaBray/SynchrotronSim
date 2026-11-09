@@ -1379,5 +1379,74 @@ class TestOpticsPlant(unittest.TestCase):
                            "отклик νx на Δk1 не должен быть вырожденно мал (актуатор дошёл до оценки)")
 
 
+@unittest.skipUnless(os.path.exists(os.path.join(mt.TB, "fb_experiments.csv")),
+                     "нет fb_experiments.csv — пропуск конфига режима 4")
+class TestMode4Config(unittest.TestCase):
+    """Режим 4: загрузка конфига эксперимента ОС из БД по ключу + соблюдение подписки рекордерами."""
+
+    def test_config_roundtrip(self):
+        """load(1) собирает мастер+сателлиты: решётка, контуры, возмущения, подписка."""
+        from control import fb_config
+        cfg = fb_config.load(1)
+        self.assertEqual(cfg.lattice_id, 26)
+        self.assertGreater(cfg.steps, 0)
+        self.assertEqual({l.name for l in cfg.enabled_loops()}, {"fofb_x", "fofb_y"})
+        self.assertIn("ground_vibration", {c["name"] for c in cfg.disturbance_spec})
+        self.assertIn("screen", {r.signal for r in cfg.enabled_records()})
+
+    def test_subscription_honored(self):
+        """recorders.build берёт только enabled; отключённый screen НЕ инстанцируется, неизвестный сигнал пропущен."""
+        from control import fb_config, recorders
+        R = fb_config.Record
+        recs = recorders.build([R("orbit_rms", "", "per_window", True),
+                                R("screen", "SCR_U19", "final", False),   # отключён
+                                R("sf", "channel=b1", "post", True)])      # нереализован в v1
+        names = [type(r).__name__ for r in recs]
+        self.assertEqual(names, ["OrbitRmsRecorder"], f"подписка нарушена: {names}")
+        self.assertNotIn("ScreenRecorder", names, "отключённый screen не должен считаться")
+
+
+class TestMode4Store(unittest.TestCase):
+    """Режим 4: писатель результатов — идемпотентность по ключу (перезапись, не дублирование) во ВРЕМЕННОЙ БД."""
+
+    def setUp(self):
+        import tempfile
+        from control import fb_store
+        self.fb_store = fb_store
+        self._tb, self._res = fb_store.TB, fb_store.RES
+        self.tmp = tempfile.mkdtemp()
+        fb_store.TB = self.tmp
+        fb_store.RES = os.path.join(self.tmp, "res")
+
+    def tearDown(self):
+        import shutil
+        self.fb_store.TB, self.fb_store.RES = self._tb, self._res
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_results_keyed_rewrite_is_idempotent(self):
+        """Двойная запись одного fb_exp_id не плодит строк; чужой эксперимент сохраняется."""
+        rowsA = [("orbit_rms.x", 0, 1.0), ("orbit_rms.x", 1, 2.0)]
+        self.fb_store.write_results(1, rowsA)
+        self.fb_store.write_results(1, rowsA)                  # повтор
+        self.fb_store.write_results(2, [("light.x", 0, 9.0)])  # чужой эксперимент
+        r1 = self.fb_store.read_results(1); r2 = self.fb_store.read_results(2)
+        self.assertEqual(len(r1["orbit_rms.x"][1]), 2, "повторная запись не должна дублировать")
+        self.assertEqual(r2["light.x"][1], [9.0], "чужой эксперимент обязан сохраниться")
+        self.fb_store.write_results(1, rowsA)                  # ещё раз — exp2 не трогаем
+        self.assertEqual(self.fb_store.read_results(2)["light.x"][1], [9.0])
+
+    def test_artifact_roundtrip(self):
+        """write_artifact → .npz + манифест; read_artifacts читает массив; повтор не дублирует строку."""
+        self.fb_store.write_artifact(1, "screen", {"ideal": np.ones((3, 3))}, meta="t")
+        self.fb_store.write_artifact(1, "screen", {"ideal": np.zeros((3, 3))}, meta="t")  # перезапись
+        got = self.fb_store.read_artifacts(1)
+        self.assertIn("screen", got)
+        np.testing.assert_array_equal(got["screen"]["ideal"], np.zeros((3, 3)))
+        import csv
+        with open(os.path.join(self.tmp, "fb_artifacts.csv"), encoding="utf-8-sig") as f:
+            rows = [r for r in csv.reader(f, delimiter=";")][1:]
+        self.assertEqual(len([r for r in rows if r and r[0] == "1"]), 1, "манифест не должен дублировать")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")

@@ -1,0 +1,5 @@
+fb_exp_id;signal;params;cadence;enabled
+1;orbit_rms;;per_window;1
+1;light;;per_window;1
+1;phase;;final;1
+1;screen;SCR_U19;final;1

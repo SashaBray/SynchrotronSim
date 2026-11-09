@@ -30,6 +30,7 @@ import numpy as np
 import ring_cpp
 import facility_report as fr
 import ring_analysis as ra
+import disturbance as dist
 
 from .state import Schema, History
 from .controller import ResponseMatrix
@@ -43,7 +44,7 @@ PHASE_DEG = 165.0                                             # фаза ВЧ д
 class TbtPlant:
     def __init__(self, lattice=26, nsl=8, n_part=NP, stride=STRIDE, dist_amp=0.3e-6,
                  dist_rho=1.0, meas_noise=0.0, settle_turns=300, seed=1, dist_seed=11, n_photon=8,
-                 avg_chunks=9, resp_dims=4, sr=True):
+                 avg_chunks=9, resp_dims=4, sr=True, disturbance_spec=None):
         self.stride = stride
         self.sr = bool(sr)                                    # СИ вкл/выкл (режим 2: затухание vs сохранение)
         self.meas_noise = meas_noise
@@ -79,6 +80,11 @@ class TbtPlant:
             self.Hcy = self._build_resp_6d("ebpm.y", "vkick")
         self.CO = ra.closed_orbit(self.ring, dims=6)
         self.TREV = float(inf.get("t_rev", 0.0)) or self._trev_from_ring()
+
+        # --- многоканальное возмущение из disturbance_spec (режим 4): plant владеет Disturbance,
+        #     вливаем её в kick_lists каждый шаг. При spec=None — прежний скалярный путь PATX/PATY.
+        self.dist = dist.Disturbance(disturbance_spec, self.ring, seed=dist_seed) if disturbance_spec else None
+        self._t = 0.0; self._dt = self.stride * self.TREV    # время/шаг для временных законов возмущения
         rb = np.random.default_rng(seed + 4)
         self._bunch0 = np.array([self.CO + np.array(
             [rb.normal(0, 5e-6), 0, rb.normal(0, 5e-6), 0, 0, rb.normal(0, 1e-3)]) for _ in range(n_part)])
@@ -143,26 +149,44 @@ class TbtPlant:
         # dist_rho == 1 → статичная амплитуда (статическое искажение орбиты)
 
     def kick_lists(self, state):
-        """Полный ТЕКУЩИЙ набор киков машины (корректоры + впрыск + feed-down возмущения) как аргументы
-        apply_perturb (kk, vv). Это 'конфигурация машины' для анализа (режим 3): тот же набор можно отдать
-        построителю 4D-кольца и померить ДА/карту частот ровно той машины, что оставил опыт с ОС."""
+        """Полный ТЕКУЩИЙ набор возмущений машины (корректоры + впрыск + feed-down/поле возмущений) как
+        аргументы apply_perturb: (kk, vv, extra), где extra — dict прочих каналов (dks/dk2s/dk3s/dsks).
+        Это 'конфигурация машины' для анализа (режим 3): тот же набор можно отдать построителю 4D-кольца.
+
+        Возмущение: при spec=None — прежний фикс. паттерн feed-down квадруполей (скалярная амплитуда _amp);
+        при заданном disturbance_spec — многоканальная Disturbance (offsets→feed-down квадруполей,
+        field→прямые каналы apply_perturb), вычисляется во времени (self._t, self._dt)."""
         th = state.actual.select(self.hk_ids) + state.dynamics.select(self.hk_ids)
         tv = state.actual.select(self.vk_ids) + state.dynamics.select(self.vk_ids)
-        dkx = self.K1L * (self.PATX * self._amp); dky = -self.K1L * (self.PATY * self._amp)
-        kk = [(self.corr[j], float(th[j])) for j in range(self.n_corr)] + \
-             [(self.quads[j], float(dkx[j])) for j in range(self.n_quad)]
-        vv = [(self.corr[j], float(tv[j])) for j in range(self.n_corr)] + \
-             [(self.quads[j], float(dky[j])) for j in range(self.n_quad)]
-        return kk, vv
+        kk = [(self.corr[j], float(th[j])) for j in range(self.n_corr)]
+        vv = [(self.corr[j], float(tv[j])) for j in range(self.n_corr)]
+        extra = {}
+        if self.dist is None:                                 # скалярный путь (дефолт)
+            dkx = self.K1L * (self.PATX * self._amp); dky = -self.K1L * (self.PATY * self._amp)
+            kk += [(self.quads[j], float(dkx[j])) for j in range(self.n_quad)]
+            vv += [(self.quads[j], float(dky[j])) for j in range(self.n_quad)]
+        else:                                                 # многоканальная Disturbance (режим 4)
+            dx, dy = self.dist.offsets(self._t, self._dt)     # сдвиги магнитов [м] → feed-down квадруполей
+            kk += [(self.quads[j], float(self.K1L[j] * dx[self.quads[j]])) for j in range(self.n_quad)]
+            vv += [(self.quads[j], float(-self.K1L[j] * dy[self.quads[j]])) for j in range(self.n_quad)]
+            for key, vec in self.dist.field(self._t, self._dt).items():   # рябь поля: прямые каналы apply_perturb
+                rows = [(int(i), float(vec[i])) for i in np.nonzero(vec)[0]]
+                if key == "kicks":
+                    kk += rows
+                elif key == "vkicks":
+                    vv += rows
+                else:
+                    extra[key] = extra.get(key, []) + rows
+        return kk, vv, extra
 
     def _apply(self, state):
         """Применить текущий набор киков к кольцу. apply_perturb дорог (~113 мс, RESET+набор) —
         зовём ТОЛЬКО когда набор изменился."""
-        kk, vv = self.kick_lists(state)
-        key = (tuple(kk), tuple(vv))
+        kk, vv, extra = self.kick_lists(state)
+        key = (tuple(kk), tuple(vv), tuple(sorted((k, tuple(v)) for k, v in extra.items())))
         if key == self._last_kick:
             return
-        self.ring.apply_perturb(kicks=kk, vkicks=vv)
+        self.ring.apply_perturb(kicks=kk, vkicks=vv, **extra)
         self._last_kick = key
 
     def _snapshot(self):
@@ -201,7 +225,7 @@ class TbtPlant:
     def reset(self, state):
         self.bunch = self._bunch0.copy(); self.alive = True; self.turn = 0
         self._last_kick = None; self.centroid_tbt = []; self._amp = self.dist_amp
-        self._buf.clear()
+        self._buf.clear(); self._t = 0.0                      # возмущение держим в t=0 на время декогеренции
         self._apply(state)                                    # корректоры=0 + возмущение
         n_settle = max(0, int(round(self.settle_turns / self.stride)))
         for _ in range(n_settle):                             # декогеренция бетатрона к искажённой орбите
@@ -209,6 +233,7 @@ class TbtPlant:
         self._measure(state, self._snapshot())
 
     def step(self, state, dt):
+        self._t = float(state.t); self._dt = float(dt)        # время/шаг для временных законов Disturbance
         self._advance_dist()
         self._apply(state)                                    # перезовёт apply_perturb лишь при смене киков
         self._measure(state, self._snapshot())                # сенсоры ПЕРЕД продвижением (задержка в такт)

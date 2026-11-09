@@ -1,0 +1,2 @@
+fb_exp_id;lattice_id;steps;stride;settle;seed;sr;nsl;note;status
+1;26;180;15;250;1;1;8;орбитный FOFB под реалистичным шумом + запись орбиты/света/интерференции;new

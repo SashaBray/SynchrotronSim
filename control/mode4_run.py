@@ -1,0 +1,90 @@
+# -*- coding: utf-8 -*-
+"""Режим 4 — ТОЧКА ВХОДА эксперимента с обратной связью: конфиг из БД по ключу → моделирование →
+результаты в БД. Отчёт строится ОТДЕЛЬНО, по требованию (control/mode4_report.py).
+
+Поток: fb_config.load(fb_exp_id) → TbtPlant (нелинейное 6D-кольцо СИЛА) с многоканальным возмущением из
+disturbance_spec + Scheduler с контурами (IntegralSVD по fb_loops) → по окнам усреднения зовём рекордеры
+ПОДПИСКИ (fb_record: за чем следить) → результаты пишем в fb_results.csv + артефакты (.npz + fb_artifacts).
+Статус эксперимента (new→in_progress→done) — прерывание-безопасность: упал на середине → остался
+in_progress. Диффур-ядро/поля заморожены; всё через apply_perturb.
+
+ЗАПУСК: py -3.14 control/mode4_run.py --exp 1 [smoke]
+"""
+import argparse
+import os
+import sys
+
+os.environ.setdefault("SS_SECTOR", "1")
+sys.stdout.reconfigure(encoding="utf-8")
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from control import ExperimentState, Scheduler
+from control.tbt_plant import TbtPlant
+from control.controllers.integral_svd import IntegralSVD
+from control import fb_config, fb_store, recorders
+
+
+def main():
+    ap = argparse.ArgumentParser(description="режим 4 — эксперимент ОС из БД")
+    ap.add_argument("mode", nargs="?", default="")
+    ap.add_argument("--exp", type=int, required=True, help="ключ эксперимента fb_exp_id")
+    a = ap.parse_args()
+    smoke = a.mode == "smoke"
+
+    cfg = fb_config.load(a.exp)
+    steps = min(cfg.steps, 36) if smoke else cfg.steps
+    settle = min(cfg.settle, 120) if smoke else cfg.settle
+    mesh = 81 if smoke else 121
+
+    print(f"=== РЕЖИМ 4: эксперимент ОС fb_exp_id={cfg.fb_exp_id} ===")
+    print(f"решётка {cfg.lattice_id} · СИ {'вкл' if cfg.sr else 'выкл'} · {steps} шагов×{cfg.stride} об · "
+          f"осадка {settle} об · nsl {cfg.nsl}")
+    print(f"возмущения: {', '.join(c['name'] for c in cfg.disturbance_spec) or '—'}")
+    print(f"контуры: {', '.join(l.name for l in cfg.enabled_loops()) or '—'}")
+    print(f"подписка (запись): {', '.join(r.signal + ('[' + r.params + ']' if r.params else '') for r in cfg.enabled_records()) or '—'}\n", flush=True)
+
+    plant = TbtPlant(lattice=cfg.lattice_id, nsl=cfg.nsl, sr=cfg.sr, stride=cfg.stride,
+                     settle_turns=settle, seed=cfg.seed, dist_seed=cfg.seed, n_photon=8,
+                     disturbance_spec=cfg.disturbance_spec)
+    state = ExperimentState(plant.schema(), history=plant.history())
+    dt = plant.stride * plant.TREV
+    sch = Scheduler(plant, state, dt)
+    for l in cfg.enabled_loops():
+        rate = 1.0 / (dt * plant.avg_chunks) if l.rate_hz == "auto" else float(l.rate_hz)
+        sch.add(IntegralSVD(name=l.name, sensor=l.sensor, actuator_key=l.actuator_key,
+                            gain=l.gain, rcond=l.rcond, ref=(l.ref or None)), rate_hz=rate)
+    recs = recorders.build(cfg.enabled_records(), mesh=mesh)
+    window = plant.avg_chunks
+
+    fb_store.set_status(cfg.fb_exp_id, "in_progress")
+    try:
+        widx = 0
+        for step in range(steps):
+            sch.step()
+            if (step + 1) % window == 0:
+                for rec in recs:
+                    rec.sample(state, widx, plant)
+                widx += 1
+                if widx % 4 == 0 or step + 1 == steps:
+                    ox = next((v for s, w, v in recs[0].rows[::-1] if s == "orbit_rms.x"), float("nan")) \
+                        if recs and recs[0].rows else float("nan")
+                    print(f"  окно {widx:3d}/{steps // window}: орбита X ~{ox:.2f} мкм", flush=True)
+        for rec in recs:
+            rec.finalize(state, plant)
+        rows = []
+        for rec in recs:
+            rows += rec.result_rows()
+            art = rec.artifact()
+            if art:
+                rel = fb_store.write_artifact(cfg.fb_exp_id, art[0], art[1], art[2])
+                print(f"  артефакт [{art[0]}] → {rel}", flush=True)
+        n = fb_store.write_results(cfg.fb_exp_id, rows)
+        fb_store.set_status(cfg.fb_exp_id, "done")
+        print(f"\n[OK] записано {n} строк результатов в fb_results.csv; статус эксперимента → done")
+        print(f"отчёт: py -3.14 control/mode4_report.py --exp {cfg.fb_exp_id}")
+    finally:
+        plant.close()
+
+
+if __name__ == "__main__":
+    main()

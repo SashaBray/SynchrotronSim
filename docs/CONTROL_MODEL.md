@@ -139,3 +139,30 @@
 | `regulator.py report` | ОС в ДВУХ плоскостях, переходные процессы ВЫКЛ→ВКЛ→ступень → HTML (plotly) |
 
 Прочее: `fofb_sim.py` (turn-by-turn FOFB, S(f)), `sofb_realistic.py` (SOFB на реалистичной помехе), `disturbance.py` (модель возмущений), `tuner.py` (статическая настройка).
+
+---
+
+## 10. Режим 4 — эксперимент ОС как конвейер БД
+
+Штатная точка входа для эксперимента по обратной связи на платформе `control/`: **конфиг из БД по ключу → моделирование → результаты в БД → HTML-отчёт по требованию**. Отделяет физику (прогон) от представления (отчёт улучшается независимо).
+
+**Таблицы конфига (версионируются, разделитель «;», точка — десятичная):**
+
+| Таблица | Роль |
+|---|---|
+| `fb_experiments` | мастер по `fb_exp_id`: решётка, шаги/stride/осадка, seed, СИ, nsl, `status` (new→in_progress→done) |
+| `fb_loops` | контуры (плагины `IntegralSVD`): sensor, actuator_key, gain, rcond, rate_hz, ref, enabled |
+| `fb_disturbances` | джойн на `disturbance_spec.csv` по имени — какие именованные шумы включены |
+| `fb_record` ⭐ | **ПОДПИСКА**: `signal;params;cadence;enabled` — за чем следить и что писать (в т.ч. сохранять ли интерференционную картину за ондулятором) |
+
+**Результаты (генерируются, в `.gitignore`):** `fb_results.csv` (скаляры/ряды, перезапись по ключу — идемпотентно), `fb_artifacts.csv`+`.npz` в `workspace/results/fb/<id>/` (тяжёлые массивы: карта интерференции, фазовый портрет).
+
+**Сигналы подписки:** `orbit_rms`, `light`, `bpm` (из `state.observables`); `phase`, `screen` (тяжёлые — интерференция клонирует физику `interference_compare`: блуждание пятна источника из живого прогона → смаз картины). `tune`/`chroma`/`sf` зарезервированы (квазистатика/пост-анализ), в v1 не реализованы — незнакомый сигнал просто пропускается.
+
+**Запуск:**
+```
+py -3.14 control/mode4_run.py --exp <ключ> [smoke]     # прогон → результаты в БД (статус in_progress→done)
+py -3.14 control/mode4_report.py --exp <ключ>          # по требованию: БД → report.html
+```
+
+Модули: `control/fb_config.py` (загрузка по ключу, мастер+сателлиты как `Settings.from_experiment`), `control/fb_store.py` (запись, идемпотентность по ключу как `BPMRegistry.flush`), `control/recorders.py` (рекордеры подписки), `control/mode4_run.py`/`mode4_report.py`. Возмущения в `TbtPlant` — через `disturbance_spec` (многоканальная `Disturbance`, вливается в `kick_lists`; поле/offset не идут через `state.dynamics`, её схема только корректоры). Диффур-ядро/поля заморожены. Клиентское Qt-приложение (живой просмотр, вместо авто-refresh HTML) — отдельная будущая работа.
