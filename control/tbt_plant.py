@@ -43,8 +43,9 @@ PHASE_DEG = 165.0                                             # фаза ВЧ д
 class TbtPlant:
     def __init__(self, lattice=26, nsl=8, n_part=NP, stride=STRIDE, dist_amp=0.3e-6,
                  dist_rho=1.0, meas_noise=0.0, settle_turns=300, seed=1, dist_seed=11, n_photon=8,
-                 avg_chunks=9, resp_dims=4):
+                 avg_chunks=9, resp_dims=4, sr=True):
         self.stride = stride
+        self.sr = bool(sr)                                    # СИ вкл/выкл (режим 2: затухание vs сохранение)
         self.meas_noise = meas_noise
         self.settle_turns = settle_turns
         self.avg_chunks = avg_chunks                          # окно усреднения орбиты ≈ такт (бетатрон усредняется)
@@ -70,7 +71,7 @@ class TbtPlant:
 
         # --- нелинейное кольцо (6D, СИ+ВЧ): динамика пучка
         inf = dict(fr.info_of(lattice)); inf["_id"] = lattice
-        self.ring = ring_cpp.CppRing(lattice=lattice, sr=True,
+        self.ring = ring_cpp.CppRing(lattice=lattice, sr=self.sr,
             rf={"volt_mv": inf["rf"][0], "harmonic": inf["rf"][1], "phase_deg": PHASE_DEG},
             design_mev=inf["energy_mev"], nsl=nsl)
         if resp_dims == 6:                                    # модель контура снята на 6D-равновесии своего кольца

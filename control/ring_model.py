@@ -44,15 +44,44 @@ class RingModel:
         for i, q in enumerate(self.quads):
             self._act[self.qx_ids[i]] = ("hkick", q, float(self.K1L[i]))   # сдвиг dx → гор. feed-down кик K1L·dx
             self._act[self.qy_ids[i]] = ("vkick", q, -float(self.K1L[i]))  # сдвиг dy → верт. feed-down (знак как в regulator)
+        # --- градиентные актуаторы ПО СЕМЕЙСТВАМ (контуры оптики): Δk1 квадруполя, Δk2 секступоля, Δk3 октуполя ---
+        self.quad_fams = self._families(oi.quad_indices(self.ring, kinds=("quad",)))
+        self.sext_fams = self._families([i for i, k in enumerate(self.ring.kinds) if k == "sext"])
+        self.oct_fams = self._families([i for i, k in enumerate(self.ring.kinds) if k == "oct"])
+        self.dk_ids = [f"quad.{f}.dk" for f in self.quad_fams]
+        self.dk2_ids = [f"sext.{f}.dk2" for f in self.sext_fams]
+        self.dk3_ids = [f"oct.{f}.dk3" for f in self.oct_fams]
+        for f, idx in self.quad_fams.items():
+            self._act[f"quad.{f}.dk"] = ("dk", idx, 1.0)       # Δk1 на всё семейство (на длину)
+        for f, idx in self.sext_fams.items():
+            self._act[f"sext.{f}.dk2"] = ("dk2", idx, 1.0)     # Δk2 на всё семейство
+        for f, idx in self.oct_fams.items():
+            self._act[f"oct.{f}.dk3"] = ("dk3", idx, 1.0)      # Δk3 на всё семейство
         # источники для XBPM: центроид фотона = x + d·x' в центре ондулятора (плечо d до экрана)
         self.photon_rows, self.photon_d = self._source_rows(n_photon, photon_d) if n_photon else (np.array([], int), photon_d)
+
+    def _families(self, indices):
+        """Группировка индексов магнитов по имени семейства (fr._family по m.dev): {fam: [idx, …]}."""
+        fams = {}
+        for i in indices:
+            f = fr._family(self.ring.mags[i].dev)
+            fams.setdefault(f, []).append(int(i))
+        return fams
 
     def applier(self, ring, aid, eps):
         kind, idx, scale = self._act[aid]
         if kind == "hkick":
             ring.apply_perturb(kicks=[(idx, scale * eps)])
-        else:
+        elif kind == "vkick":
             ring.apply_perturb(vkicks=[(idx, scale * eps)])
+        elif kind == "dk":
+            ring.apply_perturb(dks=[(j, scale * eps) for j in idx])          # Δk1 семейства
+        elif kind == "dk2":
+            ring.apply_perturb(dk2s=[(j, scale * eps) for j in idx])         # Δk2 семейства
+        elif kind == "dk3":
+            ring.apply_perturb(dk3s=[(j, scale * eps) for j in idx])         # Δk3 семейства
+        else:
+            raise ValueError(f"RingModel.applier: неизвестный тип актуатора {kind}")
 
     def _source_rows(self, n_photon, d):
         """Строки track_elements в центрах первых n_photon ондуляторов (ближайший mag.center к pivot группы)."""
