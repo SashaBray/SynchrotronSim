@@ -116,6 +116,41 @@ class History:
         return self.data[:, self._midx[moment]]
 
 
+class SensorConfig:
+    """Живые настройки сенсора/группы (напр. e-BPM): кладутся в `ExperimentState.sensors[<id>]`.
+    plant читает их НА ИЗМЕРЕНИИ, поэтому правка в бесконечном режиме подхватывается. Поля — то, что
+    описывает сам датчик (не его показание): шум, окно усреднения, вкл/выкл, калибровка, уставка."""
+
+    def __init__(self, meas_noise=None, avg_chunks=None, enabled=True, gain=1.0, setpoint=0.0, **extra):
+        self.meas_noise = meas_noise          # СКО шума измерения (None = дефолт plant'а)
+        self.avg_chunks = avg_chunks          # окно усреднения, тактов (None = дефолт plant'а)
+        self.enabled = enabled
+        self.gain = gain
+        self.setpoint = setpoint
+        self.extra = dict(extra)              # место под произвольные настройки конкретного датчика
+
+
+class NoiseModel:
+    """ЗАКОН генерации шума как ДАННЫЕ: список компонент-спеков (формат `disturbance_spec`) + ревизия `rev`.
+    Кладётся в `ExperimentState.noise`; plant перечитывает его и ПЕРЕСОБИРАЕТ возмущение при смене `rev`.
+    В бесконечном режиме пользователь правит `spec` и зовёт `touch()` (или `set(new_spec)`) — изменение
+    закона подхватывается на следующем такте без пересоздания plant'а."""
+
+    def __init__(self, spec=None):
+        self.spec = list(spec or [])          # компоненты (name/target/plane/form/correlation/quantity/amp/freq/phase)
+        self.rev = 0                          # счётчик ревизий: plant следит за ним
+
+    def set(self, spec):
+        """Заменить весь закон и пометить изменение."""
+        self.spec = list(spec); self.rev += 1
+        return self
+
+    def touch(self):
+        """Пометить, что spec правили на месте (plant пересоберёт возмущение)."""
+        self.rev += 1
+        return self
+
+
 class ExperimentState:
     """Blackboard эксперимента. См. модуль-docstring."""
 
@@ -128,6 +163,8 @@ class ExperimentState:
         self.target_slots = {}                       # имя контура -> StateVector вкладов (дельты от config)
         self.observables = {}                        # id сенсора -> ndarray (показания)
         self.refs = {}                               # уставки между контурами (напр. golden orbit): имя -> ndarray
+        self.sensors = {}                            # id сенсора/группы -> SensorConfig (ЖИВЫЕ настройки сенсоров)
+        self.noise = None                            # NoiseModel — ЗАКОН генерации шума (живой), или None
         self.history = history                       # History или None
         self.t = 0.0
 

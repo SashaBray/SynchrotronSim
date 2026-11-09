@@ -1448,5 +1448,82 @@ class TestMode4Store(unittest.TestCase):
         self.assertEqual(len([r for r in rows if r and r[0] == "1"]), 1, "манифест не должен дублировать")
 
 
+@unittest.skipUnless(os.path.exists(os.path.join(mt.TB, "..", "configs", "bpm_map_26.json")),
+                     "нет bpm_map_26.json — пропуск карты имён BPM")
+class TestBpmMap(unittest.TestCase):
+    """Карта имён BPM ↔ индексов: имя SP<nn>.BPM<mm> ↔ номер в векторе орбиты, round-trip, sensor_id."""
+
+    def test_name_index_roundtrip(self):
+        from control.bpm_map import BpmMap
+        m = BpmMap.load(26)
+        self.assertEqual(len(m), 400)
+        self.assertEqual(len(set(m.names)), len(m), "имена BPM обязаны быть уникальны")
+        for name in ("SP01.BPM01", "SP01.BPM06", "SP02.BPM01", "SP10.BPM40"):
+            self.assertEqual(m.name(m.index(name)), name, f"round-trip имя↔индекс для {name}")
+        self.assertEqual(m.index(5), 5, "int-индекс пропускается как есть")
+
+    def test_sensor_id_and_named(self):
+        """Доступ по ground-truth sensor_id и named(vector) → {имя: значение}."""
+        from control.bpm_map import BpmMap
+        m = BpmMap.load(26)
+        idx = m.index("SP01.BPM06")
+        self.assertEqual(m.index(m.entries[idx]["sensor_id"]), idx, "sensor_id → тот же индекс, что имя")
+        d = m.named(np.arange(len(m), dtype=float))
+        self.assertEqual(d["SP01.BPM06"], float(idx), "named() сопоставляет имя значению по его индексу")
+
+
+class TestLiveStructures(unittest.TestCase):
+    """Живые структуры доски для бесконечного режима: NoiseModel (закон шума) + SensorConfig + регионы."""
+
+    def test_noise_model_revision(self):
+        """set/touch бампают rev — plant по нему подхватывает смену закона на лету."""
+        from control import NoiseModel
+        nm = NoiseModel([{"name": "a"}])
+        self.assertEqual(nm.rev, 0)
+        nm.touch()
+        self.assertEqual(nm.rev, 1)
+        nm.set([{"name": "b"}, {"name": "c"}])
+        self.assertEqual(nm.rev, 2)
+        self.assertEqual(len(nm.spec), 2)
+
+    def test_state_has_live_regions(self):
+        """ExperimentState даёт позиции sensors (настройки сенсоров) и noise (закон шума)."""
+        from control import ExperimentState, Schema, SensorConfig
+        st = ExperimentState(Schema(["a"]))
+        self.assertEqual(st.sensors, {})
+        self.assertIsNone(st.noise)
+        st.sensors["ebpm"] = SensorConfig(meas_noise=1e-4, enabled=False, setpoint=0.5)
+        self.assertEqual(st.sensors["ebpm"].meas_noise, 1e-4)
+        self.assertFalse(st.sensors["ebpm"].enabled)
+        self.assertEqual(st.sensors["ebpm"].setpoint, 0.5)
+
+    def test_per_corrector_drive_speed_is_live(self):
+        """Карта корректоров + индивидуальный slew-лимит привода: set по pid ограничивает ТОЛЬКО свой
+        корректор, apply читает slew каждый такт (→ правка скорости привода подхватывается живьём)."""
+        import types
+        from control.bpm_map import corrector_entries, BpmMap
+        from control import Limits, Schema
+        n = 6
+        ring = types.SimpleNamespace(
+            s_out=list(range(n)),
+            mags=[types.SimpleNamespace(center=[float(i), 0.0, 0.0], dev=f"COR{i}", sensor_id=str(100 + i))
+                  for i in range(n)])
+        cm = BpmMap(corrector_entries(ring, list(range(n)), n_superperiods=2))
+        self.assertEqual(len(cm), n)
+        self.assertEqual(cm.name(0), "SP01.COR01")
+        self.assertEqual(cm.name(3), "SP02.COR01")            # per = n/nsp = 3
+        self.assertEqual(cm.index("101"), 1)                   # адресация по sensor_id
+        i = cm.index("SP02.COR01")                             # конкретный корректор по имени
+        sch = Schema([f"corr.{j:03d}.hkick" for j in range(n)])
+        lim = Limits(sch); dt = 1e-3
+        lim.set(f"corr.{i:03d}.hkick", slew=1e-4)              # медленный привод этого корректора
+        a = lim.apply(np.zeros(n), np.ones(n), dt)
+        self.assertAlmostEqual(a[i], 1e-4 * dt)                # ограничен slew*dt
+        self.assertEqual(a[0], 1.0)                            # сосед без лимита — мгновенно
+        lim.set(f"corr.{i:03d}.hkick", slew=1e-2)              # LIVE: ускорили привод
+        a2 = lim.apply(a, np.ones(n), dt)
+        self.assertAlmostEqual(a2[i] - a[i], 1e-2 * dt)        # новый кап подхвачен тем же apply
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")

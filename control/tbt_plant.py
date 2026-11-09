@@ -61,6 +61,8 @@ class TbtPlant:
         self.hk_ids = list(model.hk_ids); self.vk_ids = list(model.vk_ids)
         self.SIDX = np.asarray(model.photon_rows, int)                 # источники ИД (как в каскаде B)
         self.DVEC = float(model.photon_d)                              # плечо источник→экран, м
+        self.bpm = model.bpm                                           # карта имён BPM ↔ индексов орбиты
+        self.correctors = model.correctors                             # карта имён корректоров ↔ индексов актуаторов
         if resp_dims == 4:
             self.Hc = model.response(self.hk_ids, ["ebpm.x"])["ebpm.x"]    # 4D-модель корректор→орбита (δ=0)
             self.Hcy = model.response(self.vk_ids, ["ebpm.y"])["ebpm.y"]
@@ -83,7 +85,9 @@ class TbtPlant:
 
         # --- многоканальное возмущение из disturbance_spec (режим 4): plant владеет Disturbance,
         #     вливаем её в kick_lists каждый шаг. При spec=None — прежний скалярный путь PATX/PATY.
+        self.dist_seed = dist_seed
         self.dist = dist.Disturbance(disturbance_spec, self.ring, seed=dist_seed) if disturbance_spec else None
+        self._noise_rev = None                               # ревизия ЖИВОГО закона шума (state.noise), подхват на лету
         self._t = 0.0; self._dt = self.stride * self.TREV    # время/шаг для временных законов возмущения
         rb = np.random.default_rng(seed + 4)
         self._bunch0 = np.array([self.CO + np.array(
@@ -140,6 +144,36 @@ class TbtPlant:
 
         key = (self.lattice, self.nsl, "tbt6d", kind)
         return rsp.cached_build(key, self.ring, list(acts), [obs], applier, reader, dims=6)[obs]
+
+    # --- живой подхват настроек из доски (бесконечный режим) -------------------------------------
+    def _sync_noise(self, state):
+        """Подхватить ЖИВОЙ закон шума из state.noise: при смене ревизии ПЕРЕСОБРАТЬ Disturbance.
+        state.noise=None → оставить возмущение из конструктора (обратная совместимость)."""
+        nm = getattr(state, "noise", None)
+        if nm is None or nm.rev == self._noise_rev:
+            return
+        self.dist = dist.Disturbance(nm.spec, self.ring, seed=self.dist_seed) if nm.spec else None
+        self._noise_rev = nm.rev
+        self._last_kick = None                               # закон изменился — форсируем повторный apply_perturb
+
+    def _meas_noise(self, state):
+        """СКО шума измерения e-BPM: из живых настроек state.sensors['ebpm'], иначе дефолт plant'а."""
+        sc = state.sensors.get("ebpm") if getattr(state, "sensors", None) else None
+        if sc is not None and sc.meas_noise is not None:
+            return sc.meas_noise
+        return self.meas_noise
+
+    def set_drive_speed(self, state, corrector, slew, plane="both"):
+        """ЖИВО изменить скорость привода (slew, ед/с) КОНКРЕТНОГО корректора — подхват на следующем такте
+        (Scheduler зовёт state.limits.apply каждый такт, читая slew заново; кэша нет — rev не нужен).
+        corrector: имя SP03.COR05 | sensor_id | индекс (self.correctors). plane: 'x'/'h', 'y'/'v', 'both'.
+        slew=inf → мгновенный привод (без ограничения). Возврат — индекс корректора."""
+        i = self.correctors.index(corrector)
+        if plane in ("x", "h", "both"):
+            state.limits.set(f"corr.{i:03d}.hkick", slew=slew)
+        if plane in ("y", "v", "both"):
+            state.limits.set(f"corr.{i:03d}.vkick", slew=slew)
+        return i
 
     # --- возмущение + актуация -------------------------------------------------------------------
     def _advance_dist(self):
@@ -199,9 +233,10 @@ class TbtPlant:
         state.history.data[:, 2] = snap[self.mon, 2]; state.history.data[:, 3] = snap[self.mon, 3]
         # BPM-показание — орбита (+ электронный шум), УСРЕДНЁННАЯ по окну ≈ такт: бетатрон и шум сбиваются
         ex = snap[self.mon, 0].copy(); ey = snap[self.mon, 2].copy()
-        if self.meas_noise:
-            ex += self.meas_noise * self._rng.standard_normal(self.n_mon)
-            ey += self.meas_noise * self._rng.standard_normal(self.n_mon)
+        mn = self._meas_noise(state)                          # живой шум датчика из state.sensors, иначе дефолт
+        if mn:
+            ex += mn * self._rng.standard_normal(self.n_mon)
+            ey += mn * self._rng.standard_normal(self.n_mon)
         phx = snap[self.SIDX, 0] + snap[self.SIDX, 1] * self.DVEC if self.SIDX.size else None
         phy = snap[self.SIDX, 2] + snap[self.SIDX, 3] * self.DVEC if self.SIDX.size else None
         self._buf.append((ex, ey, phx, phy))
@@ -226,6 +261,7 @@ class TbtPlant:
         self.bunch = self._bunch0.copy(); self.alive = True; self.turn = 0
         self._last_kick = None; self.centroid_tbt = []; self._amp = self.dist_amp
         self._buf.clear(); self._t = 0.0                      # возмущение держим в t=0 на время декогеренции
+        self._sync_noise(state)                               # подхватить закон шума из доски (state.noise)
         self._apply(state)                                    # корректоры=0 + возмущение
         n_settle = max(0, int(round(self.settle_turns / self.stride)))
         for _ in range(n_settle):                             # декогеренция бетатрона к искажённой орбите
@@ -234,6 +270,7 @@ class TbtPlant:
 
     def step(self, state, dt):
         self._t = float(state.t); self._dt = float(dt)        # время/шаг для временных законов Disturbance
+        self._sync_noise(state)                               # живой подхват закона шума (бесконечный режим)
         self._advance_dist()
         self._apply(state)                                    # перезовёт apply_perturb лишь при смене киков
         self._measure(state, self._snapshot())                # сенсоры ПЕРЕД продвижением (задержка в такт)

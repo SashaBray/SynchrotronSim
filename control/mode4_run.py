@@ -18,7 +18,7 @@ os.environ.setdefault("SS_SECTOR", "1")
 sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from control import ExperimentState, Scheduler
+from control import ExperimentState, Scheduler, NoiseModel
 from control.tbt_plant import TbtPlant
 from control.controllers.integral_svd import IntegralSVD
 from control import fb_config, fb_store, recorders
@@ -31,7 +31,40 @@ def main():
     a = ap.parse_args()
     smoke = a.mode == "smoke"
 
-    cfg = fb_config.load(a.exp)
+    cfg = fb_config.load(a.exp)                              # конфиг ИЗ БД по ключу (таблицы fb_*)
+
+    # --- АЛЬТЕРНАТИВА: ЗАХАРДКОЖЕННЫЙ конфиг БЕЗ чтения БД --------------------------------------------
+    # Закомментируйте строку `cfg = fb_config.load(a.exp)` выше и РАСКОММЕНТИРУЙТЕ блок ниже, чтобы
+    # прогнать опыт на данных, зашитых прямо в код (эквивалент fb_exp_id=1) — ни одна таблица fb_*/
+    # disturbance_spec.csv при этом не читается. Контуры (loops), возмущения (disturbance_spec) и подписка
+    # (records) объявлены явно. Результаты всё равно пишутся в БД по cfg.fb_exp_id (set_status/write_* —
+    # это запись, не чтение; при отсутствии fb_experiments.csv set_status просто ничего не делает).
+    #
+    # cfg = fb_config.FbConfig(
+    #     fb_exp_id=1, lattice_id=26, steps=180, stride=15, settle=250, seed=1, sr=True, nsl=8,
+    #     note="hardcoded (без БД)",
+    #     loops=[
+    #         #        name      sensor    actuator_key gain  rcond rate_hz ref  enabled
+    #         fb_config.Loop("fofb_x", "ebpm.x", "hkick", 0.5, 0.01, "auto", "", True),
+    #         fb_config.Loop("fofb_y", "ebpm.y", "vkick", 0.5, 0.01, "auto", "", True),
+    #     ],
+    #     disturbance_spec=[   # формат строк — как у disturbance.load_spec(): амплитуды в СИ (м / отн.доля)
+    #         {"name": "ground_vibration", "target": "quad", "plane": "both", "form": "tone",
+    #          "correlation": "girder", "quantity": "position", "amplitude": 3e-7, "freq_hz": 12.0, "phase_deg": 0.0},
+    #         {"name": "fast_tone", "target": "quad", "plane": "x", "form": "tone",
+    #          "correlation": "independent", "quantity": "position", "amplitude": 1e-7, "freq_hz": 40.0, "phase_deg": 0.0},
+    #         {"name": "dip_field_ripple", "target": "dipole", "plane": "", "form": "tone",
+    #          "correlation": "common", "quantity": "field:b1", "amplitude": 5e-5, "freq_hz": 50.0, "phase_deg": 0.0},
+    #     ],
+    #     records=[            # подписка: signal, params, cadence, enabled
+    #         fb_config.Record("orbit_rms", "", "per_window", True),
+    #         fb_config.Record("light", "", "per_window", True),
+    #         fb_config.Record("phase", "", "final", True),
+    #         fb_config.Record("screen", "SCR_U19", "final", True),
+    #     ],
+    # )
+    # ------------------------------------------------------------------------------------------------
+
     steps = min(cfg.steps, 36) if smoke else cfg.steps
     settle = min(cfg.settle, 120) if smoke else cfg.settle
     mesh = 81 if smoke else 121
@@ -44,9 +77,11 @@ def main():
     print(f"подписка (запись): {', '.join(r.signal + ('[' + r.params + ']' if r.params else '') for r in cfg.enabled_records()) or '—'}\n", flush=True)
 
     plant = TbtPlant(lattice=cfg.lattice_id, nsl=cfg.nsl, sr=cfg.sr, stride=cfg.stride,
-                     settle_turns=settle, seed=cfg.seed, dist_seed=cfg.seed, n_photon=8,
-                     disturbance_spec=cfg.disturbance_spec)
+                     settle_turns=settle, seed=cfg.seed, dist_seed=cfg.seed, n_photon=8)
+    
     state = ExperimentState(plant.schema(), history=plant.history())
+    state.noise = NoiseModel(cfg.disturbance_spec)           # закон шума — В ДОСКЕ (живой: plant читает из state.noise)
+    
     dt = plant.stride * plant.TREV
     sch = Scheduler(plant, state, dt)
     for l in cfg.enabled_loops():

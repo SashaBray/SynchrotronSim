@@ -21,6 +21,7 @@ import orbit_correct as oc
 import orbit_infer as oi
 
 from . import response as resp
+from . import bpm_map
 
 
 class RingModel:
@@ -31,6 +32,10 @@ class RingModel:
         self.ring = fr._ring(inf, nsl=nsl)
         self.corr = oc.corrector_indices(self.ring)
         self.mon = oi.monitor_rows(self.ring)
+        # карты имён ↔ индексов (из того же кольца, индексы те же, что в векторах/actuator-схеме)
+        _sp = bpm_map.DEFAULT_SP.get(lattice, 10)
+        self.bpm = bpm_map.BpmMap(bpm_map.from_ring(self.ring, self.mon, _sp))              # BPM: SP<nn>.BPM<mm>
+        self.correctors = bpm_map.BpmMap(bpm_map.corrector_entries(self.ring, self.corr, _sp))  # корректоры: SP<nn>.COR<mm>
         self.quads = oi.quad_indices(self.ring, kinds=("quad",))
         self.K1L = np.array([float(self.ring.mags[q].k1) * float(self.ring.mags[q].Leff) for q in self.quads])
         self.hk_ids = [f"corr.{i:03d}.hkick" for i in range(len(self.corr))]
