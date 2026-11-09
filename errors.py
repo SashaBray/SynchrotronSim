@@ -148,6 +148,59 @@ def perturbed_workspace(lattice, seed, tol, out_dir, cutoff=2.5):
     return out_dir
 
 
+def load_groups(lattice=None, path=None):
+    """Жёсткие группы (ондуляторы) из element_groups.csv: [{group_id, lat, pivot, frame, insts}].
+    Группа = набор инстансов, двигающихся как ЕДИНОЕ ТЕЛО (вся линейка полюсов + фокус-элемент)."""
+    path = path or os.path.join(TB, "element_groups.csv")
+    if not os.path.exists(path):
+        return []
+    out = []
+    for r in csv.DictReader(open(path, encoding="utf-8-sig"), delimiter=";"):
+        if lattice is not None and r.get("lattice_id") != str(lattice):
+            continue
+        out.append(dict(group_id=r["group_id"], lat=r["lattice_id"],
+                        pivot=np.array([float(r["pivot_x"]), float(r["pivot_y"]), float(r["pivot_z"])]),
+                        yaw=float(r["yaw"]), pitch=float(r["pitch"]), roll=float(r["roll"]),
+                        insts=set(r["instance_ids"].split("|"))))
+    return out
+
+
+def _rigid(vec, uhat, vhat, axis, dyaw, dpitch, droll):
+    """Поворот вектора в рамке устройства: рыскание вокруг vhat, тангаж вокруг uhat, крен вокруг axis."""
+    v = np.asarray(vec, float)
+    if dyaw:
+        v = _rotate(v, vhat, dyaw)
+    if dpitch:
+        v = _rotate(v, uhat, dpitch)
+    if droll:
+        v = _rotate(v, axis, droll)
+    return v
+
+
+def apply_group_rigid(rows, ci, group, dof):
+    """ЖЁСТКО сдвинуть/повернуть все инстансы группы вокруг pivot. dof=dict(dx,dy,dz,dyaw,dpitch,droll).
+    Положение: p' = pivot + R·(p−pivot) + T (T в рамке устройства). Ориентация: рамку каждого ∘ R.
+    Это КЛЮЧЕВОЕ отличие от по-элементных ошибок: поворот вокруг pivot ЧЕРЕЗ ПЛЕЧО смещает концы."""
+    axis, uhat, vhat = (np.asarray(v, float) for v in mt.frame(group["yaw"], group["pitch"], group["roll"]))
+    T = dof.get("dx", 0) * uhat + dof.get("dy", 0) * vhat + dof.get("dz", 0) * axis
+    dy_, dp_, dr_ = dof.get("dyaw", 0), dof.get("dpitch", 0), dof.get("droll", 0)
+    li = ci["lattice_id"]
+    for r in rows:
+        if r[li] != group["lat"] or r[ci["instance_id"]] not in group["insts"]:
+            continue
+        p = np.array([float(r[ci["x"]] or 0), float(r[ci["y"]] or 0), float(r[ci["z"]] or 0)])
+        p2 = group["pivot"] + _rigid(p - group["pivot"], uhat, vhat, axis, dy_, dp_, dr_) + T
+        for a, s in zip(("x", "y", "z"), p2):
+            r[ci[a]] = repr(float(s))
+        if dy_ or dp_ or dr_:                              # ориентация члена ∘ R
+            a_i, u_i, _ = (np.asarray(v, float) for v in
+                           mt.frame(float(r[ci["yaw"]] or 0), float(r[ci["pitch"]] or 0), float(r[ci["roll"]] or 0)))
+            a2 = _rigid(a_i, uhat, vhat, axis, dy_, dp_, dr_)
+            u2 = _rigid(u_i, uhat, vhat, axis, dy_, dp_, dr_)
+            ny, npi, nro = _angles_from_frame(a2, u2)
+            r[ci["yaw"]] = repr(ny); r[ci["pitch"]] = repr(npi); r[ci["roll"]] = repr(nro)
+
+
 def error_summary(tol):
     """Короткое человекочитаемое описание заданных допусков (для подписи/шапки отчёта)."""
     parts = []

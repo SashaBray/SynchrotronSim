@@ -1,0 +1,6 @@
+screen_id;source;mode;dist_m;los_h_mrad;los_v_mrad;tilt_h_mrad;tilt_v_mrad;roll_mrad;width_mm;height_mm;gx;gy;gz;extract_mrad
+SCR_U01;und_01;axis;12;0;0;0;0;0;50;50;;;;
+SCR_U19;und_19;axis;15;0;0;0;0;0;60;60;;;;
+SCR_U19_TILT;und_19;axis;15;0;0;0;800;0;60;60;;;;
+SCR_BM08;8;bend;15;0;0;0;0;0;80;30;;;;
+SCR_BM08_ENTRY;8;bend;15;0;0;0;0;0;80;30;;;;2.0

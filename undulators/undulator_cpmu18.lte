@@ -1,0 +1,16 @@
+! сгенерировано build_undulator_lte.py: CPMU λ_u=18мм N=30 L=0.5400м B0=1.1000Т K=1.8493 γ=11742
+! линейка знакопеременных секторных диполей; концевые решены на замыкание I1=I2=0 (c0=0.4915, c1=0.4915)
+! сила ондулятора = общий множитель k∈[0,1] на ВСЕ углы (замыкание сохраняется); ручка на устройство — через assemble_undulators.py
+! полный полюс θ_full=3.149088e-04 рад = 2K/γ; длина полюса λ_u/2=0.0090 м
+UE0: CSBEND, L=0.009, ANGLE=1.547856717759239e-04, N_SLICES=1
+UPM: CSBEND, L=0.009, ANGLE=-3.149087805096382e-04, N_SLICES=1
+UPP: CSBEND, L=0.009, ANGLE=3.149087805096382e-04, N_SLICES=1
+UE1: CSBEND, L=0.009, ANGLE=-1.547856717759239e-04, N_SLICES=1
+UMK0: MARK
+UMK1: MARK
+UND_CPMU18: LINE=(UMK0,UE0,UPM,UPP,UPM,UPP,UPM,UPP,UPM,UPP,UPM,UPP,&
+UPM,UPP,UPM,UPP,UPM,UPP,UPM,UPP,UPM,UPP,UPM,UPP,&
+UPM,UPP,UPM,UPP,UPM,UPP,UPM,UPP,UPM,UPP,UPM,UPP,&
+UPM,UPP,UPM,UPP,UPM,UPP,UPM,UPP,UPM,UPP,UPM,UPP,&
+UPM,UPP,UPM,UPP,UPM,UPP,UPM,UPP,UPM,UPP,UPM,UPP,&
+UE1,UMK1)
