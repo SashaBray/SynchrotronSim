@@ -12,12 +12,12 @@
 """
 from .state import (Schema, StateVector, Limits, History, ExperimentState, StateView,
                     SensorConfig, NoiseModel, BeamSnapshot)
-from .controller import Controller, Resources, ResponseMatrix
+from .controller import Controller, Resources, ResponseMatrix, SlotWriter
 from .scheduler import Scheduler, LoopSpec
 from .plant import Plant, DemoPlant
 from .registry import discover
 
 __all__ = ["Schema", "StateVector", "Limits", "History", "ExperimentState", "StateView",
            "SensorConfig", "NoiseModel", "BeamSnapshot",
-           "Controller", "Resources", "ResponseMatrix", "Scheduler", "LoopSpec",
+           "Controller", "Resources", "ResponseMatrix", "SlotWriter", "Scheduler", "LoopSpec",
            "Plant", "DemoPlant", "discover"]

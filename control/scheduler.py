@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .state import StateView
-from .controller import Resources, Controller
+from .controller import Resources, Controller, SlotWriter
 
 
 @dataclass
@@ -62,13 +62,15 @@ class Scheduler:
         for name, spec in self.loops.items():
             slot = self.state.slot(name)
             if spec.enabled and (self.tick % spec.period == 0):
-                contrib = spec.controller.update(self.state.t, view) or {}
-                slot.v[:] = 0.0
-                for pid, val in contrib.items():
-                    if isinstance(pid, str) and pid.startswith("ref:"):
-                        self.state.refs[pid[4:]] = np.asarray(val, float)   # уставка другому контуру
-                    else:
-                        slot[pid] = val                                     # вклад в target (сумма по слотам)
+                slot.v[:] = 0.0                                             # обнулить СВОЙ слот ПЕРЕД апдейтом
+                if getattr(spec.controller, "wants_ctl", False):
+                    spec.controller.update(self.state.t, view, SlotWriter(self.state, slot))  # пишет в слот/refs сам
+                else:
+                    for pid, val in (spec.controller.update(self.state.t, view) or {}).items():
+                        if isinstance(pid, str) and pid.startswith("ref:"):
+                            self.state.refs[pid[4:]] = np.asarray(val, float)   # уставка другому контуру
+                        else:
+                            slot[pid] = val                                     # вклад в target (сумма по слотам)
             elif not spec.enabled and spec.mode == "release":
                 slot.v[:] = 0.0
             # freeze: слот остаётся как был

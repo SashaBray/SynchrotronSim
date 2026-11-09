@@ -1575,5 +1575,65 @@ class TestFacilityState(unittest.TestCase):
         self.assertAlmostEqual(mv.field("d0")["theta0"], 0.01)    # без применённой Δ — номинал
 
 
+class TestImperativeLoop(unittest.TestCase):
+    """Императивный контур (wants_ctl): читает из доски, пишет в СВОЙ слот через ctl — без возврата словаря.
+    Планировщик обнуляет слот перед update и суммирует слоты после → ctl.set доходит до state.actual."""
+
+    class _FakePlant:
+        def __init__(self):
+            from control import Schema
+            self._schema = Schema(["corr.000.hkick", "corr.001.hkick"])
+
+        def schema(self):
+            return self._schema
+
+        def history(self):
+            return None
+
+        def reset(self, state):
+            state.observables["ebpm.x"] = np.array([2.0, -1.0])
+
+        def step(self, state, dt):
+            pass
+
+        def fingerprint(self):
+            return ("fake",)
+
+    def test_ctl_set_and_ref_reach_state(self):
+        from control import ExperimentState, Scheduler, Controller
+
+        class Imp(Controller):
+            wants_ctl = True
+
+            def update(self, t, view, ctl):
+                m = view.read("ebpm.x")
+                ctl.set("corr.000.hkick", -0.5 * float(m[0]))     # пишем СВОЙ слот
+                ctl.ref("golden.x", np.array([7.0]))              # уставка другому контуру
+
+        plant = self._FakePlant()
+        state = ExperimentState(plant.schema())
+        sch = Scheduler(plant, state, dt=1.0)                     # reset() ставит observables
+        sch.add(Imp(name="imp"), rate_hz=1.0)
+        sch.step()
+        self.assertAlmostEqual(state.actual["corr.000.hkick"], -0.5 * 2.0)   # ctl.set → слот → actual
+        self.assertEqual(state.actual["corr.001.hkick"], 0.0)               # нетронутый актуатор = 0
+        self.assertEqual(float(state.refs["golden.x"][0]), 7.0)             # ctl.ref записал уставку
+
+    def test_return_dict_path_still_works(self):
+        """Обратная совместимость: контур БЕЗ wants_ctl по-прежнему возвращает словарь."""
+        from control import ExperimentState, Scheduler, Controller
+
+        class Ret(Controller):
+            def update(self, t, view):
+                return {"corr.001.hkick": 0.3}
+
+        plant = self._FakePlant()
+        state = ExperimentState(plant.schema())
+        sch = Scheduler(plant, state, dt=1.0)
+        sch.add(Ret(name="ret"), rate_hz=1.0)
+        sch.step()
+        self.assertAlmostEqual(state.actual["corr.001.hkick"], 0.3)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")
