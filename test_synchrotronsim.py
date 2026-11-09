@@ -1250,5 +1250,134 @@ class TestRadiationIntegrals(unittest.TestCase):
         self.assertGreater(abs(i4 - i4_0), 1e-4, "краевой член обязан входить в I₄")
 
 
+class _LinearOpticsPlant:
+    """Синтетический plant оптики: observable = t0 + M·u + d (линейная модель с известным откликом M).
+
+    Нужен ТОЛЬКО для юнит-теста контура: даёт детерминированную проверку IntegralSVD+Scheduler+ref без
+    дорогого кольца. M — «истинная» матрица отклика (её же отдаёт build_response), u — вклад контура
+    (state.actual по квад-актуаторам), d — синтетический увод Δk (имитация дрейфа градиентов)."""
+
+    def __init__(self, M, t0, d, ids):
+        self.M = np.asarray(M, float); self.t0 = np.asarray(t0, float)
+        self.d = np.asarray(d, float); self.ids = list(ids)
+
+    def _u(self, state):
+        return np.array([state.actual[i] for i in self.ids])
+
+    def _measure(self, state):
+        state.observables["tune"] = self.t0 + self.M @ self._u(state) + self.d
+
+    def schema(self):
+        from control.state import Schema
+        return Schema(self.ids)
+
+    def history(self):
+        from control.state import History
+        return History(["opt"], moments=("x",))
+
+    def reset(self, state):
+        self._measure(state)
+
+    def step(self, state, dt):
+        self._measure(state)
+
+    def build_response(self, actuators, observables):
+        from control.controller import ResponseMatrix
+        cols = [self.M[:, self.ids.index(a)] for a in actuators]
+        R = np.column_stack(cols)
+        return ResponseMatrix(R, [f"tune.{i}" for i in range(R.shape[0])], list(actuators))
+
+    def fingerprint(self):
+        return ("linopt", tuple(self.ids))
+
+
+class TestOpticsLoopControl(unittest.TestCase):
+    """Контур оптики (IntegralSVD + Scheduler + ref) на синтетическом Δk — быстрая, детерминированная.
+
+    Проверяет: интегральный SVD-регулятор с уставкой (ref) сводит observable к ЦЕЛИ (не к нулю) при
+    известной матрице отклика — тот же плагин, что орбитный FOFB, с векторным сенсором `tune`. Это ядро
+    трёх новых контуров (квад/секступоль/октуполь); кольцевую правильность знака/масштаба отклика
+    проверяет TestOpticsPlant, а сходимость на реальной машине — control/optics_loops_demo.py."""
+
+    def _run(self, gain):
+        from control.state import ExperimentState
+        from control.scheduler import Scheduler
+        from control.controllers.integral_svd import IntegralSVD
+        ids = ["quad.A.dk", "quad.B.dk"]
+        M = np.array([[3.0, 1.2], [-0.6, -2.4]])          # обусловленная 2×2 (разные знаки — как пара QF/QD)
+        t0 = np.array([0.31, 0.22]); d = np.array([0.02, -0.015])
+        plant = _LinearOpticsPlant(M, t0, d, ids)
+        state = ExperimentState(plant.schema(), history=plant.history())
+        state.refs["tune.target"] = t0.copy()             # уставка = проектные частоты (НЕ ноль)
+        sch = Scheduler(plant, state, dt=1.0)
+        sch.add(IntegralSVD(name="tune", sensor="tune", actuator_key="quad.", gain=gain,
+                            rcond=1e-6, ref="tune.target"), rate_hz=1.0)
+        e0 = float(np.linalg.norm(state.observables["tune"] - t0))
+        errs = [e0]
+        for _ in range(30):
+            sch.step()
+            errs.append(float(np.linalg.norm(state.observables["tune"] - t0)))
+        return t0, state.observables["tune"].copy(), errs
+
+    def test_converges_to_target(self):
+        """‖tune − уставка‖ падает ниже 1e-9 (синтетический увод d полностью скомпенсирован)."""
+        t0, final, errs = self._run(gain=0.6)
+        self.assertGreater(errs[0], 1e-3, "в начале увод должен присутствовать")
+        self.assertLess(errs[-1], 1e-9, "контур обязан свести увод к машинному нулю")
+        self.assertTrue(all(errs[i + 1] <= errs[i] + 1e-12 for i in range(len(errs) - 1)),
+                        "ошибка должна монотонно убывать (устойчивый интегральный контур)")
+
+    def test_tracks_reference_not_zero(self):
+        """Контур ведёт observable к УСТАВКЕ (ref), а не к нулю — это и даёт каскад контуров."""
+        t0, final, errs = self._run(gain=0.6)
+        np.testing.assert_allclose(final, t0, atol=1e-9)
+        self.assertGreater(float(np.linalg.norm(final)), 0.3,
+                           "цель далека от нуля — доказывает слежение за ref, а не зануление")
+
+
+@unittest.skipUnless(os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")),
+                     "нет lattice_configs.csv — пропуск оптического plant на кольце")
+class TestOpticsPlant(unittest.TestCase):
+    """OpticsPlant на кольце: аналитическая оценка оптики на ВОЗМУЩЁННОЙ копии кольца реагирует на
+    градиентные актуаторы (quad.<fam>.dk → Δk1). Решётка Сибири (№2, мелкая) — быстрый фикстур.
+
+    Сторож регрессии ключевого решения Stage A: оптику считаем на _python_ring()-КОПИИ с внесённым
+    Δk, а НЕ через apply_perturb (он доходит только до C++-трекера, аналитическое кольцо его не видит).
+    Если кто-то «упростит» OpticsPlant обратно на apply_perturb/живое кольцо — отклик обнулится и тест
+    упадёт. (Вертикальный νy и хроматизм на №2 вырождены — аналитическое кольцо Сибири не отдаёт k2 и
+    вертикальный k1 как живые ручки; эти каналы проверяет optics_loops_demo на рабочей №26.)"""
+
+    LAT, NSL = 2, 6
+
+    @classmethod
+    def setUpClass(cls):
+        from control.ring_model import RingModel
+        from control.optics_plant import OpticsPlant
+        cls.rm = RingModel(lattice=cls.LAT, nsl=cls.NSL)
+        cls.plant = OpticsPlant(model=cls.rm, observe=("tune",), order=4)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.plant.close()
+
+    def test_nominal_tune_fractional(self):
+        """Проектные частоты чистого кольца — осмысленные дробные числа в (0, 1)."""
+        nux, nuy = self.plant.nominal()["tune"]
+        self.assertTrue(0.0 < nux < 1.0 and 0.0 < nuy < 1.0, f"νx={nux}, νy={nuy} вне (0,1)")
+
+    def test_quad_tune_response_positive_nux(self):
+        """∂νx/∂k1 > 0 для КАЖДОГО квадрупольного семейства (∝ +βx/4π, не зависит от решётки).
+
+        Заодно отклик НЕ вырожден (|∂νx/∂k1| ~ O(1)) — значит градиентный актуатор реально доходит до
+        аналитической оценки (внесён в копию кольца), а не теряется в apply_perturb."""
+        R = self.plant.build_response(self.rm.dk_ids, ["tune"]).R
+        self.assertEqual(R.shape, (2, len(self.rm.dk_ids)))
+        nux_row = R[0]
+        self.assertTrue(np.all(nux_row > 1e-4),
+                        f"∂νx/∂k1 обязана быть > 0 у всех семейств (βx>0): {nux_row}")
+        self.assertGreater(float(np.max(np.abs(nux_row))), 0.1,
+                           "отклик νx на Δk1 не должен быть вырожденно мал (актуатор дошёл до оценки)")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")
