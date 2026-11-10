@@ -26,13 +26,14 @@ import ring_map as rmap
 from .state import Schema, History
 from .controller import ResponseMatrix
 from .ring_model import RingModel
+from .observer import Observer, ObsContext
 
 FD_EPS = 1e-3                                                  # шаг конечной разности матриц отклика (абс. Δk)
 
 
 class OpticsPlant:
     def __init__(self, model=None, lattice=26, nsl=8, observe=("tune", "chroma", "adts"),
-                 drift_k1=0.0, drift_k2=0.0, drift_k3=0.0, rho=1.0, seed=1, order=4):
+                 drift_k1=0.0, drift_k2=0.0, drift_k3=0.0, rho=1.0, seed=1, order=4, observer=None):
         self.own = model is None
         self.rm = model if model is not None else RingModel(lattice=lattice, nsl=nsl)
         self.observe = tuple(observe); self.order = order
@@ -54,6 +55,8 @@ class OpticsPlant:
         self.k3_nom = {i: float(getattr(mags[i], "k3", 0.0) or 0.0) for i in self.o_idx}
         self.drift = np.array([drift_k1, drift_k2, drift_k3]); self.rho = rho
         self._rng = np.random.default_rng(seed); self._a = np.zeros(3)
+        # Observer собирает наблюдаемые из возмущённого кольца; дефолт — подписка = observe
+        self.observer = observer or Observer(subscribe=list(self.observe))
 
     # ---- аналитическая оценка оптики на возмущённом кольце ----
     def _perturbed(self, pk1, pk2, pk3):
@@ -79,21 +82,14 @@ class OpticsPlant:
         pr.mags = mags
         return pr
 
+    def _ctx(self, pk1, pk2, pk3, state=None):
+        """Контекст наблюдателя на ВОЗМУЩЁННОМ кольце (общие промежуточные: карта оборота считается раз)."""
+        return ObsContext(state, self, ring=self._perturbed(pk1, pk2, pk3), order=self.order)
+
     def _optics(self, pk1, pk2, pk3, only=None):
-        only = tuple(only) if only is not None else self.observe
-        pr = self._perturbed(pk1, pk2, pk3)
-        rr = rmap.RingMap(pr, self.order); M = rr.one_turn()
-        out = {}
-        if "tune" in only or "chroma" in only:
-            ch = rr.chromaticity(M)
-            if "tune" in only:
-                out["tune"] = np.array([float(ch["nux"]), float(ch["nuy"])])
-            if "chroma" in only:
-                out["chroma"] = np.array([float(ch["xi_x"][1]), float(ch["xi_y"][1])])
-        if "adts" in only:
-            nf = rmap.normal_form(pr, self.order, rmap=rr)
-            out["adts"] = np.array([float(nf["dnux/dJx"]), float(nf["dnuy/dJy"]), float(nf["dnux/dJy"])])
-        return out
+        """Посчитать наблюдаемые через реестр Observer'а (для build_response/nominal)."""
+        names = list(only) if only is not None else list(self.observe)
+        return self.observer.compute(self._ctx(pk1, pk2, pk3), names)
 
     def _contrib_maps(self, state):
         pk1, pk2, pk3 = {}, {}, {}
@@ -124,9 +120,7 @@ class OpticsPlant:
 
     def _measure(self, state):
         pk1, pk2, pk3 = self._contrib_maps(state)
-        o = self._optics(pk1, pk2, pk3)
-        for k in self.observe:
-            state.observables[k] = o[k]
+        self.observer.update(state, self._ctx(pk1, pk2, pk3, state))   # Observer собирает наблюдаемые
 
     def schema(self):
         return Schema(self.ids)

@@ -1659,5 +1659,42 @@ class TestImperativeLoop(unittest.TestCase):
         self.assertAlmostEqual(state.actual["corr.001.hkick"], 0.3)
 
 
+class TestObserver(unittest.TestCase):
+    """Слой Observer: подписка, кастомный экстрактор, общий промежуточный считается один раз (кэш ctx)."""
+
+    def test_subscription_and_custom_extractor(self):
+        from control import Observer, ObsSpec, ObsContext, ExperimentState, Schema, OBSERVABLES
+        reg = {"a": ObsSpec(("raw_a",), lambda ctx: ctx.get("raw_a")),
+               "b": ObsSpec(("raw_a",), lambda ctx: ctx.get("raw_a") * 2),   # кастомная производная
+               "c": ObsSpec(("raw_a",), lambda ctx: ctx.get("raw_a") * 99)}  # не подписан
+        obs = Observer(registry=reg, subscribe=["a", "b"])
+        st = ExperimentState(Schema(["x"]))
+        ctx = ObsContext(st, None); ctx.set("raw_a", np.array([3.0]))
+        obs.update(st, ctx)
+        self.assertEqual(sorted(st.observables), ["a", "b"])              # подписка соблюдена (c не считается)
+        np.testing.assert_array_equal(st.observables["b"], np.array([6.0]))  # кастомный экстрактор работает
+        self.assertEqual(OBSERVABLES["tune"].needs, ("chroma_raw",))      # tune и chroma делят один промежуточный
+        self.assertEqual(OBSERVABLES["chroma"].needs, ("chroma_raw",))
+
+    def test_intermediate_built_once(self):
+        """Общий промежуточный строится ОДИН раз и дальше берётся из кэша ObsContext."""
+        from control import ObsContext
+        import control.observer as obsmod
+        calls = {"n": 0}
+
+        def _counting(ctx):
+            calls["n"] += 1
+            return 42
+
+        obsmod._INTERMEDIATES["_test_shared"] = _counting
+        try:
+            ctx = ObsContext(None, None)
+            self.assertEqual(ctx.get("_test_shared"), 42)
+            self.assertEqual(ctx.get("_test_shared"), 42)
+            self.assertEqual(calls["n"], 1)                               # построен единожды, остальное — кэш
+        finally:
+            obsmod._INTERMEDIATES.pop("_test_shared", None)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")

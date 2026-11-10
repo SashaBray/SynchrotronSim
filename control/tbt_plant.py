@@ -35,6 +35,7 @@ import disturbance as dist
 from .state import Schema, History, BeamSnapshot
 from .controller import ResponseMatrix
 from .ring_model import RingModel
+from .observer import Observer, ObsContext
 
 STRIDE = 15                                                   # оборотов в одном базовом такте планировщика
 NP = 12                                                       # частиц в пучке
@@ -44,7 +45,7 @@ PHASE_DEG = 165.0                                             # фаза ВЧ д
 class TbtPlant:
     def __init__(self, lattice=26, nsl=8, n_part=NP, stride=STRIDE, dist_amp=0.3e-6,
                  dist_rho=1.0, meas_noise=0.0, settle_turns=300, seed=1, dist_seed=11, n_photon=8,
-                 avg_chunks=9, resp_dims=4, sr=True, disturbance_spec=None):
+                 avg_chunks=9, resp_dims=4, sr=True, disturbance_spec=None, observer=None):
         self.stride = stride
         self.sr = bool(sr)                                    # СИ вкл/выкл (режим 2: затухание vs сохранение)
         self.meas_noise = meas_noise
@@ -107,6 +108,9 @@ class TbtPlant:
         self.centroid_tbt = []                                # пооборотный центроид (x,px,y,py) — фазовый портрет
         self._buf = deque(maxlen=self.avg_chunks)             # окно орбит для усреднения бетатрона (как такт в fofb_sim)
         self._snap_buf = deque(maxlen=self.avg_chunks)        # окно снимков ВСЕЙ линии → state.beam (снимок+среднее)
+        # Observer собирает наблюдаемые из усреднённого сырья; дефолт — орбита (+ свет, если есть источники)
+        subs = ["ebpm.x", "ebpm.y"] + (["photon.x", "photon.y"] if self.SIDX.size else [])
+        self.observer = observer or Observer(subscribe=subs)
 
     def _trev_from_ring(self):
         C = float(getattr(self.ring, "circumference", 1110.089))
@@ -247,11 +251,14 @@ class TbtPlant:
         phx = snap[self.SIDX, 0] + snap[self.SIDX, 1] * self.DVEC if self.SIDX.size else None
         phy = snap[self.SIDX, 2] + snap[self.SIDX, 3] * self.DVEC if self.SIDX.size else None
         self._buf.append((ex, ey, phx, phy))
-        state.observables["ebpm.x"] = np.mean([e[0] for e in self._buf], axis=0)
-        state.observables["ebpm.y"] = np.mean([e[1] for e in self._buf], axis=0)
+        # усреднённое сырьё (сенсорная модель выше) → в ObsContext; наблюдаемые собирает Observer
+        ctx = ObsContext(state, self, ring=self.ring)
+        ctx.set("orbit_x", np.mean([e[0] for e in self._buf], axis=0))
+        ctx.set("orbit_y", np.mean([e[1] for e in self._buf], axis=0))
         if self.SIDX.size:
-            state.observables["photon.x"] = np.mean([e[2] for e in self._buf], axis=0)
-            state.observables["photon.y"] = np.mean([e[3] for e in self._buf], axis=0)
+            ctx.set("photon_x", np.mean([e[2] for e in self._buf], axis=0))
+            ctx.set("photon_y", np.mean([e[3] for e in self._buf], axis=0))
+        self.observer.update(state, ctx)
 
     def _track(self):
         """Провести пучок stride оборотов; накопить пооборотный центроид (фазовый портрет)."""
