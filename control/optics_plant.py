@@ -58,9 +58,24 @@ class OpticsPlant:
     # ---- аналитическая оценка оптики на возмущённом кольце ----
     def _perturbed(self, pk1, pk2, pk3):
         pr = copy.copy(self.base); mags = list(self.base.mags)
-        for fld, pk in (("k1", pk1), ("k2", pk2), ("k3", pk3)):
+        touched = {}                                          # копируем магнит один раз, даже если его трогают несколько каналов
+
+        def _edit(i):
+            if i not in touched:
+                touched[i] = copy.copy(mags[i])
+            return touched[i]
+
+        # k1 = изменение ВОЗБУЖДЕНИЯ квадруполя → ОБЕ плоскости: k1 (νx) И k1v (νy) на ту же Δ.
+        # Без k1v νy оставался инвариантным (у ядра раздельные k1/k1v; реальный квадруполь двигает оба).
+        for i, dv in pk1.items():
+            m = _edit(i)
+            m.k1 = float(getattr(m, "k1", 0.0) or 0.0) + dv
+            m.k1v = float(getattr(m, "k1v", 0.0) or 0.0) + dv
+        for fld, pk in (("k2", pk2), ("k3", pk3)):             # секступоль/октуполь — одна компонента, без v-пары
             for i, dv in pk.items():
-                m = copy.copy(mags[i]); setattr(m, fld, float(getattr(m, fld, 0.0) or 0.0) + dv); mags[i] = m
+                m = _edit(i); setattr(m, fld, float(getattr(m, fld, 0.0) or 0.0) + dv)
+        for i, m in touched.items():
+            mags[i] = m
         pr.mags = mags
         return pr
 

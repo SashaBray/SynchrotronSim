@@ -82,6 +82,22 @@ def main():
         fo.update_xaxes(title_text="окно усреднения"); fo.update_yaxes(title_text="мкм rms", rangemode="tozero")
         body.append(f'<h2>Сенсоры во времени (контур ОС по окнам)</h2><div class="pic">{rep.fig_div(fo)}</div>')
 
+    # --- оптика во времени (tune/chroma/adts) — для plant=optics ---
+    optics = [("tune.x", "νx", "#2b7bba"), ("tune.y", "νy", "#e15759"),
+              ("chroma.x", "ξx", "#59a14f"), ("chroma.y", "ξy", "#b07aa1"),
+              ("adts.xx", "∂νx/∂Jx", "#edc948"), ("adts.yy", "∂νy/∂Jy", "#ff9da7"), ("adts.xy", "∂νx/∂Jy", "#9c755f")]
+    popt = [(s, n, c) for s, n, c in optics if s in res and res[s][1]]
+    if popt:
+        fop = go.Figure()
+        for sig, name, col in popt:
+            order = np.argsort(res[sig][0])
+            x = np.asarray(res[sig][0])[order]; y = np.asarray(res[sig][1])[order]
+            fop.add_trace(go.Scatter(x=x, y=y, mode="lines+markers", name=name, line=dict(width=1.8, color=col)))
+        fop.update_layout(height=340, margin=dict(l=60, r=16, t=10, b=42), plot_bgcolor="white",
+                          legend=dict(orientation="h", y=1.02, yanchor="bottom"))
+        fop.update_xaxes(title_text="окно"); fop.update_yaxes(title_text="частоты / хроматизм / ADTS")
+        body.append(f'<h2>Оптика во времени (контуры квад/секступоль/октуполь)</h2><div class="pic">{rep.fig_div(fop)}</div>')
+
     # --- интерференция: идеал vs измеренная ---
     if "screen" in art:
         s = art["screen"]; ext = s["extent"].tolist() if "extent" in s else None

@@ -152,13 +152,44 @@ class ScreenRecorder(Recorder):
                       ("screen.sharpness_pct", 0, (pk_m / pk_i * 100.0) if pk_i else 0.0)]
 
 
+class VectorRecorder(Recorder):
+    """Компоненты ВЕКТОРНОЙ наблюдаемой (tune/chroma/adts с OpticsPlant) по окнам: строки <signal>.<label>."""
+
+    SIGNAL = None
+    LABELS = None
+
+    def sample(self, state, widx, plant):
+        v = state.observables.get(self.SIGNAL)
+        if v is None:
+            return
+        v = np.asarray(v, float).ravel()
+        labels = self.LABELS or [str(i) for i in range(v.size)]
+        for lab, val in zip(labels, v):
+            self.rows.append((f"{self.SIGNAL}.{lab}", widx, float(val)))
+
+
+class TuneRecorder(VectorRecorder):
+    SIGNAL = "tune"; LABELS = ["x", "y"]                  # νx, νy (дробные)
+
+
+class ChromaRecorder(VectorRecorder):
+    SIGNAL = "chroma"; LABELS = ["x", "y"]               # ξx, ξy
+
+
+class AdtsRecorder(VectorRecorder):
+    SIGNAL = "adts"; LABELS = ["xx", "yy", "xy"]         # ∂νx/∂Jx, ∂νy/∂Jy, ∂νx/∂Jy
+
+
 REGISTRY = {
     "orbit_rms": OrbitRmsRecorder,
     "light": LightRecorder,
     "bpm": BpmRecorder,
     "phase": PhaseRecorder,
     "screen": ScreenRecorder,
-    # tune / chroma / sf — зарезервированы (quasi-static оптика / пост-анализ), в v1 не реализованы
+    "tune": TuneRecorder,
+    "chroma": ChromaRecorder,
+    "adts": AdtsRecorder,
+    # sf — зарезервирован (пост-анализ S(f)), в v1 не реализован
 }
 
 

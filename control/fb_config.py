@@ -72,6 +72,8 @@ class FbConfig:
     loops: list = field(default_factory=list)
     disturbance_spec: list = field(default_factory=list)   # row-dict'ы для disturbance.Disturbance
     records: list = field(default_factory=list)
+    plant: str = "tbt"                                     # tbt (орбита/TbtPlant) | optics (OpticsPlant)
+    drift: tuple = (0.0, 0.0, 0.0)                         # дрейф градиентов (drift_k1/k2/k3) для optics-plant
 
     def enabled_records(self):
         return [r for r in self.records if r.enabled]
@@ -94,8 +96,15 @@ def load(fb_exp_id):
     records = [Record(r["signal"].strip(), (r.get("params") or "").strip(),
                       (r.get("cadence") or "per_window").strip(), _b(r.get("enabled", "1")))
                for r in _rows_for("fb_record.csv", fb_exp_id)]
+    def _f(key):
+        try:
+            return float(m.get(key) or 0.0)
+        except ValueError:
+            return 0.0
     return FbConfig(
         fb_exp_id=int(m["fb_exp_id"]), lattice_id=int(m["lattice_id"]), steps=int(m["steps"]),
         stride=int(m["stride"]), settle=int(m["settle"]), seed=int(m["seed"]), sr=_b(m["sr"]),
         nsl=int(m["nsl"]), note=(m.get("note") or "").strip(),
-        loops=loops, disturbance_spec=spec, records=records)
+        loops=loops, disturbance_spec=spec, records=records,
+        plant=(m.get("plant") or "tbt").strip() or "tbt",
+        drift=(_f("drift_k1"), _f("drift_k2"), _f("drift_k3")))

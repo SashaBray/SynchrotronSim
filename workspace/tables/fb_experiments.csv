@@ -1,2 +1,3 @@
-fb_exp_id;lattice_id;steps;stride;settle;seed;sr;nsl;note;status
-1;26;180;15;250;1;1;8;орбитный FOFB под реалистичным шумом + запись орбиты/света/интерференции;new
+fb_exp_id;lattice_id;steps;stride;settle;seed;sr;nsl;note;status;plant;drift_k1;drift_k2;drift_k3
+1;26;180;15;250;1;1;8;орбитный FOFB под реалистичным шумом + запись орбиты/света/интерференции;new;tbt;0;0;0
+2;26;24;1;0;1;0;8;оптические контуры tune/chroma на OpticsPlant (ADTS выкл — октуполи ранг-1);new;optics;0.001;0.01;0.03

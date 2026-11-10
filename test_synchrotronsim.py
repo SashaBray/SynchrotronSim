@@ -1385,14 +1385,38 @@ class TestMode4Config(unittest.TestCase):
     """Режим 4: загрузка конфига эксперимента ОС из БД по ключу + соблюдение подписки рекордерами."""
 
     def test_config_roundtrip(self):
-        """load(1) собирает мастер+сателлиты: решётка, контуры, возмущения, подписка."""
+        """load(1) собирает мастер+сателлиты: решётка, контуры, возмущения, подписка; plant по умолчанию tbt."""
         from control import fb_config
         cfg = fb_config.load(1)
         self.assertEqual(cfg.lattice_id, 26)
         self.assertGreater(cfg.steps, 0)
+        self.assertEqual(cfg.plant, "tbt")
         self.assertEqual({l.name for l in cfg.enabled_loops()}, {"fofb_x", "fofb_y"})
         self.assertIn("ground_vibration", {c["name"] for c in cfg.disturbance_spec})
         self.assertIn("screen", {r.signal for r in cfg.enabled_records()})
+
+    def test_optics_experiment_config(self):
+        """load(2) = оптический эксперимент: plant=optics, дрейф градиентов, контуры tune/chroma."""
+        from control import fb_config
+        cfg = fb_config.load(2)
+        self.assertEqual(cfg.plant, "optics")
+        self.assertGreater(cfg.drift[0], 0.0)                 # drift_k1 прочитан
+        self.assertEqual(len(cfg.drift), 3)
+        self.assertEqual({l.name for l in cfg.enabled_loops()}, {"tune", "chroma"})   # adts выключен
+        self.assertEqual({l.actuator_key for l in cfg.enabled_loops()}, {"quad.", "sext."})
+
+    def test_vector_recorder(self):
+        """TuneRecorder пишет компоненты векторной наблюдаемой tune.x/tune.y из state.observables."""
+        import types
+        from control import recorders
+        rec = recorders.TuneRecorder(params="", cadence="per_window")
+        st = types.SimpleNamespace(observables={"tune": np.array([0.31, 0.22])})
+        rec.sample(st, 0, None); rec.sample(st, 1, None)
+        rows = rec.result_rows()
+        self.assertEqual(len(rows), 4)                         # 2 компоненты × 2 окна
+        d = {(s, w): v for s, w, v in rows}
+        self.assertAlmostEqual(d[("tune.x", 0)], 0.31)
+        self.assertAlmostEqual(d[("tune.y", 1)], 0.22)
 
     def test_subscription_honored(self):
         """recorders.build берёт только enabled; отключённый screen НЕ инстанцируется, неизвестный сигнал пропущен."""

@@ -150,14 +150,16 @@
 
 | Таблица | Роль |
 |---|---|
-| `fb_experiments` | мастер по `fb_exp_id`: решётка, шаги/stride/осадка, seed, СИ, nsl, `status` (new→in_progress→done) |
+| `fb_experiments` | мастер по `fb_exp_id`: решётка, шаги/stride/осадка, seed, СИ, nsl, `status` (new→in_progress→done), **`plant`** (`tbt`\|`optics`), `drift_k1/k2/k3` (дрейф градиентов для optics) |
 | `fb_loops` | контуры (плагины `IntegralSVD`): sensor, actuator_key, gain, rcond, rate_hz, ref, enabled |
 | `fb_disturbances` | джойн на `disturbance_spec.csv` по имени — какие именованные шумы включены |
 | `fb_record` ⭐ | **ПОДПИСКА**: `signal;params;cadence;enabled` — за чем следить и что писать (в т.ч. сохранять ли интерференционную картину за ондулятором) |
 
 **Результаты (генерируются, в `.gitignore`):** `fb_results.csv` (скаляры/ряды, перезапись по ключу — идемпотентно), `fb_artifacts.csv`+`.npz` в `workspace/results/fb/<id>/` (тяжёлые массивы: карта интерференции, фазовый портрет).
 
-**Сигналы подписки:** `orbit_rms`, `light`, `bpm` (из `state.observables`); `phase`, `screen` (тяжёлые — интерференция клонирует физику `interference_compare`: блуждание пятна источника из живого прогона → смаз картины). `tune`/`chroma`/`sf` зарезервированы (квазистатика/пост-анализ), в v1 не реализованы — незнакомый сигнал просто пропускается.
+**Сигналы подписки:** `orbit_rms`, `light`, `bpm` (из `state.observables`); `phase`, `screen` (тяжёлые — интерференция клонирует физику `interference_compare`: блуждание пятна источника из живого прогона → смаз картины); `tune`/`chroma`/`adts` (векторные, с `OpticsPlant`). `sf` зарезервирован (пост-анализ S(f)); незнакомый сигнал просто пропускается.
+
+**Plant-агностичность (столбец `plant`):** режим 4 выбирает plant по строке опыта. `tbt` → `TbtPlant` (орбита turn-by-turn, `ebpm/photon`, корректоры; возмущение — `state.noise`). `optics` → `OpticsPlant` (квазистатика: `tune/chroma/adts`, актуаторы-градиенты `quad./sext./oct.`; возмущение — дрейф градиентов `drift_k1/k2/k3`; уставки контуров = проектная оптика `plant.nominal()`). Один `mode4_run` гоняет оба: `dt/window` берутся через `getattr` (у optics — абстрактный такт без усреднения). Пример: `fb_exp_id=1` — орбитный FOFB (tbt), `fb_exp_id=2` — оптические контуры tune/chroma (optics). Квадрупольный контур держит ОБЕ частоты: у ядра раздельные градиенты плоскостей `k1`/`k1v`, поэтому `OpticsPlant._perturbed` бампит их ВМЕСТЕ (без `k1v` νy оставался инвариантным — исправлено; реальный квадруполь двигает νx вверх, νy вниз). ADTS октуполей ранг-1 (октуполи коллинеарны, 1 DOF из 3; нужна стадийность) — потому в сиде exp 2 adts-контур выключен.
 
 **Запуск:**
 ```

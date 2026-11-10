@@ -65,31 +65,46 @@ def main():
     # )
     # ------------------------------------------------------------------------------------------------
 
-    steps = min(cfg.steps, 36) if smoke else cfg.steps
+    if smoke:
+        steps = min(cfg.steps, 8 if cfg.plant == "optics" else 36)   # optics: normal_form на шаг дорог → меньше шагов
+    else:
+        steps = cfg.steps
     settle = min(cfg.settle, 120) if smoke else cfg.settle
     mesh = 81 if smoke else 121
 
-    print(f"=== РЕЖИМ 4: эксперимент ОС fb_exp_id={cfg.fb_exp_id} ===")
-    print(f"решётка {cfg.lattice_id} · СИ {'вкл' if cfg.sr else 'выкл'} · {steps} шагов×{cfg.stride} об · "
-          f"осадка {settle} об · nsl {cfg.nsl}")
-    print(f"возмущения: {', '.join(c['name'] for c in cfg.disturbance_spec) or '—'}")
+    print(f"=== РЕЖИМ 4: эксперимент ОС fb_exp_id={cfg.fb_exp_id} ({cfg.plant}) ===")
+    print(f"решётка {cfg.lattice_id} · {steps} шагов · nsl {cfg.nsl}"
+          + (f" · СИ {'вкл' if cfg.sr else 'выкл'} · stride {cfg.stride} · осадка {settle}" if cfg.plant == "tbt" else ""))
+    if cfg.plant == "optics":
+        print(f"возмущение: дрейф градиентов k1/k2/k3 = {cfg.drift}")
+    else:
+        print(f"возмущения: {', '.join(c['name'] for c in cfg.disturbance_spec) or '—'}")
     print(f"контуры: {', '.join(l.name for l in cfg.enabled_loops()) or '—'}")
     print(f"подписка (запись): {', '.join(r.signal + ('[' + r.params + ']' if r.params else '') for r in cfg.enabled_records()) or '—'}\n", flush=True)
 
-    plant = TbtPlant(lattice=cfg.lattice_id, nsl=cfg.nsl, sr=cfg.sr, stride=cfg.stride,
-                     settle_turns=settle, seed=cfg.seed, dist_seed=cfg.seed, n_photon=8)
-    
-    state = ExperimentState(plant.schema(), history=plant.history())
-    state.noise = NoiseModel(cfg.disturbance_spec)           # закон шума — В ДОСКЕ (живой: plant читает из state.noise)
-    
-    dt = plant.stride * plant.TREV
+    # --- plant по типу эксперимента (plant-агностичный режим 4) ---
+    if cfg.plant == "optics":                                # квазистатика: оптические контуры на OpticsPlant
+        from control.optics_plant import OpticsPlant
+        plant = OpticsPlant(lattice=cfg.lattice_id, nsl=cfg.nsl, observe=("tune", "chroma", "adts"),
+                            drift_k1=cfg.drift[0], drift_k2=cfg.drift[1], drift_k3=cfg.drift[2],
+                            rho=1.0, seed=cfg.seed)
+        state = ExperimentState(plant.schema(), history=plant.history())
+        for q, v in plant.nominal().items():                 # уставки контуров = проектная оптика
+            state.refs[f"{q}.target"] = v
+    else:                                                    # tbt: орбита turn-by-turn на TbtPlant
+        plant = TbtPlant(lattice=cfg.lattice_id, nsl=cfg.nsl, sr=cfg.sr, stride=cfg.stride,
+                         settle_turns=settle, seed=cfg.seed, dist_seed=cfg.seed, n_photon=8)
+        state = ExperimentState(plant.schema(), history=plant.history())
+        state.noise = NoiseModel(cfg.disturbance_spec)       # закон шума — в доске (живой)
+
+    dt = (plant.stride * plant.TREV) if hasattr(plant, "stride") else 1.0   # tbt: по оборотам; optics: абстрактный такт
+    window = getattr(plant, "avg_chunks", 1)                 # окно усреднения (optics — без усреднения)
     sch = Scheduler(plant, state, dt)
     for l in cfg.enabled_loops():
-        rate = 1.0 / (dt * plant.avg_chunks) if l.rate_hz == "auto" else float(l.rate_hz)
+        rate = 1.0 / (dt * window) if l.rate_hz == "auto" else float(l.rate_hz)
         sch.add(IntegralSVD(name=l.name, sensor=l.sensor, actuator_key=l.actuator_key,
                             gain=l.gain, rcond=l.rcond, ref=(l.ref or None)), rate_hz=rate)
     recs = recorders.build(cfg.enabled_records(), mesh=mesh)
-    window = plant.avg_chunks
 
     fb_store.set_status(cfg.fb_exp_id, "in_progress")
     try:
@@ -101,9 +116,9 @@ def main():
                     rec.sample(state, widx, plant)
                 widx += 1
                 if widx % 4 == 0 or step + 1 == steps:
-                    ox = next((v for s, w, v in recs[0].rows[::-1] if s == "orbit_rms.x"), float("nan")) \
-                        if recs and recs[0].rows else float("nan")
-                    print(f"  окно {widx:3d}/{steps // window}: орбита X ~{ox:.2f} мкм", flush=True)
+                    last = recs[0].rows[-1] if (recs and recs[0].rows) else None
+                    msg = f"{last[0]}={last[2]:.4g}" if last else "—"
+                    print(f"  окно {widx:3d}/{max(1, steps // window)}: {msg}", flush=True)
         for rec in recs:
             rec.finalize(state, plant)
         rows = []
