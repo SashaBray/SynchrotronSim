@@ -16,9 +16,11 @@ from .controller import Controller, Resources, ResponseMatrix, SlotWriter
 from .scheduler import Scheduler, LoopSpec
 from .plant import Plant, DemoPlant
 from .observer import Observer, ObsContext, ObsSpec, OBSERVABLES
+from .arbiter import Arbiter
 from .registry import discover
 
 __all__ = ["Schema", "StateVector", "Limits", "History", "ExperimentState", "StateView",
            "SensorConfig", "NoiseModel", "BeamSnapshot",
            "Controller", "Resources", "ResponseMatrix", "SlotWriter", "Scheduler", "LoopSpec",
-           "Plant", "DemoPlant", "Observer", "ObsContext", "ObsSpec", "OBSERVABLES", "discover"]
+           "Plant", "DemoPlant", "Observer", "ObsContext", "ObsSpec", "OBSERVABLES",
+           "Arbiter", "discover"]

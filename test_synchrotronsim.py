@@ -1696,5 +1696,57 @@ class TestObserver(unittest.TestCase):
             obsmod._INTERMEDIATES.pop("_test_shared", None)
 
 
+class TestArbiter(unittest.TestCase):
+    """Слой Arbiter: дефолт = сумма по слотам (бит-в-бит), кастомный combine, конвейер stages, выгрузка sink,
+    и что планировщик реально зовёт combine (команда) и publish (выгрузка) на каждом такте."""
+
+    def test_default_is_sum(self):
+        from control import Arbiter, ExperimentState, Schema
+        st = ExperimentState(Schema(["a", "b"]))
+        st.config.v[:] = [1.0, 2.0]
+        st.slot("l1").v[:] = [0.1, 0.0]
+        st.slot("l2").v[:] = [0.0, 0.3]
+        req = Arbiter().combine(st)
+        np.testing.assert_allclose(req, st.effective_target())        # дефолт == прежнее поведение
+        np.testing.assert_allclose(req, [1.1, 2.3])
+
+    def test_custom_combine_and_stage(self):
+        from control import Arbiter, ExperimentState, Schema
+        st = ExperimentState(Schema(["a", "b"]))
+        st.config.v[:] = [5.0, 5.0]
+        st.slot("l1").v[:] = [1.0, 1.0]
+        arb = Arbiter(combine=lambda s: s.config.v.copy(),            # свой закон: игнорирует слоты
+                      stages=[lambda s, req: req + 1.0])              # конвейер: +1 (место модели токов)
+        np.testing.assert_allclose(arb.combine(st), [6.0, 6.0])
+
+    def test_publish_sink(self):
+        from control import Arbiter, ExperimentState, Schema
+        st = ExperimentState(Schema(["a"]))
+        seen = {"n": 0}
+        Arbiter().publish(st)                                         # дефолт no-op — не падает
+        Arbiter(sink=lambda s: seen.__setitem__("n", seen["n"] + 1)).publish(st)
+        self.assertEqual(seen["n"], 1)
+
+    def test_scheduler_routes_through_arbiter(self):
+        from control import Arbiter, ExperimentState, Scheduler, DemoPlant
+        calls = {"combine": 0, "publish": 0}
+
+        class Spy(Arbiter):
+            def combine(self, state):
+                calls["combine"] += 1
+                return super().combine(state)
+
+            def publish(self, state):
+                calls["publish"] += 1
+                return super().publish(state)
+
+        plant = DemoPlant(n_corr=4, n_bpm=6)
+        state = ExperimentState(plant.schema(), history=plant.history())
+        sch = Scheduler(plant, state, dt=1.0, arbiter=Spy())
+        sch.run(3)
+        self.assertEqual(calls["combine"], 3)                         # команда собрана на каждом такте
+        self.assertEqual(calls["publish"], 3)                         # выгрузка вызвана на каждом такте
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")

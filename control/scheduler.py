@@ -17,6 +17,7 @@ import numpy as np
 
 from .state import StateView
 from .controller import Resources, Controller, SlotWriter
+from .arbiter import Arbiter
 
 
 @dataclass
@@ -29,11 +30,12 @@ class LoopSpec:
 
 
 class Scheduler:
-    def __init__(self, plant, state, dt, resources=None, log=None):
+    def __init__(self, plant, state, dt, resources=None, log=None, arbiter=None):
         self.plant = plant
         self.state = state
         self.dt = dt
         self.resources = resources if resources is not None else Resources(plant)
+        self.arbiter = arbiter if arbiter is not None else Arbiter()   # сборка команды (дефолт = Σ слотов)
         self.loops = {}
         self.tick = 0
         self._log_ids = list(log or [])
@@ -58,7 +60,7 @@ class Scheduler:
             spec.mode = mode
 
     def step(self):
-        view = StateView(self.state)
+        view = StateView(self.state, self.arbiter)
         for name, spec in self.loops.items():
             slot = self.state.slot(name)
             if spec.enabled and (self.tick % spec.period == 0):
@@ -74,9 +76,10 @@ class Scheduler:
             elif not spec.enabled and spec.mode == "release":
                 slot.v[:] = 0.0
             # freeze: слот остаётся как был
-        req = self.state.effective_target()
+        req = self.arbiter.combine(self.state)                         # слоты → единая команда (дефолт = Σ)
         self.state.actual.v = self.state.limits.apply(self.state.actual.v, req, self.dt)
         self.plant.step(self.state, self.dt)
+        self.arbiter.publish(self.state)                               # выгрузка наружу (дефолт no-op)
         for k in self._log_ids:
             val = self.state.observables.get(k)
             self.log[k].append(float(np.sqrt(np.mean(np.asarray(val) ** 2))) if val is not None else np.nan)

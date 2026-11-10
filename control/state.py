@@ -218,8 +218,9 @@ class ExperimentState:
 class StateView:
     """Read-only представление состояния для регулятора (пишет он только через возврат update)."""
 
-    def __init__(self, state):
+    def __init__(self, state, arbiter=None):
         self._s = state
+        self._arb = arbiter               # тот же сборщик команды, что у планировщика (None → сумма слотов)
 
     @property
     def t(self):
@@ -265,4 +266,5 @@ class StateView:
         return self._s.refs.get(name)
 
     def target(self):
-        return StateVector(self._s.schema, self._s.effective_target())
+        v = self._arb.combine(self._s) if self._arb is not None else self._s.effective_target()
+        return StateVector(self._s.schema, v)
