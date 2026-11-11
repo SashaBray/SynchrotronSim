@@ -23,7 +23,7 @@ import numpy as np
 
 import ring_map as rmap
 
-from .state import Schema, History
+from .state import Schema, History, UndulatorConfig, _undulator_sr
 from .controller import ResponseMatrix
 from .ring_model import RingModel
 from .observer import Observer, ObsContext
@@ -33,7 +33,7 @@ FD_EPS = 1e-3                                                  # шаг коне
 
 class OpticsPlant:
     def __init__(self, model=None, lattice=26, nsl=8, observe=("tune", "chroma", "adts"),
-                 drift_k1=0.0, drift_k2=0.0, drift_k3=0.0, rho=1.0, seed=1, order=4, observer=None):
+                 drift_k1=0.0, drift_k2=0.0, drift_k3=0.0, rho=1.0, seed=1, order=4, gap_mm=5.0, observer=None):
         self.own = model is None
         self.rm = model if model is not None else RingModel(lattice=lattice, nsl=nsl)
         self.observe = tuple(observe); self.order = order
@@ -57,9 +57,16 @@ class OpticsPlant:
         self._rng = np.random.default_rng(seed); self._a = np.zeros(3)
         # Observer собирает наблюдаемые из возмущённого кольца; дефолт — подписка = observe
         self.observer = observer or Observer(subscribe=list(self.observe))
+        # зазор ондулятора → фокус UFC (k1/k1v ∝ K²) → отклик ТЮНА; UFC↔ондулятор по s-порядку
+        self.gap_mm = float(gap_mm); self.gap_ref = 5.0
+        _sr = _undulator_sr()
+        self._K_ref = float(_sr.K_of_B0(_sr.B0_of_gap(self.gap_ref))) if _sr is not None else None
+        _ufc_idx = sorted(i for i, m in enumerate(mags) if str(getattr(m, "dev", "") or "") == "und_UFC")
+        self._ufc = [(i, float(getattr(mags[i], "k1", 0.0) or 0.0), float(getattr(mags[i], "k1v", 0.0) or 0.0),
+                      f"und_{k + 1:02d}") for k, i in enumerate(_ufc_idx)]
 
     # ---- аналитическая оценка оптики на возмущённом кольце ----
-    def _perturbed(self, pk1, pk2, pk3):
+    def _perturbed(self, pk1, pk2, pk3, gaps=None):
         pr = copy.copy(self.base); mags = list(self.base.mags)
         touched = {}                                          # копируем магнит один раз, даже если его трогают несколько каналов
 
@@ -77,6 +84,14 @@ class OpticsPlant:
         for fld, pk in (("k2", pk2), ("k3", pk3)):             # секступоль/октуполь — одна компонента, без v-пары
             for i, dv in pk.items():
                 m = _edit(i); setattr(m, fld, float(getattr(m, fld, 0.0) or 0.0) + dv)
+        if gaps and self._ufc and self._K_ref:                 # зазор ондулятора → фокус UFC (k1/k1v ∝ K²)
+            _sr = _undulator_sr()
+            for i, k1n, k1vn, gid in self._ufc:
+                g = gaps.get(gid)
+                if g is None or _sr is None or abs(g - self.gap_ref) < 1e-9:
+                    continue
+                fac = (_sr.K_of_B0(_sr.B0_of_gap(g)) / self._K_ref) ** 2
+                m = _edit(i); m.k1 = k1n * fac; m.k1v = k1vn * fac
         for i, m in touched.items():
             mags[i] = m
         pr.mags = mags
@@ -84,7 +99,9 @@ class OpticsPlant:
 
     def _ctx(self, pk1, pk2, pk3, state=None):
         """Контекст наблюдателя на ВОЗМУЩЁННОМ кольце (общие промежуточные: карта оборота считается раз)."""
-        return ObsContext(state, self, ring=self._perturbed(pk1, pk2, pk3), order=self.order)
+        gaps = ({gid: c.gap_mm for gid, c in state.undulators.items()}
+                if state is not None and state.undulators else None)      # живые зазоры → фокус UFC → тюн
+        return ObsContext(state, self, ring=self._perturbed(pk1, pk2, pk3, gaps), order=self.order)
 
     def _optics(self, pk1, pk2, pk3, only=None):
         """Посчитать наблюдаемые через реестр Observer'а (для build_response/nominal)."""
@@ -129,7 +146,19 @@ class OpticsPlant:
         return History(["opt"], moments=("x",))               # оптике history не нужен; формальная заглушка
 
     def reset(self, state):
+        self._seed_undulators(state)
         self._a = np.zeros(3); self._advance(); self._measure(state)
+
+    def _seed_undulators(self, state):
+        """Живые зазоры ондуляторов на доску (по group_id), дефолт self.gap_mm — видят контуры."""
+        try:
+            import errors as er
+            for g in er.load_groups(self.rm.lattice):
+                gid = g.get("group_id")
+                if gid and gid not in state.undulators:
+                    state.undulators[gid] = UndulatorConfig(self.gap_mm, name=gid)
+        except Exception:
+            pass
 
     def step(self, state, dt):
         self._advance(); self._measure(state)

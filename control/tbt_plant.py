@@ -32,7 +32,7 @@ import facility_report as fr
 import ring_analysis as ra
 import disturbance as dist
 
-from .state import Schema, History, BeamSnapshot
+from .state import Schema, History, BeamSnapshot, UndulatorConfig
 from .controller import ResponseMatrix
 from .ring_model import RingModel
 from .observer import Observer, ObsContext
@@ -45,8 +45,9 @@ PHASE_DEG = 165.0                                             # фаза ВЧ д
 class TbtPlant:
     def __init__(self, lattice=26, nsl=8, n_part=NP, stride=STRIDE, dist_amp=0.3e-6,
                  dist_rho=1.0, meas_noise=0.0, settle_turns=300, seed=1, dist_seed=11, n_photon=8,
-                 avg_chunks=9, resp_dims=4, sr=True, disturbance_spec=None, observer=None):
+                 avg_chunks=9, resp_dims=4, sr=True, disturbance_spec=None, gap_mm=5.0, observer=None):
         self.stride = stride
+        self.gap_mm = float(gap_mm)                           # стартовый зазор ондуляторов (мм); живёт в state.undulators
         self.sr = bool(sr)                                    # СИ вкл/выкл (режим 2: затухание vs сохранение)
         self.meas_noise = meas_noise
         self.settle_turns = settle_turns
@@ -283,6 +284,19 @@ class TbtPlant:
         self._measure(state, self._snapshot())
         state.beam = BeamSnapshot(self._snap_buf, self.magnets)    # пучок по всей линии (снимок+среднее), окно обновляется на месте
         state.machine = MachineView(self)                          # lazy-доступ к положению/полю магнитов
+        self._seed_undulators(state)                               # живые зазоры ондуляторов на доску (видят контуры)
+
+    def _seed_undulators(self, state):
+        """Заполнить state.undulators живыми зазорами по group_id ондуляторов (дефолт self.gap_mm).
+        Контуры видят их через StateView.undulators; зазор правится на лету и читается рекордерами."""
+        try:
+            import errors as er
+            for g in er.load_groups(self.lattice):
+                gid = g.get("group_id")
+                if gid and gid not in state.undulators:
+                    state.undulators[gid] = UndulatorConfig(self.gap_mm, name=gid)
+        except Exception:
+            pass
 
     def step(self, state, dt):
         self._t = float(state.t); self._dt = float(dt)        # время/шаг для временных законов Disturbance

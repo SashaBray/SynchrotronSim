@@ -87,34 +87,53 @@ class PhaseRecorder(Recorder):
 class ScreenRecorder(Recorder):
     """Интерференционная картина на экране за ондулятором — ТЯЖЁЛАЯ опциональная диагностика.
 
-    Клон физики `control/interference_compare.py`: чистую когерентную картину 1-й гармоники считаем раз,
-    а угловой разброс пучка берём ИЗ ЖИВОГО ПРОГОНА — блуждание пятна источника photon.x/y по окнам
-    (σ пятна / D = угловой смаз), складываем в квадратуре к собственной расходимости и штатно размываем
-    `screen_map`. Пишем идеальную и измеренную карты в `.npz` + пики/джиттер в результаты.
-    УПРОЩЕНИЕ v1: картина на оси (как interference_compare), источник = photon[0]; геометрия экрана из
-    `screens.csv` даёт только плечо D (params = screen_id)."""
+    Клон физики `control/interference_compare.py`, но зазор теперь ЖИВОЙ: каждое окно читаем зазор своего
+    ондулятора из `state.undulators` (источник экрана — колонка `source` в `screens.csv`), поэтому смена
+    зазора в прогоне СДВИГАЕТ картину (K→E₁→конус/поток). Угловой разброс пучка берём из живого прогона
+    (блуждание пятна photon.x/y по окнам, σ/D = смаз угла), складываем в квадратуре к расходимости и
+    размываем `screen_map`. В артефакт пишем картины при НАЧАЛЬНОМ и КОНЕЧНОМ зазоре + измеренную, в
+    результаты — ряд E₁(окно) и резкость. Нет живого зазора на доске → fallback на зашитый GAP_MM.
+    УПРОЩЕНИЕ v1: картина на оси, источник = photon[0]; геометрия экрана из `screens.csv` даёт плечо D."""
 
     def __init__(self, params="", cadence="final", mesh=121, **kw):
         super().__init__(params, cadence)
         self.mesh = int(mesh)
         self._spot = []
+        self._gapser = []                                    # (widx, gap_mm) по окнам — как зазор менялся
+        self._srcname = None                                 # кэш имени ондулятора-источника экрана
 
     def sample(self, state, widx, plant):
         px = state.observables.get("photon.x"); py = state.observables.get("photon.y")
         if px is not None and py is not None and len(np.ravel(px)):
             self._spot.append((float(np.ravel(px)[0]), float(np.ravel(py)[0])))
+        self._gapser.append((int(widx), self._live_gap(state)))
 
-    def _screen_dist(self, screen_id):
+    def _screen_row(self, screen_id):
         path = os.path.join(_ROOT, "workspace", "tables", "screens.csv")
         if screen_id and os.path.exists(path):
             with open(path, encoding="utf-8-sig") as f:
                 for r in csv.DictReader(f, delimiter=";"):
                     if (r.get("screen_id") or "").strip() == screen_id:
-                        try:
-                            return float(r.get("dist_m") or D_DEFAULT)
-                        except ValueError:
-                            break
-        return D_DEFAULT
+                        return r
+        return {}
+
+    def _screen_dist(self, screen_id):
+        try:
+            return float(self._screen_row(screen_id).get("dist_m") or D_DEFAULT)
+        except (ValueError, TypeError):
+            return D_DEFAULT
+
+    def _screen_source(self, screen_id):
+        if self._srcname is None:                            # замороженная screens.csv: source_ref; манифест: source
+            r = self._screen_row(screen_id)
+            self._srcname = (r.get("source_ref") or r.get("source") or "").strip()
+        return self._srcname
+
+    def _live_gap(self, state):
+        """Зазор ондулятора-источника экрана из живой доски; нет записи → зашитый GAP_MM."""
+        src = self._screen_source(self.params)
+        u = (getattr(state, "undulators", None) or {}).get(src)
+        return float(u.gap_mm) if u is not None else GAP_MM
 
     def finalize(self, state, plant):
         import sys
@@ -123,33 +142,50 @@ class ScreenRecorder(Recorder):
         from undulator_field import trajectory, calibrate
         from screen_spectrum import beam_params, screen_map
 
-        D = self._screen_dist(self.params)
-        B0 = sr.B0_of_gap(GAP_MM); K = sr.K_of_B0(B0); g = sr.gamma()
-        tr = trajectory(K, sr.P.lam_u, sr.P.N, g, 64); scale, _ = calibrate(tr)
-        E0 = float(sr.harmonic_energy_keV(1, K, 0.0)); srp = float(sr.sigma_photon(E0)[1])
-        beam0 = beam_params(sr.P, BETA_X, BETA_Y, sr.P.kappa, sr.P.sig_E)
+        D = self._screen_dist(self.params); g = sr.gamma()
+        gap_start = self._gapser[0][1] if self._gapser else self._live_gap(state)
+        gap_end = self._gapser[-1][1] if self._gapser else gap_start
 
         spot = np.asarray(self._spot, float) if self._spot else np.zeros((1, 2))
         jx = float(np.std(spot[:, 0])) / D; jy = float(np.std(spot[:, 1])) / D   # смаз угла из блуждания пятна
-        window = max(8.0 * srp, 4.0 * math.hypot(jx, jy) + 1e-12)
         axis = np.array([0.0, 0.0, 1.0]); uhat = np.array([1.0, 0.0, 0.0]); vhat = np.array([0.0, 1.0, 0.0])
         P = np.zeros(3)
+        beam0 = beam_params(sr.P, BETA_X, BETA_Y, sr.P.kappa, sr.P.sig_E)
 
-        def pattern(ax_, ay_):
+        def e1_of(gap_mm):
+            return float(sr.harmonic_energy_keV(1, sr.K_of_B0(sr.B0_of_gap(gap_mm)), 0.0))
+
+        def pattern_at(gap_mm, ax_, ay_):
+            K = sr.K_of_B0(sr.B0_of_gap(gap_mm))
+            tr = trajectory(K, sr.P.lam_u, sr.P.N, g, 64); scale, _ = calibrate(tr)
+            E0 = float(sr.harmonic_energy_keV(1, K, 0.0)); srp = float(sr.sigma_photon(E0)[1])
+            window = max(8.0 * srp, 4.0 * math.hypot(ax_, ay_) + 1e-12)
             b = dict(beam0); b["sxp"] = math.hypot(beam0["sxp"], ax_); b["syp"] = math.hypot(beam0["syp"], ay_)
             mp = screen_map(tr, scale, P, (axis, uhat, vhat), axis, D, np.array([E0]), self.mesh, window, b)
             I = mp["I"][..., 0] if np.asarray(mp["I"]).ndim == 3 else mp["I"]
-            return np.asarray(I, float), float(mp["peak"]), np.asarray(mp["extent"], float)
+            return np.asarray(I, float), float(mp["peak"]), np.asarray(mp["extent"], float), E0, window
 
-        Ii, pk_i, ext = pattern(0.0, 0.0)
-        Im, pk_m, _ = pattern(jx, jy)
-        self._art = ("screen", {"ideal": Ii, "measured": Im, "extent": ext,
-                                "jitter_urad": np.array([jx * 1e6, jy * 1e6]), "D_m": np.array([D]),
-                                "energy_keV": np.array([E0]), "window_mm": np.array([window * D * 1e3])},
-                     f"screen={self.params} E={E0:.2f}keV")
-        self.rows += [("screen.peak_ideal", 0, pk_i), ("screen.peak_meas", 0, pk_m),
-                      ("screen.jitter_x_urad", 0, jx * 1e6), ("screen.jitter_y_urad", 0, jy * 1e6),
-                      ("screen.sharpness_pct", 0, (pk_m / pk_i * 100.0) if pk_i else 0.0)]
+        Istart, pk_s, ext, E1_s, _ = pattern_at(gap_start, 0.0, 0.0)     # идеал при НАЧАЛЬНОМ зазоре
+        Iend, pk_e, ext_e, E1_e, win_e = pattern_at(gap_end, 0.0, 0.0)   # идеал при КОНЕЧНОМ зазоре
+        Imeas, pk_m, _, _, _ = pattern_at(gap_end, jx, jy)               # измеренный (джиттер) при конечном зазоре
+
+        series = np.asarray([[w, gp, e1_of(gp)] for w, gp in self._gapser], float) if self._gapser \
+            else np.zeros((0, 3))
+        self._art = ("screen", {"ideal_start": Istart, "ideal_end": Iend, "measured": Imeas,
+                                "extent": ext_e, "jitter_urad": np.array([jx * 1e6, jy * 1e6]),
+                                "D_m": np.array([D]), "gap_start_mm": np.array([gap_start]),
+                                "gap_end_mm": np.array([gap_end]), "energy_start_keV": np.array([E1_s]),
+                                "energy_end_keV": np.array([E1_e]), "gap_series": series,
+                                "window_mm": np.array([win_e * D * 1e3])},
+                     f"screen={self.params} зазор {gap_start:.1f}->{gap_end:.1f}мм E1 {E1_s:.2f}->{E1_e:.2f}кэВ")
+        self.rows += [("screen.gap_start_mm", 0, gap_start), ("screen.gap_end_mm", 0, gap_end),
+                      ("screen.E1_start_keV", 0, E1_s), ("screen.E1_end_keV", 0, E1_e),
+                      ("screen.peak_meas", 0, pk_m), ("screen.jitter_x_urad", 0, jx * 1e6),
+                      ("screen.jitter_y_urad", 0, jy * 1e6),
+                      ("screen.sharpness_pct", 0, (pk_m / pk_e * 100.0) if pk_e else 0.0)]
+        for w, gp in self._gapser:                                       # ряд: как E₁ и зазор едут по окнам
+            self.rows.append(("screen.gap_mm", int(w), float(gp)))
+            self.rows.append(("screen.E1_keV", int(w), e1_of(gp)))
 
 
 class VectorRecorder(Recorder):

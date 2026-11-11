@@ -151,6 +151,50 @@ class NoiseModel:
         return self
 
 
+_SR_MOD = None
+
+
+def _undulator_sr():
+    """Ленивая загрузка `undulator_sr` (лежит в undulators/) — чтобы ядро control/ не зависело от него жёстко."""
+    global _SR_MOD
+    if _SR_MOD is None:
+        try:
+            import os
+            import sys
+            sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "undulators"))
+            import undulator_sr as _m
+            _SR_MOD = _m
+        except Exception:
+            _SR_MOD = False
+    return _SR_MOD or None
+
+
+class UndulatorConfig:
+    """ЖИВАЯ настройка ондулятора на доске: ЗАЗОР (мм) + производные B0/K (lazy, через `undulator_sr`).
+
+    Кладётся в `ExperimentState.undulators[<имя>]` (имя = group_id ондулятора, напр. 'und_01'). plant и
+    рекордеры читают её НА КАЖДОМ такте/окне, поэтому правка зазора на лету (оператором, расписанием,
+    возмущением или будущим контуром зазора) подхватывается без пересоздания plant'а. Контур видит её
+    через `StateView.undulators`: зазор можно и читать, и двигать, записав новое `gap_mm`.
+
+    K/B0 считаются ОТ `gap_mm` на запрос (а не кэшируются), поэтому меняются сразу при правке зазора."""
+
+    def __init__(self, gap_mm, name=None, **extra):
+        self.gap_mm = float(gap_mm)
+        self.name = name
+        self.extra = dict(extra)              # место под пер-прибор настройки (фаза, качество, вкл/выкл)
+
+    def B0(self):
+        """Пиковое поле при текущем зазоре, Т (ролл-офф из undulator_sr); None, если модуль недоступен."""
+        sr = _undulator_sr()
+        return float(sr.B0_of_gap(self.gap_mm)) if sr is not None else None
+
+    def K(self):
+        """Параметр отклонения K при текущем зазоре; None, если модуль недоступен."""
+        sr = _undulator_sr()
+        return float(sr.K_of_B0(sr.B0_of_gap(self.gap_mm))) if sr is not None else None
+
+
 class BeamSnapshot:
     """Пучок по ВСЕЙ линии: центроид (x,px,y,py,z,δ) на КАЖDОЙ границе элемента + бегущее среднее по окну.
     Хранит ОКНО снимков (ссылки на массивы plant'а, не копии); `snap` = последний, `avg` считается lazy.
@@ -196,6 +240,7 @@ class ExperimentState:
         self.observables = {}                        # id сенсора -> ndarray (показания)
         self.refs = {}                               # уставки между контурами (напр. golden orbit): имя -> ndarray
         self.sensors = {}                            # id сенсора/группы -> SensorConfig (ЖИВЫЕ настройки сенсоров)
+        self.undulators = {}                         # имя ондулятора -> UndulatorConfig (ЖИВОЙ зазор, видят контуры)
         self.noise = None                            # NoiseModel — ЗАКОН генерации шума (живой), или None
         self.beam = None                             # BeamSnapshot — пучок по всей линии (снимок+среднее), ставит plant
         self.machine = None                          # lazy-доступ к магнитам (позиция/поле), ставит plant
@@ -256,6 +301,11 @@ class StateView:
     def sensors(self):
         """Живые настройки сенсоров (id → SensorConfig)."""
         return self._s.sensors
+
+    @property
+    def undulators(self):
+        """Живые настройки ондуляторов (имя → UndulatorConfig): зазор + K/B0. Контур читает и может двигать зазор."""
+        return self._s.undulators
 
     def read(self, observable_id):
         """Показание сенсора (ndarray) или None, если ещё не измерено."""

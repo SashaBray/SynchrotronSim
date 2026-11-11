@@ -1748,5 +1748,49 @@ class TestArbiter(unittest.TestCase):
         self.assertEqual(calls["publish"], 3)                         # выгрузка вызвана на каждом такте
 
 
+class TestUndulatorGap(unittest.TestCase):
+    """Живой зазор ондулятора: структура данных (видят контуры), gap→K→E₁, ScreenRecorder читает живой зазор."""
+
+    def test_gap_visible_to_control_and_K_monotonic(self):
+        from control import UndulatorConfig, ExperimentState, Schema, StateView
+        st = ExperimentState(Schema(["a"]))
+        st.undulators["und_01"] = UndulatorConfig(5.0, name="und_01")
+        u = StateView(st).undulators["und_01"]                # контур видит зазор через StateView
+        self.assertEqual(u.gap_mm, 5.0)
+        k5 = u.K()
+        u.gap_mm = 10.0                                        # двигаем зазор на лету
+        k10 = u.K()
+        self.assertIsNotNone(k5); self.assertIsNotNone(k10)
+        self.assertLess(k10, k5)                              # открыли зазор → K упал (поле слабее), пересчёт живой
+
+    def test_gap_raises_harmonic_energy(self):
+        """Открытие зазора (K↓) монотонно поднимает энергию 1-й гармоники E₁; E₁(5мм)≈7 кэВ."""
+        import control.state as cs
+        sr = cs._undulator_sr()
+        if sr is None:
+            self.skipTest("undulator_sr недоступен")
+        e = lambda g: sr.harmonic_energy_keV(1, sr.K_of_B0(sr.B0_of_gap(g)), 0.0)
+        es = [e(g) for g in (5.0, 7.0, 10.0, 15.0)]
+        self.assertTrue(all(b > a for a, b in zip(es, es[1:])))   # монотонно растёт с зазором
+        self.assertAlmostEqual(es[0], 7.0, delta=0.6)
+
+    def test_screen_recorder_reads_live_gap(self):
+        """ScreenRecorder берёт зазор ондулятора-источника из state.undulators — разный зазор → разная E₁."""
+        from control import UndulatorConfig, ExperimentState, Schema
+        from control.recorders import ScreenRecorder
+        st = ExperimentState(Schema(["a"]))
+        st.undulators["und_19"] = UndulatorConfig(5.0, name="und_19")
+        st.observables["photon.x"] = np.array([1e-7]); st.observables["photon.y"] = np.array([1e-7])
+        rec = ScreenRecorder(params="SCR_U19", mesh=31)
+        rec.sample(st, 0, None)                               # зазор 5 мм
+        st.undulators["und_19"].gap_mm = 15.0
+        rec.sample(st, 1, None)                               # зазор 15 мм (живая правка)
+        rec.finalize(st, None)
+        art = rec.artifact()[1]
+        self.assertAlmostEqual(float(art["gap_start_mm"][0]), 5.0)
+        self.assertAlmostEqual(float(art["gap_end_mm"][0]), 15.0)
+        self.assertGreater(float(art["energy_end_keV"][0]), float(art["energy_start_keV"][0]))  # E₁ выросла с зазором
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")
