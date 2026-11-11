@@ -1809,6 +1809,16 @@ class TestUndulatorGap(unittest.TestCase):
             u.advance(2.0)
         self.assertAlmostEqual(u.gap_mm, 20.0)
 
+    def test_orbit_kick_residual(self):
+        """Остаточный орбитный кик от зазора: 0 при идеальном замыкании; ненулевой ~мкрад и убывает с открытием."""
+        from control import UndulatorConfig
+        self.assertEqual(UndulatorConfig(5.0).orbit_kick_rad(), 0.0)      # i1_residual=0 → идеально замкнут, кика нет
+        u = UndulatorConfig(5.0, i1_residual=3e-5)
+        k5 = u.orbit_kick_rad()
+        self.assertGreater(abs(k5), 0.0); self.assertLess(abs(k5), 1e-5)  # есть кик, масштаб ~мкрад
+        u.gap_mm = 15.0
+        self.assertLess(abs(u.orbit_kick_rad()), abs(k5))                 # открыли зазор → B0↓ → кик меньше
+
 
 class TestOpticsView(unittest.TestCase):
     """state.optics: OpticsView отдаёт твисс по s и по имени магнита (без кольца, фейковый твисс)."""

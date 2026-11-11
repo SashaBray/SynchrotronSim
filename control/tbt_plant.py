@@ -85,6 +85,9 @@ class TbtPlant:
             self.Hcy = self._build_resp_6d("ebpm.y", "vkick")
         self.CO = ra.closed_orbit(self.ring, dims=6)
         self.TREV = float(inf.get("t_rev", 0.0)) or self._trev_from_ring()
+        # якоря ондуляторов для остаточного орбитного кика (гэп-зависимый I1): dev=und_UFC, s-порядок ↔ group_id
+        _ufc = sorted(i for i, m in enumerate(self.ring.mags) if str(getattr(m, "dev", "") or "") == "und_UFC")
+        self._und_anchor = {f"und_{k + 1:02d}": i for k, i in enumerate(_ufc)}
 
         # --- многоканальное возмущение из disturbance_spec (режим 4): plant владеет Disturbance,
         #     вливаем её в kick_lists каждый шаг. При spec=None — прежний скалярный путь PATX/PATY.
@@ -222,6 +225,12 @@ class TbtPlant:
                 else:
                     extra[key] = extra.get(key, []) + rows
             self._applied = {"dx": dx, "dy": dy, "field": fld}   # read-only снимок возмущения для state.machine
+        for gid, idx in self._und_anchor.items():             # остаточный кик орбиты от зазора ондулятора (неид. замыкание)
+            u = state.undulators.get(gid)
+            if u is not None:
+                k = u.orbit_kick_rad()
+                if k:
+                    vv.append((idx, float(k)))
         return kk, vv, extra
 
     def _apply(self, state):

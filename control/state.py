@@ -217,14 +217,26 @@ class UndulatorConfig:
     (`advance`). Зазор НЕ телепортируется; привод челюстей медленный (секунды) против динамики пучка (мкс).
     K/B0 считаются ОТ реализованного `gap_mm` на запрос, поэтому отражают реальное положение привода."""
 
-    def __init__(self, gap_mm, name=None, slew_mm_s=0.5, gap_min=5.0, gap_max=20.0, **extra):
+    def __init__(self, gap_mm, name=None, slew_mm_s=0.5, gap_min=5.0, gap_max=20.0, i1_residual=0.0, **extra):
         self.gap_mm = float(gap_mm)           # РЕАЛИЗОВАННЫЙ зазор — его видит модель (B0/K/картина/фокус)
         self.gap_target = float(gap_mm)       # УСТАВКА привода — её задаёт оператор/контур (command)
         self.slew_mm_s = float(slew_mm_s)     # макс |Δзазор|/с: скорость привода челюстей; inf = мгновенно
         self.gap_min = float(gap_min)         # ОДЗ (ход привода): минимальный зазор
         self.gap_max = float(gap_max)         # ОДЗ: максимальный зазор
+        self.i1_residual = float(i1_residual) # относит. остаточный ∫B dz (неидеальное замыкание); 0 = идеально замкнут
         self.name = name
         self.extra = dict(extra)              # место под пер-прибор настройки (фаза, качество, вкл/выкл)
+
+    def orbit_kick_rad(self):
+        """Остаточный ВЕРТ. кик орбиты от неидеального замыкания: i1_residual·B0(gap)·L/Bρ (рад). Зависит от
+        зазора (B0↓ с открытием) → сканирование зазора возмущает орбиту, FOFB парирует. 0 = идеальный ондулятор."""
+        if not self.i1_residual:
+            return 0.0
+        sr = _undulator_sr()
+        if sr is None:
+            return 0.0
+        brho = sr.P.E / 0.299792458           # Т·м при энергии пучка
+        return self.i1_residual * float(sr.B0_of_gap(self.gap_mm)) * float(sr.P.L) / brho
 
     def command(self, gap_mm):
         """Задать УСТАВКУ зазора (клип в ОДЗ). Привод поедет к ней со скоростью slew_mm_s — см. advance."""
