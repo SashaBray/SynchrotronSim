@@ -161,6 +161,8 @@ class OpticsPlant:
             pass
 
     def step(self, state, dt):
+        for c in state.undulators.values():                   # привод зазора ондулятора (ограничение скорости челюстей)
+            c.advance(dt)
         self._advance(); self._measure(state)
 
     def build_response(self, actuators, observables):

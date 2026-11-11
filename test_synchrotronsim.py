@@ -1791,6 +1791,24 @@ class TestUndulatorGap(unittest.TestCase):
         self.assertAlmostEqual(float(art["gap_end_mm"][0]), 15.0)
         self.assertGreater(float(art["energy_end_keV"][0]), float(art["energy_start_keV"][0]))  # E₁ выросла с зазором
 
+    def test_gap_drive_slew_and_odz(self):
+        """Привод: реализованный зазор едет к уставке со скоростью slew (не телепорт), клип в ОДЗ; уставка==старт → стоит."""
+        from control import UndulatorConfig
+        u = UndulatorConfig(5.0, slew_mm_s=0.5, gap_min=5.0, gap_max=20.0)
+        u.advance(2.0)
+        self.assertEqual(u.gap_mm, 5.0)                   # уставка==старт → привод стоит (no-op)
+        u.command(15.0)
+        u.advance(2.0)                                     # 0.5 мм/с × 2 с = 1 мм (не телепорт)
+        self.assertAlmostEqual(u.gap_mm, 6.0)
+        for _ in range(100):
+            u.advance(2.0)
+        self.assertAlmostEqual(u.gap_mm, 15.0)            # доехал до уставки и встал
+        u.command(999.0)                                   # уставка за пределом ОДЗ
+        self.assertAlmostEqual(u.gap_target, 20.0)        # клипнута в ОДЗ (ход челюстей)
+        for _ in range(200):
+            u.advance(2.0)
+        self.assertAlmostEqual(u.gap_mm, 20.0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")

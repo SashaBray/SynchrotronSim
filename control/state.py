@@ -175,14 +175,37 @@ class UndulatorConfig:
     Кладётся в `ExperimentState.undulators[<имя>]` (имя = group_id ондулятора, напр. 'und_01'). plant и
     рекордеры читают её НА КАЖДОМ такте/окне, поэтому правка зазора на лету (оператором, расписанием,
     возмущением или будущим контуром зазора) подхватывается без пересоздания plant'а. Контур видит её
-    через `StateView.undulators`: зазор можно и читать, и двигать, записав новое `gap_mm`.
+    через `StateView.undulators`: читать `gap_mm` и ЗАДАВАТЬ уставку `command(gap)` — её контур/оператор.
 
-    K/B0 считаются ОТ `gap_mm` на запрос (а не кэшируются), поэтому меняются сразу при правке зазора."""
+    ПРИВОД С ОГРАНИЧЕНИЕМ СКОРОСТИ (как `Limits.slew` у корректоров): реализованный `gap_mm` едет к уставке
+    `gap_target` со скоростью ≤ `slew_mm_s` (клип в ОДЗ `gap_min..gap_max`), plant двигает его каждый такт
+    (`advance`). Зазор НЕ телепортируется; привод челюстей медленный (секунды) против динамики пучка (мкс).
+    K/B0 считаются ОТ реализованного `gap_mm` на запрос, поэтому отражают реальное положение привода."""
 
-    def __init__(self, gap_mm, name=None, **extra):
-        self.gap_mm = float(gap_mm)
+    def __init__(self, gap_mm, name=None, slew_mm_s=0.5, gap_min=5.0, gap_max=20.0, **extra):
+        self.gap_mm = float(gap_mm)           # РЕАЛИЗОВАННЫЙ зазор — его видит модель (B0/K/картина/фокус)
+        self.gap_target = float(gap_mm)       # УСТАВКА привода — её задаёт оператор/контур (command)
+        self.slew_mm_s = float(slew_mm_s)     # макс |Δзазор|/с: скорость привода челюстей; inf = мгновенно
+        self.gap_min = float(gap_min)         # ОДЗ (ход привода): минимальный зазор
+        self.gap_max = float(gap_max)         # ОДЗ: максимальный зазор
         self.name = name
         self.extra = dict(extra)              # место под пер-прибор настройки (фаза, качество, вкл/выкл)
+
+    def command(self, gap_mm):
+        """Задать УСТАВКУ зазора (клип в ОДЗ). Привод поедет к ней со скоростью slew_mm_s — см. advance."""
+        self.gap_target = min(max(float(gap_mm), self.gap_min), self.gap_max)
+        return self
+
+    def advance(self, dt):
+        """Продвинуть РЕАЛИЗОВАННЫЙ зазор к уставке за время dt: шаг ≤ slew·dt, клип в ОДЗ. Зовёт plant каждый такт.
+        Уставка==реализованный (дефолт) → no-op, поведение не меняется. inf-скорость → мгновенно."""
+        tgt = min(max(self.gap_target, self.gap_min), self.gap_max)
+        step = tgt - self.gap_mm
+        lim = self.slew_mm_s * float(dt)
+        if lim < abs(step):
+            step = lim if step > 0 else -lim
+        self.gap_mm = min(max(self.gap_mm + step, self.gap_min), self.gap_max)
+        return self.gap_mm
 
     def B0(self):
         """Пиковое поле при текущем зазоре, Т (ролл-офф из undulator_sr); None, если модуль недоступен."""

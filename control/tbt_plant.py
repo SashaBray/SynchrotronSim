@@ -301,6 +301,8 @@ class TbtPlant:
     def step(self, state, dt):
         self._t = float(state.t); self._dt = float(dt)        # время/шаг для временных законов Disturbance
         self._sync_noise(state)                               # живой подхват закона шума (бесконечный режим)
+        for c in state.undulators.values():                   # привод зазора: реализованный зазор едет к уставке ≤ slew
+            c.advance(dt)
         self._advance_dist()
         self._apply(state)                                    # перезовёт apply_perturb лишь при смене киков
         self._measure(state, self._snapshot())                # сенсоры ПЕРЕД продвижением (задержка в такт)
