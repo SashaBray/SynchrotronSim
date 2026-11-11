@@ -58,11 +58,13 @@ class StateVector:
 
 class Limits:
     """Ограничители по каждому параметру — модель реализуемости актуатора.
-      odz  — область допустимых значений (жёсткий клип);
-      slew — макс |Δ| в СЕКУНДУ (задаёт темп актуатора; inf = мгновенно);
-      act  — управляем ли параметр вообще (False = константа, не двигается);
-      res  — шаг квантования БП/ЦАП (0 = нет).
-    Применяется plant ОДИН раз за такт, ПОСЛЕ суммирования вкладов контуров."""
+      odz      — область допустимых значений (жёсткий клип, «ход»);
+      slew     — макс |Δ| в СЕКУНДУ (темп привода; inf = мгновенно);
+      lag_tau  — пост. времени лага 1-го порядка в СЕКУНДАХ (полоса БП + вихревые токи; 0 = без лага);
+      act      — управляем ли параметр вообще (False = константа, не двигается);
+      res      — шаг квантования БП/ЦАП (0 = нет).
+    Применяется plant ОДИН раз за такт, ПОСЛЕ суммирования вкладов контуров.
+    Порядок (как в паспорте модели ОС): задержка (в такт, у планировщика) → slew → лаг → клип ОДЗ."""
 
     def __init__(self, schema):
         n = len(schema)
@@ -70,39 +72,50 @@ class Limits:
         self.odz_lo = np.full(n, -np.inf)
         self.odz_hi = np.full(n, np.inf)
         self.slew = np.full(n, np.inf)
+        self.lag_tau = np.zeros(n)                           # пост. времени лага 1-го порядка (с); 0 = без лага
         self.act = np.ones(n, bool)
         self.res = np.zeros(n)
 
-    def set(self, pid, odz=None, slew=None, act=None, res=None):
+    def set(self, pid, odz=None, slew=None, act=None, res=None, lag_tau=None):
         i = self.schema.index(pid)
         if odz is not None:
             self.odz_lo[i], self.odz_hi[i] = odz
         if slew is not None:
             self.slew[i] = slew
+        if lag_tau is not None:
+            self.lag_tau[i] = lag_tau
         if act is not None:
             self.act[i] = act
         if res is not None:
             self.res[i] = res
 
-    def set_drive_speeds(self, by_type, default=None):
-        """Задать slew привода ПО ТИПУ актуатора (префикс id до первой точки): так КОНЕЧНУЮ скорость
-        поля получают ВСЕ магниты, а не только корректоры (для корректного моделирования ОС). Напр.
-        {'corr':1.0,'quad':0.05,'sext':0.5,'oct':2.0}; `default` — для типов вне словаря (None = не
-        трогать, остаётся inf/мгновенно). Единицы — актуатора/с (kick рад/с, Δk1/с, Δk2/с, Δk3/с).
-        Значения — ПРЕДПОЛОЖЕНИЯ (скорости нарастания БП). Возвращает число затронутых актуаторов."""
+    def set_drive_speeds(self, by_type, lag_by_type=None, default=None):
+        """Задать привод ПО ТИПУ актуатора (префикс id до первой точки): так КОНЕЧНУЮ скорость и полосу
+        получают ВСЕ магниты, а не только корректоры (для корректного моделирования ОС). `by_type` — slew
+        {'corr':1.0,'quad':0.05,'sext':0.5,'oct':2.0}; `lag_by_type` — пост. времени лага 1-го порядка
+        (τ, с) по типу; `default` — slew для типов вне словаря (None = не трогать, остаётся inf/мгновенно).
+        Единицы slew — актуатора/с (kick рад/с, Δk1/с, …). Значения — ПРЕДПОЛОЖЕНИЯ (БП). Возвращает число
+        затронутых актуаторов."""
+        lag_by_type = lag_by_type or {}
         n = 0
         for pid in self.schema.ids:
-            s = by_type.get(pid.split(".", 1)[0], default)
-            if s is not None:
-                self.set(pid, slew=float(s)); n += 1
+            t = pid.split(".", 1)[0]
+            s = by_type.get(t, default); lt = lag_by_type.get(t)
+            if s is not None or lt is not None:
+                self.set(pid, slew=(float(s) if s is not None else None),
+                         lag_tau=(float(lt) if lt is not None else None)); n += 1
         return n
 
     def apply(self, actual_v, requested_v, dt):
-        """actual → requested с ограничением скорости (slew·dt) и клипом в ОДЗ. Возврат нового actual_v."""
+        """actual → requested: slew-лимит (slew·dt) → лаг 1-го порядка (полоса БП) → клип ОДЗ → квант. Новый actual_v."""
         step = requested_v - actual_v
         m = self.slew * dt                                   # inf·dt = inf → без ограничения
         step = np.clip(step, -m, m)
-        x = actual_v + step
+        x = actual_v + step                                  # slew-ограниченная команда
+        lg = self.lag_tau > 0                                # лаг 1-го порядка: x ← α·actual + (1−α)·x, α=exp(−dt/τ)
+        if np.any(lg):
+            a = np.exp(-dt / np.where(lg, self.lag_tau, 1.0))
+            x = np.where(lg, a * actual_v + (1.0 - a) * x, x)
         x = np.clip(x, self.odz_lo, self.odz_hi)
         rr = self.res > 0
         if np.any(rr):
@@ -114,6 +127,9 @@ class Limits:
 # актуатора/с). Opt-in: state.limits.set_drive_speeds(DRIVE_SPEED_DEFAULTS). Железные квад/секступоль/
 # октуполь медленнее воздушных корректоров; точные значения — из паспортов БП, когда появятся.
 DRIVE_SPEED_DEFAULTS = {"corr": 1.0, "quad": 0.05, "sext": 0.5, "oct": 2.0}
+# пост. времени лага 1-го порядка по типу (τ, с; ПРЕДПОЛОЖЕНИЯ — 1/полоса БП+вихр.токи; железные медленнее
+# воздушных корректоров). Opt-in: state.limits.set_drive_speeds(DRIVE_SPEED_DEFAULTS, DRIVE_LAG_DEFAULTS).
+DRIVE_LAG_DEFAULTS = {"corr": 2e-4, "quad": 0.1, "sext": 0.05, "oct": 0.02}
 
 
 class History:

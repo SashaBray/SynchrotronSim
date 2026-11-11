@@ -1827,6 +1827,17 @@ class TestDriveSpeeds(unittest.TestCase):
         self.assertAlmostEqual(new[sch.index("quad.QF1A.dk")], DRIVE_SPEED_DEFAULTS["quad"])  # шаг ≤ slew·dt
         self.assertAlmostEqual(new[sch.index("rf.phase")], 1.0)                                # inf → мгновенно
 
+    def test_first_order_lag(self):
+        """Лаг 1-го порядка (полоса БП): actual приближается к уставке экспоненциально; τ=0 → без лага."""
+        from control import Schema, Limits
+        sch = Schema(["quad.QF1A.dk"])
+        lim = Limits(sch); lim.set("quad.QF1A.dk", lag_tau=1.0)   # τ=1 с, slew=inf
+        a = lim.apply(np.zeros(1), np.ones(1), dt=1.0)
+        self.assertAlmostEqual(a[0], 1 - np.exp(-1.0), places=6)  # α=exp(-1): actual=(1-α)·уставка
+        a = lim.apply(a, np.ones(1), dt=1.0)
+        self.assertAlmostEqual(a[0], 1 - np.exp(-2.0), places=6)  # ещё такт — ближе к уставке
+        self.assertAlmostEqual(Limits(sch).apply(np.zeros(1), np.ones(1), dt=1.0)[0], 1.0)  # τ=0 → без лага
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")

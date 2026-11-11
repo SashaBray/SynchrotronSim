@@ -7,7 +7,7 @@
 `disturbance.load_spec()`, отфильтрованного по именам из `fb_disturbances`. Только чтение БД.
 
 Схема таблиц (разделитель «;», точка — десятичная):
-  fb_experiments: fb_exp_id;lattice_id;steps;stride;settle;seed;sr;nsl;note;status
+  fb_experiments: fb_exp_id;lattice_id;steps;stride;settle;seed;sr;nsl;note;status;plant;drift_k1/k2/k3;realistic_drives
   fb_loops:       fb_exp_id;loop;sensor;actuator_key;gain;rcond;rate_hz;ref;enabled
   fb_disturbances:fb_exp_id;name                        (джойн на disturbance_spec.csv по name)
   fb_record:      fb_exp_id;signal;params;cadence;enabled   (ПОДПИСКА: за чем следить/что писать)
@@ -74,6 +74,7 @@ class FbConfig:
     records: list = field(default_factory=list)
     plant: str = "tbt"                                     # tbt (орбита/TbtPlant) | optics (OpticsPlant)
     drift: tuple = (0.0, 0.0, 0.0)                         # дрейф градиентов (drift_k1/k2/k3) для optics-plant
+    realistic_drives: bool = False                         # opt-in: конечная скорость+лаг приводов ВСЕХ магнитов
 
     def enabled_records(self):
         return [r for r in self.records if r.enabled]
@@ -107,4 +108,5 @@ def load(fb_exp_id):
         nsl=int(m["nsl"]), note=(m.get("note") or "").strip(),
         loops=loops, disturbance_spec=spec, records=records,
         plant=(m.get("plant") or "tbt").strip() or "tbt",
-        drift=(_f("drift_k1"), _f("drift_k2"), _f("drift_k3")))
+        drift=(_f("drift_k1"), _f("drift_k2"), _f("drift_k3")),
+        realistic_drives=_b(m.get("realistic_drives", "0")))
