@@ -1810,5 +1810,23 @@ class TestUndulatorGap(unittest.TestCase):
         self.assertAlmostEqual(u.gap_mm, 20.0)
 
 
+class TestDriveSpeeds(unittest.TestCase):
+    """Конечная скорость поля у ВСЕХ магнитов (не только корректоров): Limits.set_drive_speeds по типу актуатора."""
+
+    def test_set_drive_speeds_by_type_and_apply(self):
+        from control import Schema, Limits, DRIVE_SPEED_DEFAULTS
+        sch = Schema(["corr.000.hkick", "quad.QF1A.dk", "sext.SD.dk2", "oct.OD1B.dk3", "rf.phase"])
+        lim = Limits(sch)
+        self.assertTrue(np.isinf(lim.slew).all())                 # дефолт — мгновенно (inf) у всех
+        n = lim.set_drive_speeds(DRIVE_SPEED_DEFAULTS)
+        self.assertEqual(n, 4)                                     # corr/quad/sext/oct получили скорость, rf — нет
+        self.assertEqual(lim.slew[sch.index("quad.QF1A.dk")], DRIVE_SPEED_DEFAULTS["quad"])
+        self.assertEqual(lim.slew[sch.index("oct.OD1B.dk3")], DRIVE_SPEED_DEFAULTS["oct"])
+        self.assertTrue(np.isinf(lim.slew[sch.index("rf.phase")]))  # тип вне словаря → остался inf
+        new = lim.apply(np.zeros(len(sch)), np.ones(len(sch)), dt=1.0)   # slew реально ограничивает шаг
+        self.assertAlmostEqual(new[sch.index("quad.QF1A.dk")], DRIVE_SPEED_DEFAULTS["quad"])  # шаг ≤ slew·dt
+        self.assertAlmostEqual(new[sch.index("rf.phase")], 1.0)                                # inf → мгновенно
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, warnings="ignore")

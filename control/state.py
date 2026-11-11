@@ -84,6 +84,19 @@ class Limits:
         if res is not None:
             self.res[i] = res
 
+    def set_drive_speeds(self, by_type, default=None):
+        """Задать slew привода ПО ТИПУ актуатора (префикс id до первой точки): так КОНЕЧНУЮ скорость
+        поля получают ВСЕ магниты, а не только корректоры (для корректного моделирования ОС). Напр.
+        {'corr':1.0,'quad':0.05,'sext':0.5,'oct':2.0}; `default` — для типов вне словаря (None = не
+        трогать, остаётся inf/мгновенно). Единицы — актуатора/с (kick рад/с, Δk1/с, Δk2/с, Δk3/с).
+        Значения — ПРЕДПОЛОЖЕНИЯ (скорости нарастания БП). Возвращает число затронутых актуаторов."""
+        n = 0
+        for pid in self.schema.ids:
+            s = by_type.get(pid.split(".", 1)[0], default)
+            if s is not None:
+                self.set(pid, slew=float(s)); n += 1
+        return n
+
     def apply(self, actual_v, requested_v, dt):
         """actual → requested с ограничением скорости (slew·dt) и клипом в ОДЗ. Возврат нового actual_v."""
         step = requested_v - actual_v
@@ -95,6 +108,12 @@ class Limits:
         if np.any(rr):
             x[rr] = np.round(x[rr] / self.res[rr]) * self.res[rr]
         return np.where(self.act, x, actual_v)               # неуправляемые не двигаем
+
+
+# Правдоподобные скорости приводов по ТИПУ актуатора (ПРЕДПОЛОЖЕНИЯ — скорости нарастания БП; единицы
+# актуатора/с). Opt-in: state.limits.set_drive_speeds(DRIVE_SPEED_DEFAULTS). Железные квад/секступоль/
+# октуполь медленнее воздушных корректоров; точные значения — из паспортов БП, когда появятся.
+DRIVE_SPEED_DEFAULTS = {"corr": 1.0, "quad": 0.05, "sext": 0.5, "oct": 2.0}
 
 
 class History:
