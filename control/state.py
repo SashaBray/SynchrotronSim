@@ -285,6 +285,46 @@ class BeamSnapshot:
         return self.at(i if where == "entry" else i + 1, avg)
 
 
+class OpticsView:
+    """Линейная оптика на доске: твисс-функции вдоль s + скаляры кольца + выборка по имени магнита.
+
+    Статический снимок линейной оптики (ставит plant из `ra.twiss`), read-only для контура (как
+    beam/machine). Массивы по срезам: s, betax, betay, alphax, alphay, etax, etaxp; скаляры nux, nuy,
+    alphac. `at_s(s)` / `at_magnet(name)` → dict оптики в точке. Нужна для отображения, скана мест ИД
+    (β,η вдоль кольца) и локальных контуров (β в месте участка)."""
+
+    def __init__(self, tw, s_out=None, magnets=None):
+        a = lambda k: np.asarray(tw.get(k, []), float)
+        self.s = a("s"); self.betax = a("betax"); self.betay = a("betay")
+        self.alphax = a("alphax"); self.alphay = a("alphay"); self.etax = a("etax"); self.etaxp = a("etaxp")
+        self.nux = float(tw.get("nux", 0.0)); self.nuy = float(tw.get("nuy", 0.0))
+        self.alphac = float(tw.get("alphac", 0.0))
+        self._s_out = np.asarray(s_out, float) if s_out is not None else None
+        self.magnets = magnets
+
+    def _row(self, j):
+        out = {"s": float(self.s[j]), "betax": float(self.betax[j]), "betay": float(self.betay[j])}
+        for k in ("alphax", "alphay", "etax", "etaxp"):
+            arr = getattr(self, k)
+            if arr.size:
+                out[k] = float(arr[j])
+        return out
+
+    def at_s(self, s):
+        """Оптика в ближайшем к s срезе (dict: betax/betay/alphax/alphay/etax/etaxp/s)."""
+        return self._row(int(np.argmin(np.abs(self.s - float(s)))))
+
+    def at_magnet(self, name, where="exit"):
+        """Оптика на входе/выходе магнита по имени (через карту magnets): exit=строка магнита, entry=предыдущая."""
+        if self._s_out is None or self.magnets is None:
+            return self.at_s(0.0)
+        i = self.magnets.index(name)
+        return self.at_s(self._s_out[int(i if where == "exit" else max(0, i - 1))])
+
+    def tunes(self):
+        return (self.nux, self.nuy)
+
+
 class ExperimentState:
     """Blackboard эксперимента. См. модуль-docstring."""
 
@@ -302,6 +342,7 @@ class ExperimentState:
         self.noise = None                            # NoiseModel — ЗАКОН генерации шума (живой), или None
         self.beam = None                             # BeamSnapshot — пучок по всей линии (снимок+среднее), ставит plant
         self.machine = None                          # lazy-доступ к магнитам (позиция/поле), ставит plant
+        self.optics = None                           # OpticsView — линейная оптика (β/η/фазы/тюн), ставит plant
         self.history = history                       # History или None
         self.t = 0.0
 
@@ -364,6 +405,11 @@ class StateView:
     def undulators(self):
         """Живые настройки ондуляторов (имя → UndulatorConfig): зазор + K/B0. Контур читает и может двигать зазор."""
         return self._s.undulators
+
+    @property
+    def optics(self):
+        """Линейная оптика (OpticsView): β/η/α вдоль s, тюн, αc; выборка по s/имени магнита. Или None."""
+        return self._s.optics
 
     def read(self, observable_id):
         """Показание сенсора (ndarray) или None, если ещё не измерено."""

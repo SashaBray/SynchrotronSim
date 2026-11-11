@@ -11,7 +11,7 @@
 Диффурное ядро и инструменты полей/токов НЕ трогаются — это отдельная ветка.
 """
 from .state import (Schema, StateVector, Limits, History, ExperimentState, StateView,
-                    SensorConfig, NoiseModel, BeamSnapshot, UndulatorConfig,
+                    SensorConfig, NoiseModel, BeamSnapshot, UndulatorConfig, OpticsView,
                     DRIVE_SPEED_DEFAULTS, DRIVE_LAG_DEFAULTS)
 from .controller import Controller, Resources, ResponseMatrix, SlotWriter
 from .scheduler import Scheduler, LoopSpec
@@ -21,7 +21,7 @@ from .arbiter import Arbiter
 from .registry import discover
 
 __all__ = ["Schema", "StateVector", "Limits", "History", "ExperimentState", "StateView",
-           "SensorConfig", "NoiseModel", "BeamSnapshot", "UndulatorConfig",
+           "SensorConfig", "NoiseModel", "BeamSnapshot", "UndulatorConfig", "OpticsView",
            "DRIVE_SPEED_DEFAULTS", "DRIVE_LAG_DEFAULTS",
            "Controller", "Resources", "ResponseMatrix", "SlotWriter", "Scheduler", "LoopSpec",
            "Plant", "DemoPlant", "Observer", "ObsContext", "ObsSpec", "OBSERVABLES",

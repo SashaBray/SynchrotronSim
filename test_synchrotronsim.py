@@ -1810,6 +1810,28 @@ class TestUndulatorGap(unittest.TestCase):
         self.assertAlmostEqual(u.gap_mm, 20.0)
 
 
+class TestOpticsView(unittest.TestCase):
+    """state.optics: OpticsView отдаёт твисс по s и по имени магнита (без кольца, фейковый твисс)."""
+
+    def test_lookup_by_s_and_magnet(self):
+        from control import OpticsView
+        tw = {"s": [0.0, 1.0, 2.0, 3.0], "betax": [5, 6, 7, 8], "betay": [3, 2, 1, 0.5],
+              "alphax": [0, 0.1, 0.2, 0.3], "etax": [0.01, 0.02, 0.03, 0.04],
+              "nux": 95.23, "nuy": 33.40, "alphac": 5e-5}
+
+        class _Map:
+            def index(self, name):
+                return {"A": 1, "B": 3}[name]
+
+        ov = OpticsView(tw, s_out=[0.5, 1.5, 2.5, 3.5], magnets=_Map())
+        self.assertEqual(ov.tunes(), (95.23, 33.40))
+        self.assertAlmostEqual(ov.alphac, 5e-5)
+        self.assertAlmostEqual(ov.at_s(2.0)["betax"], 7.0)        # s=2 — узел сетки
+        r = ov.at_magnet("B", where="exit")                       # s_out[3]=3.5 → ближайший срез s=3
+        self.assertAlmostEqual(r["betax"], 8.0)
+        self.assertIn("etax", r); self.assertIn("alphax", r)
+
+
 class TestDriveSpeeds(unittest.TestCase):
     """Конечная скорость поля у ВСЕХ магнитов (не только корректоров): Limits.set_drive_speeds по типу актуатора."""
 

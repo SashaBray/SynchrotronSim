@@ -32,7 +32,7 @@ import facility_report as fr
 import ring_analysis as ra
 import disturbance as dist
 
-from .state import Schema, History, BeamSnapshot, UndulatorConfig
+from .state import Schema, History, BeamSnapshot, UndulatorConfig, OpticsView
 from .controller import ResponseMatrix
 from .ring_model import RingModel
 from .observer import Observer, ObsContext
@@ -285,6 +285,10 @@ class TbtPlant:
         state.beam = BeamSnapshot(self._snap_buf, self.magnets)    # пучок по всей линии (снимок+среднее), окно обновляется на месте
         state.machine = MachineView(self)                          # lazy-доступ к положению/полю магнитов
         self._seed_undulators(state)                               # живые зазоры ондуляторов на доску (видят контуры)
+        try:                                                       # линейная оптика на доску (β/η/тюн) — статический снимок
+            state.optics = OpticsView(ra.twiss(self.ring), s_out=np.asarray(self.ring.s_out, float), magnets=self.magnets)
+        except Exception:
+            pass
 
     def _seed_undulators(self, state):
         """Заполнить state.undulators живыми зазорами по group_id ондуляторов (дефолт self.gap_mm).

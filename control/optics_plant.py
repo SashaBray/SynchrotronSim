@@ -22,8 +22,9 @@ import copy
 import numpy as np
 
 import ring_map as rmap
+import ring_analysis as ra
 
-from .state import Schema, History, UndulatorConfig, _undulator_sr
+from .state import Schema, History, UndulatorConfig, OpticsView, _undulator_sr
 from .controller import ResponseMatrix
 from .ring_model import RingModel
 from .observer import Observer, ObsContext
@@ -147,6 +148,11 @@ class OpticsPlant:
 
     def reset(self, state):
         self._seed_undulators(state)
+        try:                                                  # линейная оптика на доску (β/η/тюн) — статический снимок
+            state.optics = OpticsView(ra.twiss(self.rm.ring), s_out=np.asarray(self.rm.ring.s_out, float),
+                                      magnets=self.rm.magnets)
+        except Exception:
+            pass
         self._a = np.zeros(3); self._advance(); self._measure(state)
 
     def _seed_undulators(self, state):
