@@ -1859,6 +1859,25 @@ class TestDriveSpeeds(unittest.TestCase):
         self.assertAlmostEqual(new[sch.index("quad.QF1A.dk")], DRIVE_SPEED_DEFAULTS["quad"])  # шаг ≤ slew·dt
         self.assertAlmostEqual(new[sch.index("rf.phase")], 1.0)                                # inf → мгновенно
 
+    def test_set_profile_and_driveview(self):
+        """Богатый профиль set_profile (slew+lag+ОДЗ) + DriveView: инфо о приводе по имени на доске."""
+        from control import Schema, Limits, ExperimentState, StateView
+        sch = Schema(["corr.000.hkick", "quad.QF1A.dk", "rf.phase"])
+        lim = Limits(sch)
+        prof = {"corr": {"slew": 1.0, "lag_tau": 2e-4, "odz": (-1e-3, 1e-3)},
+                "quad": {"slew": 0.05, "lag_tau": 0.1}}
+        n = lim.set_profile(prof)
+        self.assertEqual(n, 2)                                            # corr, quad; rf не в профиле
+        self.assertEqual(lim.slew[sch.index("corr.000.hkick")], 1.0)
+        self.assertEqual(lim.lag_tau[sch.index("quad.QF1A.dk")], 0.1)
+        self.assertEqual(lim.odz_hi[sch.index("corr.000.hkick")], 1e-3)   # ОДЗ из профиля
+        self.assertTrue(np.isinf(lim.odz_hi[sch.index("quad.QF1A.dk")]))  # quad без odz → остался inf
+        st = ExperimentState(sch, limits=lim)
+        d = StateView(st).drives.of("corr.000.hkick")                     # инфо привода на доске по имени
+        self.assertAlmostEqual(d["slew"], 1.0); self.assertAlmostEqual(d["lag_tau"], 2e-4)
+        self.assertEqual(d["odz"], (-1e-3, 1e-3))
+        self.assertIn("corr", StateView(st).drives.types())               # сводка по типам
+
     def test_first_order_lag(self):
         """Лаг 1-го порядка (полоса БП): actual приближается к уставке экспоненциально; τ=0 → без лага."""
         from control import Schema, Limits

@@ -11,6 +11,7 @@
   fb_loops:       fb_exp_id;loop;sensor;actuator_key;gain;rcond;rate_hz;ref;enabled
   fb_disturbances:fb_exp_id;name                        (джойн на disturbance_spec.csv по name)
   fb_record:      fb_exp_id;signal;params;cadence;enabled   (ПОДПИСКА: за чем следить/что писать)
+  fb_drives:      fb_exp_id;type;slew;lag_tau;odz_lo;odz_hi;res   (богатый профиль приводов, opt-in; пусто=дефолт)
 """
 import csv
 import os
@@ -36,6 +37,32 @@ def _rows_for(name, key):
 
 def _b(v):
     return str(v).strip().lower() in ("1", "true", "yes", "on", "да")
+
+
+def _drive_profile(key):
+    """Богатый профиль приводов из fb_drives.csv по ключу: {тип: {slew?, lag_tau?, odz:(lo,hi)?, res?}}."""
+    prof = {}
+    for r in _rows_for("fb_drives.csv", key):
+        t = (r.get("type") or "").strip()
+        if not t:
+            continue
+        spec = {}
+        for k in ("slew", "lag_tau", "res"):
+            v = (r.get(k) or "").strip()
+            if v:
+                try:
+                    spec[k] = float(v)
+                except ValueError:
+                    pass
+        lo = (r.get("odz_lo") or "").strip(); hi = (r.get("odz_hi") or "").strip()
+        if lo and hi:
+            try:
+                spec["odz"] = (float(lo), float(hi))
+            except ValueError:
+                pass
+        if spec:
+            prof[t] = spec
+    return prof
 
 
 @dataclass
@@ -75,6 +102,7 @@ class FbConfig:
     plant: str = "tbt"                                     # tbt (орбита/TbtPlant) | optics (OpticsPlant)
     drift: tuple = (0.0, 0.0, 0.0)                         # дрейф градиентов (drift_k1/k2/k3) для optics-plant
     realistic_drives: bool = False                         # opt-in: конечная скорость+лаг приводов ВСЕХ магнитов
+    drive_profile: dict = field(default_factory=dict)      # богатый профиль приводов из fb_drives (пусто = дефолт)
 
     def enabled_records(self):
         return [r for r in self.records if r.enabled]
@@ -109,4 +137,5 @@ def load(fb_exp_id):
         loops=loops, disturbance_spec=spec, records=records,
         plant=(m.get("plant") or "tbt").strip() or "tbt",
         drift=(_f("drift_k1"), _f("drift_k2"), _f("drift_k3")),
-        realistic_drives=_b(m.get("realistic_drives", "0")))
+        realistic_drives=_b(m.get("realistic_drives", "0")),
+        drive_profile=_drive_profile(fb_exp_id))

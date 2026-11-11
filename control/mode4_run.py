@@ -18,7 +18,7 @@ os.environ.setdefault("SS_SECTOR", "1")
 sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from control import ExperimentState, Scheduler, NoiseModel, DRIVE_SPEED_DEFAULTS, DRIVE_LAG_DEFAULTS
+from control import ExperimentState, Scheduler, NoiseModel, DRIVE_PROFILE_DEFAULTS
 from control.tbt_plant import TbtPlant
 from control.controllers.integral_svd import IntegralSVD
 from control import fb_config, fb_store, recorders
@@ -97,9 +97,10 @@ def main():
         state = ExperimentState(plant.schema(), history=plant.history())
         state.noise = NoiseModel(cfg.disturbance_spec)       # закон шума — в доске (живой)
 
-    if cfg.realistic_drives:                                 # opt-in: конечная скорость+лаг приводов ВСЕХ магнитов (БП)
-        n = state.limits.set_drive_speeds(DRIVE_SPEED_DEFAULTS, DRIVE_LAG_DEFAULTS)
-        print(f"реалистичные приводы: slew+лаг на {n} актуаторах (скорости/полоса БП — предположения)")
+    if cfg.realistic_drives:                                 # opt-in: богатый профиль приводов (slew+лаг+ОДЗ) ВСЕХ магнитов
+        profile = cfg.drive_profile or DRIVE_PROFILE_DEFAULTS
+        n = state.limits.set_profile(profile)
+        print(f"реалистичные приводы (профиль {'БД' if cfg.drive_profile else 'дефолт'}): {n} актуаторов")
 
     dt = (plant.stride * plant.TREV) if hasattr(plant, "stride") else 1.0   # tbt: по оборотам; optics: абстрактный такт
     window = getattr(plant, "avg_chunks", 1)                 # окно усреднения (optics — без усреднения)

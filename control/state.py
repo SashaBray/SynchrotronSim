@@ -106,6 +106,19 @@ class Limits:
                          lag_tau=(float(lt) if lt is not None else None)); n += 1
         return n
 
+    def set_profile(self, by_type, default=None):
+        """БОГАТЫЙ профиль привода ПО ТИПУ актуатора: {тип: {slew, lag_tau, odz:(lo,hi), res}} — любые ключи
+        опциональны (None/отсутствие = не трогать). Обобщает set_drive_speeds на ВСЕ параметры реализуемости
+        (скорость, лаг, ход, квант). `default` — спек для типов вне словаря. Возвращает число затронутых."""
+        n = 0
+        for pid in self.schema.ids:
+            spec = by_type.get(pid.split(".", 1)[0], default)
+            if spec:
+                self.set(pid, slew=spec.get("slew"), lag_tau=spec.get("lag_tau"),
+                         odz=spec.get("odz"), res=spec.get("res"))
+                n += 1
+        return n
+
     def apply(self, actual_v, requested_v, dt):
         """actual → requested: slew-лимит (slew·dt) → лаг 1-го порядка (полоса БП) → клип ОДЗ → квант. Новый actual_v."""
         step = requested_v - actual_v
@@ -130,6 +143,14 @@ DRIVE_SPEED_DEFAULTS = {"corr": 1.0, "quad": 0.05, "sext": 0.5, "oct": 2.0}
 # пост. времени лага 1-го порядка по типу (τ, с; ПРЕДПОЛОЖЕНИЯ — 1/полоса БП+вихр.токи; железные медленнее
 # воздушных корректоров). Opt-in: state.limits.set_drive_speeds(DRIVE_SPEED_DEFAULTS, DRIVE_LAG_DEFAULTS).
 DRIVE_LAG_DEFAULTS = {"corr": 2e-4, "quad": 0.1, "sext": 0.05, "oct": 0.02}
+# БОГАТЫЙ профиль привода по типу: {slew (ед/с), lag_tau (с)}; odz:(lo,hi)/res можно добавить per-опыт
+# (таблица fb_drives). ПРЕДПОЛОЖЕНИЯ БП. Применять: limits.set_profile(DRIVE_PROFILE_DEFAULTS).
+DRIVE_PROFILE_DEFAULTS = {
+    "corr": {"slew": 1.0, "lag_tau": 2e-4},
+    "quad": {"slew": 0.05, "lag_tau": 0.1},
+    "sext": {"slew": 0.5, "lag_tau": 0.05},
+    "oct": {"slew": 2.0, "lag_tau": 0.02},
+}
 
 
 class History:
@@ -337,6 +358,29 @@ class OpticsView:
         return (self.nux, self.nuy)
 
 
+class DriveView:
+    """Инфо о ПРИВОДАХ на доске: параметры реализуемости актуатора (slew/lag/ОДЗ/квант/управляемость) по
+    ИМЕНИ. Read-only вид над Limits — контур и отображение видят, как устроен привод каждого актуатора."""
+
+    def __init__(self, limits):
+        self._lim = limits
+
+    def of(self, aid):
+        """Привод актуатора по id: {slew, lag_tau, odz:(lo,hi), res, act}."""
+        L = self._lim; i = L.schema.index(aid)
+        return {"slew": float(L.slew[i]), "lag_tau": float(L.lag_tau[i]),
+                "odz": (float(L.odz_lo[i]), float(L.odz_hi[i])), "res": float(L.res[i]), "act": bool(L.act[i])}
+
+    def types(self):
+        """Сводка по типам актуаторов: тип → {slew, lag_tau (медианы по типу), n}. Для отображения."""
+        idx = {}
+        for i, pid in enumerate(self._lim.schema.ids):
+            idx.setdefault(pid.split(".", 1)[0], []).append(i)
+        L = self._lim
+        return {t: {"slew": float(np.median(L.slew[j])), "lag_tau": float(np.median(L.lag_tau[j])), "n": len(j)}
+                for t, j in idx.items()}
+
+
 class ExperimentState:
     """Blackboard эксперимента. См. модуль-docstring."""
 
@@ -422,6 +466,11 @@ class StateView:
     def optics(self):
         """Линейная оптика (OpticsView): β/η/α вдоль s, тюн, αc; выборка по s/имени магнита. Или None."""
         return self._s.optics
+
+    @property
+    def drives(self):
+        """Инфо о приводах (DriveView над Limits): slew/lag/ОДЗ/квант по имени актуатора. Read-only."""
+        return DriveView(self._s.limits)
 
     def read(self, observable_id):
         """Показание сенсора (ndarray) или None, если ещё не измерено."""
