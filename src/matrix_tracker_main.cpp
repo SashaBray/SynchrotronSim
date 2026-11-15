@@ -4,9 +4,10 @@
 // Python-ядро matrix_tracker.py остаётся ЭТАЛОНОМ для разработки и валидации.
 //
 // Режимы:
-//   --element <kind> <Leff> <B> <G> <Gv> <S> <O> <edge1> <edge2> <nsl> <design_mev> <sr> <x px y py t delta>
+//   --element <kind> <Leff> <B> <G> <Gv> <S> <O> <edge1> <edge2> <nsl> <design_mev> <sr> <x px y py t delta> [lf1 lf2]
 //       Прогнать ОДНО тело элемента над состоянием и напечатать результат (для регрессии против Python,
 //       см. test_matrix_core_cpp.py). kind: dipole|dq|quad|sext|oct. B,G,Gv,S,O — физкоэф. mat_*.
+//       lf1/lf2 (необязательно) — L_f торцов, фриндж HGAP/FINT (верт. линза грани tg(E−ψ)/ρ).
 //   <exp_id>   (в разработке) — автономный трек всего кольца из БД. Каркас/чтение БД — следующий слой;
 //              физический движок (matrix_core.h) уже готов и провалидирован.
 #include <iostream>
@@ -72,7 +73,9 @@ static int runElement(int argc, char* argv[]) {
     bool sr = (std::stoi(argv[13]) != 0);
     mc::State st{ std::stod(argv[14]), std::stod(argv[15]), std::stod(argv[16]),
                   std::stod(argv[17]), std::stod(argv[18]), std::stod(argv[19]) };
-    mc::Element el = mc::Element::make(kind, Leff, B, G, Gv, S, O, e1, e2, nsl, design, sr);
+    // необязательный хвост [lf1 lf2] — длины зоны спада торцов L_f (фриндж HGAP/FINT), м
+    double lf1 = (argc >= 22) ? std::stod(argv[20]) : 0.0, lf2 = (argc >= 22) ? std::stod(argv[21]) : 0.0;
+    mc::Element el = mc::Element::make(kind, Leff, B, G, Gv, S, O, e1, e2, nsl, design, sr, 4, false, 40, lf1, lf2);
     try {
         printState(el.body(st));
     } catch (const mc::ParticleLost&) {
@@ -337,7 +340,7 @@ int main(int argc, char* argv[]) {
                                                    : runTrack(ws, exp, turns, x0, y0);
     }
     std::cout << "MatrixTracker (SynchrotronSim matrix core, C++)\n"
-                 "  --element <kind Leff B G Gv S O edge1 edge2 nsl design_mev sr> <x px y py t delta>\n"
+                 "  --element <kind Leff B G Gv S O edge1 edge2 nsl design_mev sr> <x px y py t delta> [lf1 lf2]\n"
                  "      прогнать тело одного элемента (валидация против Python-эталона)\n"
                  "  --track <exp_id> <turns> [x0_mm y0_mm]\n"
                  "      автономный трек кольца: turn-by-turn у плоскости + ВЧ → .npz (mode=long, затухание)\n"

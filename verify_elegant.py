@@ -392,6 +392,7 @@ CONVERGED = {"SS_SECTOR_NSL": "40", "SS_SECTOR_ORDER": "6"}   # сошедший
 def _lte_matrices():
     """Матрицы, собранные ПРЯМО по .lte (без геометрии БД) — проверка самих формул против elegant."""
     import ring_matrix as rm
+    import matrix_tracker as mt
     lat = ed.machine_lattice(M)
     par = ed.element_params(lat[0], lat[1]); names = ed.line_names(*lat)
     R = np.eye(6); Rs = []
@@ -399,8 +400,11 @@ def _lte_matrices():
         q = par[n.upper()]; t = q["type"].upper(); L = q.get("L", 0.0)
         if t == "CSBEND":
             h = q.get("ANGLE", 0.0) / L
-            Mel = (rm.edge(math.tan(q.get("E2", 0.0)) * h) @ rm.sector_body(L, h, q.get("K1", 0.0))
-                   @ rm.edge(math.tan(q.get("E1", 0.0)) * h))
+            e1, e2 = q.get("E1", 0.0), q.get("E2", 0.0)
+            lf1, lf2 = mt.lte_fringe_lengths(q)          # фриндж HGAP/FINT: верт. грань tg(E−ψ)·h
+            ps1, ps2 = mt._fringe_psi(lf1, e1, h), mt._fringe_psi(lf2, e2, h)
+            Mel = (rm.edge(math.tan(e2) * h, math.tan(e2 - ps2) * h) @ rm.sector_body(L, h, q.get("K1", 0.0))
+                   @ rm.edge(math.tan(e1) * h, math.tan(e1 - ps1) * h))
         elif t == "KQUAD":
             Mel = rm.quad(L, q.get("K1", 0.0))
         elif t in ("MONI", "MARK"):

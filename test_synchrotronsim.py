@@ -36,10 +36,11 @@ from _common import exe_name
 
 # ------------------------------------------------------------------ фикстуры/утилиты
 def make_magnet(kind, Leff, angle=0.0, k1=0.0, k2=0.0, k3=0.0, edge1=0.0, edge2=0.0, nsl=5,
-                center=(0.0, 0.0, 0.0), yaw=0.0, pitch=0.0, roll=0.0):
+                center=(0.0, 0.0, 0.0), yaw=0.0, pitch=0.0, roll=0.0, lf1=None, lf2=None):
     """Синтетический Magnet БЕЗ БД: физика прямо в mat_* (mat_B=−angle/(QP·L), mat_G=k1/QP, …).
     center/yaw/pitch/roll — положение и ориентация (для тестов рассогласования установки);
-    на само тело они не влияют (тело в локальных θ0/k), но задают рамки fr_in/fr_out."""
+    на само тело они не влияют (тело в локальных θ0/k), но задают рамки fr_in/fr_out.
+    lf1/lf2 — L_f торцов (фриндж HGAP/FINT); None ⇒ столбцов нет вовсе (как в старой БД)."""
     QP = mt.QP
     matB = -angle / (QP * Leff) if angle else 0.0
     cx, cy, cz = center
@@ -50,6 +51,8 @@ def make_magnet(kind, Leff, angle=0.0, k1=0.0, k2=0.0, k3=0.0, edge1=0.0, edge2=
                   edge1=repr(float(edge1)), edge2=repr(float(edge2)),
                   mat_B=repr(matB), mat_G=repr(k1 / QP), mat_Gv=repr(k1 / QP),
                   mat_S=repr(k2 / QP), mat_O=repr(k3 / QP))]
+    if lf1 is not None: insts[0]["lf1"] = repr(float(lf1))
+    if lf2 is not None: insts[0]["lf2"] = repr(float(lf2))
     return mt.Magnet(insts, {}, {}, {}, {}, settings=mt.Settings())
 
 
@@ -1248,6 +1251,92 @@ class TestRadiationIntegrals(unittest.TestCase):
                 m.kEdge1 = m.kEdge2 = 0.05 * (-m.theta0 / m.Leff)          # tg(E) = 0.05
         i4 = self.rm.radiation_integrals(ring)["I4"]
         self.assertGreater(abs(i4 - i4_0), 1e-4, "краевой член обязан входить в I₄")
+
+
+class TestDipoleFringe(unittest.TestCase):
+    """Фриндж диполя (эффект второго порядка, elegant CSBEND HGAP/FINT, edge_effects=1).
+
+    Мягкий спад поля поворачивает орбиту ВНУТРИ зоны спада ⇒ эффективный угол грани для вертикали
+    E → E−ψ, ψ = L_f/ρ·(1+sin²E)/cos E, L_f = 2·HGAP·FINT; горизонталь — прежняя tg E/ρ. В треке ψ/(1+δ).
+    Эталоны R43 — elegant 2026.3 (CSBEND L=1, ANGLE=0.1, N_SLICES=5, HGAP=0.01, FINT=0.5 ⇒ L_f=0.01 м)."""
+    L, ANG, LF = 1.0, 0.1, 0.01
+    ELEGANT_R43 = {0.0: 2.000100451268587e-04, 0.05: -9.783053758787746e-03}   # E1=E2=E → R43 elegant
+
+    def _m(self, E, lf):
+        # знак БД: edge = −E, θ0 = −ANGLE (см. s2lattice_to_db)
+        return make_magnet("dipole", self.L, angle=self.ANG, edge1=-E, edge2=-E, lf1=lf, lf2=lf)
+
+    def test_lte_fringe_lengths_elegant_defaults(self):
+        """L_f = 2·HGAP·FINTi по умолчаниям elegant: HGAP=0 ⇒ 0; FINT=0.5; FINT1/2<0 ⇒ FINT; EDGE*_EFFECTS=0 ⇒ 0."""
+        f = mt.lte_fringe_lengths
+        self.assertEqual(f({}), (0.0, 0.0))                                   # HGAP по умолчанию 0
+        self.assertEqual(f({"FINT": 0.7}), (0.0, 0.0))
+        self.assertEqual(f({"HGAP": 0.02}), (0.02, 0.02))                     # FINT по умолчанию 0.5
+        self.assertEqual(f({"HGAP": 0.02, "FINT": 0.25, "FINT2": 0.0}), (0.01, 0.0))
+        self.assertEqual(f({"HGAP": 0.02, "FINT1": 0.4, "FINT2": -1.0}), (0.016, 0.02))
+        self.assertEqual(f({"HGAP": 0.02, "EDGE1_EFFECTS": 0}), (0.0, 0.02))
+
+    def test_importer_edge_effects_off(self):
+        """Импорт .lte: EDGE1_EFFECTS=0 выключает ВСЮ входную грань (и tg E, и фриндж), как elegant."""
+        import s2lattice_to_db as s2
+        e = {"type": "CSBEND", "E1": 0.03, "E2": 0.04, "HGAP": 0.015, "FINT": 0.5, "EDGE1_EFFECTS": 0.0}
+        self.assertEqual(s2.edges_of(e), (0.0, 0.04, 0.0, 0.015))
+
+    def test_hard_edge_bitwise(self):
+        """Без L_f (нет столбцов / нули) — тело бит-в-бит прежнее: верт. коэффициент = kEdge без пересчёта tg."""
+        st = (1e-3, 2e-4, 0.5e-3, -1e-4, 0.0, 1e-3)
+        for E in (0.0, 0.05):
+            a, b = self._m(E, None), self._m(E, 0.0)
+            self.assertEqual(a.body(st), b.body(st))
+            self.assertEqual(b.psi1, 0.0)
+            self.assertEqual(mt._edge_kv(b.edge1, 0.0, b.rinv, b.kEdge1, 1e-3), b.kEdge1)
+
+    def test_r43_matches_elegant(self):
+        """Вертикальная линза граней с фринджем = elegant (R43), горизонталь фринджем не меняется (R21)."""
+        base = (0.0,) * 6
+        for E, r43_el in self.ELEGANT_R43.items():
+            M = jacobian4(self._m(E, self.LF).body, base)
+            M0 = jacobian4(self._m(E, 0.0).body, base)
+            self.assertAlmostEqual(M[3, 2], r43_el, delta=1e-10, msg=f"E={E}: R43")
+            self.assertAlmostEqual(M[1, 0], M0[1, 0], delta=1e-12, msg=f"E={E}: R21 не зависит от фринджа")
+
+    def test_defocus_sign_independent_of_bend_direction(self):
+        """При E=0 фриндж ДЕфокусирует по вертикали (R43>0) при изгибе в любую сторону: ∝ 1/ρ²."""
+        for ang in (self.ANG, -self.ANG):
+            m = make_magnet("dipole", self.L, angle=ang, lf1=self.LF, lf2=self.LF)
+            r43 = jacobian4(m.body, (0.0,) * 6)[3, 2]
+            self.assertAlmostEqual(r43, self.ELEGANT_R43[0.0], delta=1e-10, msg=f"ANGLE={ang}")
+
+    def test_chromatic_psi(self):
+        """Хроматичность края: ψ/(1+δ). R43(δ) = −k₁(δ) − k₂(δ) + k₁k₂·L/(1+δ), kᵢ = tg(E−ψ/(1+δ))/ρ."""
+        E, d = 0.05, 2e-3
+        m = self._m(E, self.LF)
+        k = mt._edge_kv(m.edge1, m.psi1, m.rinv, m.kEdge1, d)
+        expect = -2.0 * k + k * k * self.L / (1.0 + d)
+        r43 = jacobian4(m.body, (0.0, 0.0, 0.0, 0.0, 0.0, d))[3, 2]
+        self.assertAlmostEqual(r43, expect, delta=1e-9)
+        k0 = mt._edge_kv(m.edge1, m.psi1, m.rinv, m.kEdge1, 0.0)
+        self.assertGreater(abs(k - k0), 1e-8)                                 # δ-зависимость реально есть
+
+    def test_ring_matrix_edge(self):
+        """Аналитическая матрица изгиба (ring_matrix) берёт ту же вертикальную линзу tg(E−ψ)/ρ, что тело."""
+        import ring_matrix as rm
+        for E in (0.0, 0.05):
+            m = self._m(E, self.LF)
+            _, R = rm.element_matrix(m)
+            self.assertAlmostEqual(R[3, 2], self.ELEGANT_R43[E], delta=1e-9, msg=f"E={E}")
+
+    def test_ring_map_edge_series(self):
+        """Ряд края в ring_map: коэффициент y → −k(0), y·δ → −∂k/∂δ (хроматичность ψ/(1+δ))."""
+        import ring_map as rmap
+        da = rmap.DA(6, 3)
+        m = self._m(0.05, self.LF)
+        st = rmap.edge(da.identity(), m.kEdge1, da, m.edge1, m.psi1, m.rinv)
+        py = st[3]
+        k = lambda d: mt._edge_kv(m.edge1, m.psi1, m.rinv, m.kEdge1, d)
+        h = 1e-5
+        self.assertAlmostEqual(da.coef(py, (0, 0, 1, 0, 0, 0)), -k(0.0), delta=1e-15)
+        self.assertAlmostEqual(da.coef(py, (0, 0, 1, 0, 0, 1)), -(k(h) - k(-h)) / (2 * h), delta=1e-9)
 
 
 class _LinearOpticsPlant:

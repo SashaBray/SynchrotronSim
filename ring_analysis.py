@@ -345,6 +345,8 @@ def _bend_slices(m):
         c.Leff = m.Leff / N; c.L = m.L / N; c.theta0 = m.theta0 / N; c._nsl_sector = 1
         c.kEdge1 = m.kEdge1 if i == 0 else 0.0
         c.kEdge2 = m.kEdge2 if i == N - 1 else 0.0
+        c.psi1 = getattr(m, "psi1", 0.0) if i == 0 else 0.0           # фриндж-поправка грани — тоже только на крайних
+        c.psi2 = getattr(m, "psi2", 0.0) if i == N - 1 else 0.0
         out.append(c)
     return out
 

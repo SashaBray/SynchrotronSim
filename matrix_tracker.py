@@ -90,6 +90,40 @@ def _edge_ff(dev):
     return _EDGEFF.get(dev, 0.0)
 
 
+def lte_fringe_lengths(p):
+    """L_f входа и выхода (м) по параметрам CSBEND из .lte — ровно по правилам elegant:
+    L_f = 2·HGAP·FINTi, HGAP по умолчанию 0 (⇒ эффект выключен), FINT по умолчанию 0.5, FINT1/FINT2 < 0
+    (по умолчанию −1) ⇒ берётся FINT; EDGE1_EFFECTS/EDGE2_EFFECTS = 0 выключают грань целиком (и tg E, и ψ —
+    это вызывающий обнуляет E сам). p — dict ключей .lte в ВЕРХНЕМ регистре (числа). Возврат (lf1, lf2)."""
+    hgap = float(p.get("HGAP", 0.0) or 0.0)
+    fint = float(p.get("FINT", 0.5))
+    out = []
+    for i in (1, 2):
+        fi = float(p.get(f"FINT{i}", -1.0))
+        on = float(p.get(f"EDGE{i}_EFFECTS", 1.0)) != 0.0
+        out.append(2.0 * hgap * (fi if fi >= 0.0 else fint) if on else 0.0)
+    return out[0], out[1]
+
+
+def _fringe_psi(lf, edge, rinv):
+    """Поправка угла грани от мягкого спада поля (elegant CSBEND, HGAP/FINT): ψ = L_f·(1/ρ)·(1+sin²E)/cos E.
+
+    L_f = ∫b(1−b)ds = 2·HGAP·FINT — длина зоны спада торца (b = B/B₀ вдоль опорной орбиты). Знак ψ — знак
+    1/ρ (наш rinv): вертикальная линза грани tg(E−ψ)/ρ тогда ДЕфокусирует при E=0 в любую сторону изгиба
+    (эффект ∝ 1/ρ²). L_f=0 ⇒ ψ=0 — жёсткий край, прежнее поведение бит-в-бит."""
+    if not lf or not rinv:
+        return 0.0
+    s = math.sin(edge)
+    return lf * rinv * (1.0 + s * s) / math.cos(edge)
+
+
+def _edge_kv(edge, psi, rinv, k_edge, d):
+    """Вертикальный коэффициент краевой линзы: py −= k·y, k = tg(E − ψ/(1+δ))/ρ (elegant edge_effects=1,
+    edge_order=1: yp −= tan(e−ψ/(1+δ))/ρ(1+δ)·y — в наших канонических py множитель (1+δ) сокращается).
+    ψ=0 ⇒ k = k_edge = tg(E)/ρ (горизонтальный коэффициент) — без пересчёта tg, бит-в-бит как раньше."""
+    return math.tan(edge - psi / (1.0 + d)) * rinv if psi else k_edge
+
+
 def _rot(v, n, a):
     """Поворот вектора v вокруг ЕДИНИЧНОЙ оси n на угол a (формула Родрига)."""
     c, s = math.cos(a), math.sin(a)
@@ -218,6 +252,9 @@ class Magnet:
         self.nsl = int(r0.get("n_slices") or _tr.get("n_slices") or (settings or Settings()).n_slices)
         self.edge1 = float(r0.get("edge1") or 0.0)             # краевые углы E1/E2 (.lte); физика края — Фаза 3
         self.edge2 = float(r0.get("edge2") or 0.0)
+        # длины зоны спада поля на торцах L_f = ∫b(1−b)ds = 2·HGAP·FINT (м), вход/выход; пусто ⇒ 0 (жёсткий край)
+        self.lf1 = float(r0.get("lf1") or 0.0)
+        self.lf2 = float(r0.get("lf2") or 0.0)
         self.devs = [r["device_type_id"] for r in insts]
         # ДАТЧИК ПОЛОЖЕНИЯ ПУЧКА (BPM): не преобразует частицы (пропускает как дрейф L=0),
         # регистрирует центроид пучка. sensor_id = instance_id экземпляра в решётке.
@@ -248,6 +285,12 @@ class Magnet:
         _rinv = self.theta0 / self.Leff if self.Leff > 0 else 0.0    # 1/ρ (знак по изгибу)
         self.kEdge1 = math.tan(self.edge1) * _rinv                  # вход
         self.kEdge2 = math.tan(self.edge2) * _rinv                  # выход
+        # ЭФФЕКТ ВТОРОГО ПОРЯДКА — мягкий спад поля (фриндж): поворот орбиты внутри спада меняет эффективный
+        # угол грани для ВЕРТИКАЛИ, E → E−ψ (горизонталь остаётся tg E/ρ). ψ хромат.: в треке ψ/(1+δ).
+        # Верт. коэффициент считается на лету _edge_kv (ψ=0 ⇒ ровно kEdge1/kEdge2, как раньше).
+        self.rinv = _rinv
+        self.psi1 = _fringe_psi(self.lf1, self.edge1, _rinv)
+        self.psi2 = _fringe_psi(self.lf2, self.edge2, _rinv)
         # ОПЫТ: СЛАБАЯ (СЕКТОРНАЯ) ФОКУСИРОВКА 1/ρ². В секторе x''+(1/ρ²)x=0 ⇒ Δpx=−(1/ρ²)·u·ds (гор.
         # фокус, верт. нет). У прямого ящика с постоянным киком изгиба R21=0 — этого члена нет. Вопрос:
         # не даёт ли его сама укладка на дугу (поворот рамки на стыках)? Тест сравнит обе геометрии.
@@ -336,13 +379,15 @@ class Magnet:
         R16 = h * (1.0 - Cx) / Kx if abs(Kx) > 1e-12 else h * self.Leff * self.Leff / 2.0
         R26 = h * Sx
         disp = _SECTOR_DISP                                     # знак дисперсии под конвенцию «+x наружу»
-        px += self.kEdge1 * x; py -= self.kEdge1 * y            # вход: край E1
+        px += self.kEdge1 * x                                   # вход: край E1 (+ фриндж ψ1 по вертикали)
+        py -= _edge_kv(self.edge1, self.psi1, self.rinv, self.kEdge1, d) * y
         x1 = Cx * x + Sx * px + disp * R16 * d
         px1 = Spx * x + Cx * px + disp * R26 * d
         y1 = Cy * y + Sy * py
         py1 = Spy * y + Cy * py
         x, px, y, py = x1, px1, y1, py1
-        px += self.kEdge2 * x; py -= self.kEdge2 * y            # выход: край E2
+        px += self.kEdge2 * x                                   # выход: край E2 (+ фриндж ψ2 по вертикали)
+        py -= _edge_kv(self.edge2, self.psi2, self.rinv, self.kEdge2, d) * y
         return (x, px, y, py, t + self.Leff, d)
 
     def _body_sector_symplectic(self, st):
@@ -367,7 +412,8 @@ class Magnet:
         b1 = self.k1 * rho0; b2 = self.k2 * rho0; b3 = self.k3 * rho0; b4 = 0.0   # b_n = k_n·ρ (норм. мультиполи)
         N = self._nsl_sector; s = self.Leff / N
         dfrac, kfrac = self._yoshida_dk
-        px += self.kEdge1 * x; py -= self.kEdge1 * y           # вход: краевой фокус E1
+        px += self.kEdge1 * x                                  # вход: краевой фокус E1 (+ фриндж ψ1 по вертикали)
+        py -= _edge_kv(self.edge1, self.psi1, self.rinv, self.kEdge1, d) * y
         X, QX, Y, QY, DP = x, px, y, py, d                     # elegant-обозначения (наши канонические координаты)
         dist = 0.0
         for _ in range(N):
@@ -418,7 +464,8 @@ class Magnet:
                                * math.sqrt(ds_isr * ds_factor) * float(_ISR_RNG.standard_normal()))
                     QX *= (1.0 + DP); QY *= (1.0 + DP)         # наклон → канонич. при НОВОЙ энергии (импульс упал)
         x, px, y, py, d = X, QX, Y, QY, DP
-        px += self.kEdge2 * x; py -= self.kEdge2 * y           # выход: краевой фокус E2
+        px += self.kEdge2 * x                                  # выход: краевой фокус E2 (δ — после излучения, как elegant)
+        py -= _edge_kv(self.edge2, self.psi2, self.rinv, self.kEdge2, d) * y
         return (x, px, y, py, t + dist, d)
 
     def _body_kick_symplectic(self, st):
@@ -463,10 +510,10 @@ class Magnet:
         N = self.nsl
         dsg = self.L / N; dsf = self.Leff / N
         xr = self.xref
-        if self.kEdge1:                                        # краевая линза на ВХОДЕ (гор.дефокус/верт.фокус)
+        if self.kEdge1 or self.psi1:                           # краевая линза на ВХОДЕ (гор.дефокус/верт.фокус)
             x, px, y, py, t, d = st
             u = x - self.xref_in if xr is not None else x
-            st = (x, px + self.kEdge1 * u, y, py - self.kEdge1 * y, t, d)
+            st = (x, px + self.kEdge1 * u, y, py - _edge_kv(self.edge1, self.psi1, self.rinv, self.kEdge1, d) * y, t, d)
         for i in range(N):
             st = _drift(st, dsg / 2.0)
             x, px, y, py, t, d = st
@@ -476,10 +523,10 @@ class Magnet:
             px += th / N - self.wkfoc * u * dsf - k1 * u * dsf - 0.5 * k2 * (u * u - y * y) * dsf - (k3 / 6.0) * (u ** 3 - 3 * u * y * y) * dsf
             py += k1v * y * dsf + k2 * u * y * dsf + (k3 / 6.0) * (3 * u * u * y - y ** 3) * dsf - (kE / N) * y
             st = _drift((x, px, y, py, t, d), dsg / 2.0)
-        if self.kEdge2:                                        # краевая линза на ВЫХОДЕ
+        if self.kEdge2 or self.psi2:                           # краевая линза на ВЫХОДЕ
             x, px, y, py, t, d = st
             u = x - self.xref_out if xr is not None else x
-            st = (x, px + self.kEdge2 * u, y, py - self.kEdge2 * y, t, d)
+            st = (x, px + self.kEdge2 * u, y, py - _edge_kv(self.edge2, self.psi2, self.rinv, self.kEdge2, d) * y, t, d)
         return st
 
 

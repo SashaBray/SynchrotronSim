@@ -77,10 +77,24 @@ def sector_body(L, h, K1):
     return R
 
 
-def edge(kedge):
-    """Тонкая краевая линза грани изгиба: x′ += k·x, y′ −= k·y (k = tan(E)/ρ, edge_order = 1)."""
-    R = np.eye(6); R[1, 0] = kedge; R[3, 2] = -kedge
+def edge(kedge, kedge_v=None):
+    """Тонкая краевая линза грани изгиба: x′ += k·x, y′ −= k_v·y (k = tan(E)/ρ, edge_order = 1).
+    k_v — вертикальный коэффициент с фриндж-поправкой tg(E−ψ)/ρ (HGAP/FINT); по умолчанию = k (жёсткий край)."""
+    R = np.eye(6); R[1, 0] = kedge; R[3, 2] = -(kedge if kedge_v is None else kedge_v)
     return R
+
+
+def edge_kv(m, i, d=0.0):
+    """Вертикальный коэффициент краевой линзы грани i (1 — вход, 2 — выход) при δ: tg(E−ψ/(1+δ))/ρ,
+    ровно как в теле ядра (matrix_tracker._edge_kv); без фринджа (ψ=0) — горизонтальный kEdge_i."""
+    k = getattr(m, f"kEdge{i}")
+    psi = getattr(m, f"psi{i}", 0.0)
+    return mt._edge_kv(getattr(m, f"edge{i}"), psi, m.rinv, k, d) if psi else k
+
+
+def _edges(m):
+    """Входная и выходная краевые линзы магнита (с вертикальной фриндж-поправкой, если она задана)."""
+    return edge(m.kEdge1, edge_kv(m, 1)), edge(m.kEdge2, edge_kv(m, 2))
 
 
 def element_matrix(m):
@@ -98,7 +112,8 @@ def element_matrix(m):
         return C, drift(L)
     if getattr(m, "theta0", 0.0):                      # изгиб: h > 0 в рамке ядра (rho0 = −Leff/θ0)
         h = -m.theta0 / L
-        R = edge(m.kEdge2) @ sector_body(L, h, m.k1) @ edge(m.kEdge1)
+        e1, e2 = _edges(m)
+        R = e2 @ sector_body(L, h, m.k1) @ e1
         return C, R
     if m.kind == "quad":
         return C, quad(L, m.k1, m.k1v)
@@ -201,7 +216,7 @@ def radiation_integrals(ring, nodes=8):
         th = float(getattr(m, "theta0", 0.0) or 0.0)
         if L > 0 and getattr(m, "nonzero", False) and th:
             h = -th / L
-            e1 = edge(m.kEdge1)
+            e1 = _edges(m)[0]
             for uu, ww in zip(u_n, w_n):
                 t = 0.5 * (uu + 1.0) * L
                 Rn.append(sector_body(t, h, m.k1) @ e1 @ accR)

@@ -125,7 +125,8 @@ inline std::vector<Node> buildLine(const std::string& ws, int lattice, double de
         cpit = lc.col("pitch"), crol = lc.col("roll"), cdev = lc.col("device_type_id"),
         cB = lc.col("mat_B"), cG = lc.col("mat_G"), cGv = lc.col("mat_Gv"), cS = lc.col("mat_S"),
         cO = lc.col("mat_O"), cLeff = lc.col("eff_length"), cKind = lc.col("kind"),
-        cNsl = lc.col("n_slices"), cE1 = lc.col("edge1"), cE2 = lc.col("edge2");
+        cNsl = lc.col("n_slices"), cE1 = lc.col("edge1"), cE2 = lc.col("edge2"),
+        cLf1 = lc.col("lf1"), cLf2 = lc.col("lf2");             // L_f торцов (фриндж); нет столбца ⇒ 0
     // индекс lattice_configs по instance_id (в пределах решётки)
     std::map<std::string, const std::vector<std::string>*> conf;
     for (auto& r : lc.rows) if (cell(r, cLat) == std::to_string(lattice)) conf[cell(r, cInst)] = &r;
@@ -159,9 +160,10 @@ inline std::vector<Node> buildLine(const std::string& ws, int lattice, double de
         double Leff = cellD(*r0, cLeff);
         int nsl = nsl_sector;       // сектор/кик-тело (_nsl_sector); n_slices из БД — для box-тела (кик корректора)
         double e1 = cellD(*r0, cE1), e2 = cellD(*r0, cE2);
+        double lf1 = cellD(*r0, cLf1), lf2 = cellD(*r0, cLf2);
         int nsl_box = (int)cellD(*r0, cNsl, 40.0);
         nd.phys = Element::make(nd.kind, Leff, B, G, Gv, S, O, e1, e2, nsl, design_mev, sr, yoshida_order, isr,
-                                nsl_box > 0 ? nsl_box : 40);
+                                nsl_box > 0 ? nsl_box : 40, lf1, lf2);
         nd.sector = nd.phys.sector; nd.monitor = (nd.kind == "monitor");
         double yaw = cellD(*r0, cyaw), pitch = cellD(*r0, cpit), roll = cellD(*r0, crol);
         nd.center = { cellD(*r0, cx), cellD(*r0, cy), cellD(*r0, cz) };

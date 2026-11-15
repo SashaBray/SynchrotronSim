@@ -12,7 +12,8 @@
     определение — так же, как это читает elegant).
   • Разворачивает выбранную линию рекурсивно: вложенные LINE, `n*ИМЯ`, `-ИМЯ` (обратный порядок).
   • Переводит МАТРИЧНЫЕ типы в КИКОВЫЕ: SBEN/RBEN/BEND → CSBEND, QUAD → KQUAD, SEXT → KSEXT,
-    OCTU/OCT → KOCT, EDRIFT/DRIFT → DRIF. Параметры (L, ANGLE, K1…K3, E1, E2, TILT) переносятся как есть.
+    OCTU/OCT → KOCT, EDRIFT/DRIFT → DRIF. Параметры (L, ANGLE, K1…K3, E1, E2, TILT, фриндж HGAP/FINT/
+    FINT1/FINT2, EDGE1/2_EFFECTS, EDGE_ORDER) переносятся как есть.
   • Выбрасывает то, чего нет в матричной модели: ВЧ, апертуры, импеданс, заряд, WATCH. Что именно
     выброшено — печатает; ВЧ подставляет сама сверка (elegant_diag.write_lattice).
   • Ставит N_SLICES на киковые элементы (по умолчанию 5 — конвенция проекта для СИЛА).
@@ -41,7 +42,11 @@ KICKIFY = {"SBEN": "CSBEND", "SBEND": "CSBEND", "RBEN": "CSBEND", "RBEND": "CSBE
            "DRIF": "DRIF", "DRIFT": "DRIF", "EDRIFT": "DRIF", "CSRDRIFT": "DRIF",
            "MONI": "MONI", "MONITOR": "MONI", "MARK": "MARK", "MARKER": "MARK"}
 SLICED = ("CSBEND", "KQUAD", "KSEXT", "KOCT")          # у кого есть N_SLICES
-KEEP = ("L", "ANGLE", "K1", "K2", "K3", "E1", "E2", "TILT", "HGAP", "FINT")
+KEEP = ("L", "ANGLE", "K1", "K2", "K3", "E1", "E2", "TILT", "HGAP", "FINT", "FINT1", "FINT2",
+        "EDGE1_EFFECTS", "EDGE2_EFFECTS", "EDGE_ORDER")
+# параметры, у которых НОЛЬ значим (не равен умолчанию elegant): FINT по умолчанию 0.5, FINT1/FINT2 = −1
+# (⇒ FINT), EDGE*_EFFECTS = 1 — FINT2=0 на внутренней грани нарезанного диполя выключает там фриндж
+KEEP_ZERO = ("FINT", "FINT1", "FINT2", "EDGE1_EFFECTS", "EDGE2_EFFECTS")
 DROP_NOTE = {"RFCA": "ВЧ (подставляет сверка)", "RFCW": "ВЧ", "MAXAMP": "апертура",
              "WATCH": "точка наблюдения elegant", "CHARGE": "заряд пучка",
              "ZLONGIT": "продольный импеданс", "ZTRANSVERSE": "поперечный импеданс",
@@ -129,7 +134,8 @@ def flatten(src, beamline=None, n_slices=5, line_name="ring"):
     for t in used:
         e = elems[t]
         typ = KICKIFY[e["type"]]
-        par = [f"{k}={num(e[k])}" for k in KEEP if k in e and e[k] != 0.0 or (k == "L" and "L" in e)]
+        par = [f"{k}={num(e[k])}" for k in KEEP
+               if k in e and (e[k] != 0.0 or k in KEEP_ZERO) or (k == "L" and "L" in e)]
         par = list(dict.fromkeys(par))
         if typ in SLICED:
             par.append(f"N_SLICES={n_slices}")

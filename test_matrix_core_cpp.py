@@ -39,8 +39,9 @@ STATES = [
 ]
 
 
-def make_py(kind, Leff, angle, k1, k2, k3, e1, e2, sr, design):
-    """Python-магнит через фикстуру (mat_* как в make_magnet теста), при sr — с включённым СИ."""
+def make_py(kind, Leff, angle, k1, k2, k3, e1, e2, sr, design, lf=(0.0, 0.0)):
+    """Python-магнит через фикстуру (mat_* как в make_magnet теста), при sr — с включённым СИ.
+    lf — длины зоны спада торцов L_f (фриндж HGAP/FINT), м."""
     old_sr, old_de = os.environ.get("SS_SR"), os.environ.get("SS_DESIGN_MEV")
     if sr:
         os.environ["SS_SR"] = "1"; os.environ["SS_DESIGN_MEV"] = repr(design)
@@ -52,17 +53,20 @@ def make_py(kind, Leff, angle, k1, k2, k3, e1, e2, sr, design):
                       device_type_id="TEST", instance_id="1", eff_length=repr(float(Leff)),
                       kind=kind, n_slices=str(NSL), edge1=repr(float(e1)), edge2=repr(float(e2)),
                       mat_B=repr(matB), mat_G=repr(k1 / QP), mat_Gv=repr(k1 / QP),
-                      mat_S=repr(k2 / QP), mat_O=repr(k3 / QP))]
+                      mat_S=repr(k2 / QP), mat_O=repr(k3 / QP),
+                      lf1=repr(float(lf[0])), lf2=repr(float(lf[1])))]
         return mt.Magnet(insts, {}, {}, {}, {}, settings=mt.Settings()), (matB, k1 / QP, k1 / QP, k2 / QP, k3 / QP)
     finally:
         os.environ.pop("SS_SR", None) if old_sr is None else os.environ.__setitem__("SS_SR", old_sr)
         if old_de is not None: os.environ["SS_DESIGN_MEV"] = old_de
 
 
-def run_cpp(kind, Leff, mats, e1, e2, design, sr, st):
+def run_cpp(kind, Leff, mats, e1, e2, design, sr, st, lf=(0.0, 0.0)):
     matB, matG, matGv, matS, matO = mats
     args = [EXE, "--element", kind, repr(Leff), repr(matB), repr(matG), repr(matGv), repr(matS), repr(matO),
             repr(e1), repr(e2), str(NSL), repr(design), "1" if sr else "0"] + [repr(v) for v in st]
+    if any(lf):
+        args += [repr(float(lf[0])), repr(float(lf[1]))]
     out = subprocess.run(args, capture_output=True, text=True).stdout.strip()
     if out == "LOST":
         return "LOST"
@@ -75,16 +79,16 @@ class TestMatrixCoreCpp(unittest.TestCase):
         if not os.path.exists(EXE):
             raise unittest.SkipTest(f"C++ ядро не собрано: {EXE} (cmake --build build --target MatrixTracker)")
 
-    def _check(self, name, sr, design, tol=1e-10):
+    def _check(self, name, sr, design, tol=1e-10, lf=(0.0, 0.0)):
         kind, Leff, angle, k1, k2, k3, e1, e2 = ELEMENTS[name]
-        m, mats = make_py(kind, Leff, angle, k1, k2, k3, e1, e2, sr, design)
+        m, mats = make_py(kind, Leff, angle, k1, k2, k3, e1, e2, sr, design, lf)
         worst = 0.0
         for st in STATES:
             try:
                 py = m.body(tuple(map(float, st)))
             except mt.ParticleLost:
                 py = "LOST"
-            cpp = run_cpp(kind, Leff, mats, e1, e2, design, sr, st)
+            cpp = run_cpp(kind, Leff, mats, e1, e2, design, sr, st, lf)
             self.assertEqual(py == "LOST", cpp == "LOST", f"{name} {st}: расхождение потери")
             if py == "LOST":
                 continue
@@ -101,6 +105,21 @@ class TestMatrixCoreCpp(unittest.TestCase):
     def test_dipoles_with_radiation(self):
         w = max(self._check(n, sr=True, design=6000.0) for n in ("dq1b", "dl1a5"))
         print(f"  [с СИ 6ГэВ] макс. расхождение (диполи DQ/DL): {w:.2e}")
+
+    def test_fringe_bodies(self):
+        """Фриндж HGAP/FINT (L_f торцов, верт. линза tg(E−ψ/(1+δ))/ρ): C++ = Python, без СИ и с СИ."""
+        lf = (0.02, 0.015)
+        w = max(self._check(n, sr=sr, design=6000.0, lf=lf) for n in ("dq1b", "dl1a5") for sr in (False, True))
+        print(f"  [фриндж L_f={lf}] макс. расхождение C++ vs Python (DQ/DL, ±СИ): {w:.2e}")
+        # и фриндж действительно включён (иначе тест сверял бы жёсткий край сам с собой)
+        kind, Leff, angle, k1, k2, k3, e1, e2 = ELEMENTS["dl1a5"]
+        st = (1e-3, 0.0, 1e-3, 0.0, 0.0, 0.0)
+        hard = run_cpp(kind, Leff, make_py(kind, Leff, angle, k1, k2, k3, e1, e2, False, 6000.0)[1],
+                       e1, e2, 6000.0, False, st)
+        soft = run_cpp(kind, Leff, make_py(kind, Leff, angle, k1, k2, k3, e1, e2, False, 6000.0, lf)[1],
+                       e1, e2, 6000.0, False, st, lf)
+        self.assertGreater(abs(soft[3] - hard[3]), 1e-9)          # py изменился
+        self.assertLess(abs(soft[1] - hard[1]), 1e-15)             # px — нет (горизонталь от фринджа не зависит)
 
 
 class TestKickServe(unittest.TestCase):

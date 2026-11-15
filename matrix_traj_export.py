@@ -42,10 +42,10 @@ def body_global(m, st):
     th, k1, k1v, k2, k3, kE = m.theta0, m.k1, m.k1v, m.k2, m.k3, m.kEdge
     xr = m.xref                                                 # прогиб опорной дуги (см. Magnet._ref_bow)
     s = 0.0; pts = [_g(m, s, x, y)]; st = (x, px, y, py, t, d)
-    if m.kEdge1:                                                # краевая линза на ВХОДЕ (гор.дефокус/верт.фокус)
+    if m.kEdge1 or m.psi1:                                      # краевая линза на ВХОДЕ (гор.дефокус/верт.фокус)
         x, px, y, py, t, d = st
         u = x - m.xref_in if xr is not None else x
-        st = (x, px + m.kEdge1 * u, y, py - m.kEdge1 * y, t, d)
+        st = (x, px + m.kEdge1 * u, y, py - mt._edge_kv(m.edge1, m.psi1, m.rinv, m.kEdge1, d) * y, t, d)
     for i in range(N):
         st = mt._drift(st, dsg / 2.0); s += dsg / 2.0
         x, px, y, py, t, d = st
@@ -54,10 +54,10 @@ def body_global(m, st):
         py += k1v * y * dsf + k2 * u * y * dsf + (k3 / 6.0) * (3 * u * u * y - y ** 3) * dsf - (kE / N) * y
         st = mt._drift((x, px, y, py, t, d), dsg / 2.0); s += dsg / 2.0
         pts.append(_g(m, s, st[0], st[2]))
-    if m.kEdge2:                                                # краевая линза на ВЫХОДЕ
+    if m.kEdge2 or m.psi2:                                      # краевая линза на ВЫХОДЕ
         x, px, y, py, t, d = st
         u = x - m.xref_out if xr is not None else x
-        st = (x, px + m.kEdge2 * u, y, py - m.kEdge2 * y, t, d)
+        st = (x, px + m.kEdge2 * u, y, py - mt._edge_kv(m.edge2, m.psi2, m.rinv, m.kEdge2, d) * y, t, d)
     return st, pts
 
 

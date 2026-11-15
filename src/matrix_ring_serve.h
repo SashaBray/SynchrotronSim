@@ -79,6 +79,8 @@ struct RingModel {
                     c.Leff = m.Leff / N; c.theta0 = m.theta0 / N; c.nsl = 1;
                     c.kEdge1 = (i == 0) ? m.kEdge1 : 0.0;
                     c.kEdge2 = (i == N - 1) ? m.kEdge2 : 0.0;
+                    c.psi1 = (i == 0) ? m.psi1 : 0.0;          // фриндж грани — тоже только на крайних срезах
+                    c.psi2 = (i == N - 1) ? m.psi2 : 0.0;
                     c.precache();
                     pieces.push_back({ (int)j, i == 0, c });
                 }

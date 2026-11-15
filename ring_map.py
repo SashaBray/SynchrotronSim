@@ -113,6 +113,15 @@ class DA:
     def div(self, a, b):
         return self.mul(a, self.inv(b))
 
+    def tan(self, a):
+        """tg ряда: производные tg⁽ᵏ⁾ = Pₖ(T), T = tg(a₀), P₀ = T, Pₖ₊₁ = Pₖ′·(1+T²)."""
+        T = math.tan(a[0])
+        P = np.polynomial.Polynomial([0.0, 1.0]); one_t2 = np.polynomial.Polynomial([1.0, 0.0, 1.0])
+        d = []
+        for _ in range(self.N + 1):
+            d.append(float(P(T))); P = P.deriv() * one_t2
+        return self._series(a, d)
+
     def sqrt(self, a):
         a0 = a[0]
         if a0 <= 0:
@@ -176,10 +185,14 @@ def junction(da, st, A, B, same_plane=False, para_tol=1e-4):
     return [dot(rel, bU), da.mul(one, dot(dirv, bU)), dot(rel, bV), da.mul(one, dot(dirv, bV)), t + path, d]
 
 
-def edge(st, k):
-    """Тонкая краевая линза грани изгиба (как в ядре): px += k·x, py −= k·y."""
+def edge(st, k, da=None, e=0.0, psi=0.0, rinv=0.0):
+    """Тонкая краевая линза грани изгиба (как в ядре): px += k·x, py −= k_v·y.
+    Без фринджа k_v = k; с фринджем (ψ≠0, HGAP/FINT) k_v = tg(E − ψ/(1+δ))/ρ — ряд по δ (хроматичность края)."""
     x, px, y, py, t, d = st
-    return [x, px + k * x, y, py - k * y, t, d]
+    if not psi:
+        return [x, px + k * x, y, py - k * y, t, d]
+    kv = rinv * da.tan(da.const(e) - psi * da.inv(da.const(1.0) + d))
+    return [x, px + k * x, y, py - da.mul(kv, y), t, d]
 
 
 def _csbend_fields(da, X, Y, b1, b2, b3, h):
@@ -253,9 +266,10 @@ class RingMap:
     def element(self, st, m):
         da = self.da
         if getattr(m, "sector", False):
-            st = edge(st, m.kEdge1)
+            rinv = getattr(m, "rinv", 0.0)
+            st = edge(st, m.kEdge1, da, getattr(m, "edge1", 0.0), getattr(m, "psi1", 0.0), rinv)
             st = da.compose(self._body_map(m), st)
-            return edge(st, m.kEdge2)
+            return edge(st, m.kEdge2, da, getattr(m, "edge2", 0.0), getattr(m, "psi2", 0.0), rinv)
         if getattr(m, "kick_sector", False):
             return da.compose(self._body_map(m), st)
         return drift(da, st, float(m.Leff))

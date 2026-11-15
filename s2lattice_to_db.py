@@ -73,6 +73,30 @@ def mat_of(kind, e, L):
     return m
 
 
+def edges_of(e):
+    """Края CSBEND по правилам elegant: (E1, E2, L_f1, L_f2). EDGE1_EFFECTS/EDGE2_EFFECTS = 0 выключают
+    грань целиком (угол и фриндж); L_f = 2·HGAP·FINTi (HGAP по умолч. 0, FINT 0.5, FINT1/2 < 0 ⇒ FINT) —
+    см. matrix_tracker.lte_fringe_lengths, единственный источник этой конвенции."""
+    import matrix_tracker as mt
+    lf1, lf2 = mt.lte_fringe_lengths(e)
+    E1 = e.get("E1", 0.0) if e.get("EDGE1_EFFECTS", 1.0) != 0.0 else 0.0
+    E2 = e.get("E2", 0.0) if e.get("EDGE2_EFFECTS", 1.0) != 0.0 else 0.0
+    return E1, E2, lf1, lf2
+
+
+def _warn_edge_methods(devs):
+    """SynchrotronSim реализует край elegant по умолчанию (EDGE_EFFECTS=1, EDGE_ORDER=1: линейная линза,
+    tg E/ρ и tg(E−ψ)/ρ). Другие методы elegant (2–5, EDGE_ORDER≥2) дают ещё нелинейные/нулевого порядка
+    члены — предупредить, что в ядре их нет."""
+    odd = sorted(nm for nm, e in devs.items() if e["type"] == "CSBEND" and (
+        e.get("EDGE1_EFFECTS", 1.0) not in (0.0, 1.0) or e.get("EDGE2_EFFECTS", 1.0) not in (0.0, 1.0)
+        or e.get("EDGE_ORDER", 1.0) >= 2.0))
+    if odd:
+        print(f"[!] у {len(odd)} изгибов метод края elegant ≠ 1 или EDGE_ORDER≥2 ({', '.join(odd[:5])}"
+              f"{'…' if len(odd) > 5 else ''}): SynchrotronSim считает край методом 1 (линейная линза "
+              f"tg E/ρ, по вертикали tg(E−ψ)/ρ) — нелинейных членов этих методов в ядре нет")
+
+
 def main():
     elems, seq = parse()
     # уникальные магниты-типы
@@ -101,6 +125,10 @@ def main():
 
     # 2) lattice_configs — проход кольца
     lc_hdr = next(csv.reader(open(os.path.join(TB, "lattice_configs.csv"), encoding="utf-8"), delimiter=";"))
+    fringe = {nm: edges_of(e) for nm, e in devs.items() if e["type"] == "CSBEND"}
+    if any(f[2] or f[3] for f in fringe.values()):
+        lc_hdr = lc_hdr + [c for c in ("lf1", "lf2") if c not in lc_hdr]   # столбцы L_f — в конец схемы
+    _warn_edge_methods(devs)
     x = y = th = 0.0; iid = 0; lc_rows = []
     for nm in seq:
         e = elems.get(nm)
@@ -123,6 +151,7 @@ def main():
             continue
         if nm in devs:
             iid += 1; kind = kind_of(e)
+            E1, E2, lf1, lf2 = fringe.get(nm, (e.get("E1", 0.0), e.get("E2", 0.0), 0.0, 0.0))
             r = {c: "" for c in lc_hdr}
             r.update(lattice_id=LAT_ID, instance_id=str(iid), device_type_id=PFX + nm,
                      # геометрия пишется с полной точностью double: округление до микрона давало
@@ -133,7 +162,9 @@ def main():
                      # на hardware_library/element_transforms, C++ — нет): заполняем явно
                      eff_length=f"{L:.12f}", kind=kind, n_slices=NSL,
                      # края: знак тот же, что у угла (θ0 = −ANGLE) ⇒ edge = −E, как в решётке 1
-                     edge1=f"{-e.get('E1', 0.0):.15g}", edge2=f"{-e.get('E2', 0.0):.15g}")
+                     edge1=f"{-E1:.15g}", edge2=f"{-E2:.15g}")
+            if lf1 or lf2:                                     # длина зоны спада торцов L_f = 2·HGAP·FINT, м
+                r.update(lf1=f"{lf1:.15g}" if lf1 else "", lf2=f"{lf2:.15g}" if lf2 else "")
             for k, v in mat_of(kind, e, L).items():
                 r[k] = f"{v:.15g}"
             lc_rows.append(r)
@@ -174,9 +205,10 @@ def upsert_by(path, key, hdr, newrows):
 
 def upsert_lattice(path, hdr, lat_id, newrows):
     import shutil
-    rows = list(csv.reader(open(path, encoding="utf-8"), delimiter=";")); head = rows[0]
+    rows = list(csv.reader(open(path, encoding="utf-8"), delimiter=";"))
+    head = rows[0] + [c for c in hdr if c not in rows[0]]      # новые столбцы (напр. lf1/lf2) — в конец схемы
     li = head.index("lattice_id")
-    keep = [r for r in rows[1:] if r and r[li] != lat_id]
+    keep = [r + [""] * (len(head) - len(r)) for r in rows[1:] if r and r[li] != lat_id]
     shutil.copy(path, path + ".bak_s2")
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=";"); w.writerow(head)

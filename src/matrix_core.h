@@ -111,7 +111,11 @@ struct Element {
     int    nsl  = 5;
     double theta0 = 0, k1 = 0, k1v = 0, k2 = 0, k3 = 0;   // силы по опорной жёсткости
     double ks = 0;                                        // скью-квадрупольный градиент (связь x↔y)
-    double kEdge1 = 0, kEdge2 = 0;                        // краевые линзы E1/E2
+    double kEdge1 = 0, kEdge2 = 0;                        // краевые линзы E1/E2 (гор.; верт. без фринджа)
+    // ФРИНДЖ (мягкий спад поля, elegant HGAP/FINT): верт. линза грани tg(E−ψ/(1+δ))/ρ, ψ = L_f/ρ·(1+sin²E)/cosE.
+    // ψ=0 ⇒ верт. коэффициент = kEdge (жёсткий край, прежнее поведение бит-в-бит). matrix_tracker._edge_kv.
+    double edge1 = 0, edge2 = 0, rinv = 0;                // углы граней (рад, знак БД) и 1/ρ (знак по изгибу)
+    double psi1 = 0, psi2 = 0;                            // фриндж-поправки углов граней
     bool   sector = false;                                // изгиб (dipole/dq) с theta0≠0 → секторный интегратор
     bool   kick   = false;                                // прямой мультиполь (quad/sext/oct)
     double rad_coef = 0;                                  // распределённое СИ (классическое)
@@ -128,7 +132,8 @@ struct Element {
     // order — порядок схемы Йошиды (2/4/6), isr — квантовое возбуждение (только вместе с sr).
     static Element make(const std::string& kind, double Leff, double B, double G, double Gv,
                         double S, double O, double edge1, double edge2, int nsl,
-                        double design_mev, bool sr, int order = 4, bool isr = false, int nsl_box = 40) {
+                        double design_mev, bool sr, int order = 4, bool isr = false, int nsl_box = 40,
+                        double lf1 = 0.0, double lf2 = 0.0) {
         Element e; e.kind = kind; e.Leff = Leff; e.nsl = nsl; e.ys = Yoshida(order); e.nsl_box = nsl_box;
         double b = B, g = G, gv = Gv, s = S, o = O;
         if (kind == "dipole") { g *= b; gv *= b; s *= b; o *= b; }   // градиенты диполя заданы относит. поля
@@ -138,6 +143,9 @@ struct Element {
         double rinv = (Leff > 0) ? e.theta0 / Leff : 0.0;
         e.kEdge1 = std::tan(edge1) * rinv;
         e.kEdge2 = std::tan(edge2) * rinv;
+        e.edge1 = edge1; e.edge2 = edge2; e.rinv = rinv;
+        e.psi1 = fringe_psi(lf1, edge1, rinv);
+        e.psi2 = fringe_psi(lf2, edge2, rinv);
         bool bend = (kind == "dipole" || kind == "dq") && std::fabs(e.theta0) > 0.0;
         e.sector = bend;
         bool nonzero = e.theta0 || e.k1 || e.k1v || e.k2 || e.k3 || e.kEdge1 || e.kEdge2;
@@ -150,6 +158,17 @@ struct Element {
             if (isr) e.isr_coef = ISR_K * std::pow(gamma, 2.5) / std::pow(std::fabs(e.rho0), 1.5);
         }
         return e;
+    }
+
+    // ψ = L_f·(1/ρ)·(1+sin²E)/cos E (matrix_tracker._fringe_psi); L_f=0 или прямой элемент ⇒ 0.
+    static double fringe_psi(double lf, double edge, double rinv) {
+        if (lf == 0.0 || rinv == 0.0) return 0.0;
+        double s = std::sin(edge);
+        return lf * rinv * (1.0 + s * s) / std::cos(edge);
+    }
+    // Верт. коэффициент краевой линзы: tg(E − ψ/(1+δ))/ρ; ψ=0 ⇒ kE (без пересчёта tg) — matrix_tracker._edge_kv.
+    double edge_kv(double edge, double psi, double kE, double d) const {
+        return psi != 0.0 ? std::tan(edge - psi / (1.0 + d)) * rinv : kE;
     }
 
     // ПРЕКЭШ сектора (ρ, 1/ρ, bₙ, sin/cos стадий) — пересчитывается и у срезов изгиба (_bend_slices).
@@ -185,7 +204,8 @@ private:
         double x = st.x, px = st.px, y = st.y, py = st.py, t = st.t, d = st.delta;
         const double b4 = 0.0;                     // rho0/h/b1..b3/s_slice — ПРЕКЭШ (Element::make), не пересчёт
         int N = nsl; double s = s_slice;
-        px += kEdge1 * x; py -= kEdge1 * y;        // вход: краевой фокус E1
+        px += kEdge1 * x;                          // вход: краевой фокус E1 (+ фриндж ψ1 по вертикали)
+        py -= edge_kv(edge1, psi1, kEdge1, d) * y;
         double X = x, QX = px, Y = y, QY = py, DP = d;
         double dist = 0.0;
         const int J = (int)ys.d.size();
@@ -231,7 +251,8 @@ private:
             }
         }
         x = X; px = QX; y = Y; py = QY; d = DP;
-        px += kEdge2 * x; py -= kEdge2 * y;        // выход: краевой фокус E2
+        px += kEdge2 * x;                          // выход: краевой фокус E2 (δ — после излучения, как elegant)
+        py -= edge_kv(edge2, psi2, kEdge2, d) * y;
         return { x, px, y, py, t + dist, d };
     }
 
