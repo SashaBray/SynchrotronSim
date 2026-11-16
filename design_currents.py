@@ -36,6 +36,11 @@ HW_FIELDS = ("map_bin_path", "nominal_arg", "use_symmetry", "field_direction", "
              "rot_x_deg", "rot_y_deg", "rot_z_deg")
 LC_FIELDS = ("eff_length", "kind")
 
+# Старые имена моментов таблицы связи → текущие. До 2026-11-16 element_compare.extract_coeffs писал СКЬЮ-
+# квадруполь (−∂x′/∂y, связь y→x′) под именем «Gv»; теперь это «Gs», а «Gv» остаётся за ядром (mat_Gv =
+# нормальный вертикальный градиент k1v). В coupling_matrices «Gv» никогда не означал k1v ⇒ перевод однозначен.
+LEGACY_MOMENT_ALIAS = {"Gv": "Gs"}
+
 _BASE_RE = re.compile(r"_I\d+|_c\d+|_main")            # суффикс обмотки (как в element_compare.element_windings)
 _VARIANT_RE = re.compile(r"_sext$")                    # вариант МОДЕЛИ того же магнита (DQ с секступольным киком)
 
@@ -66,11 +71,17 @@ def _norm_label(label: str) -> str:
     return label[2:] if (label.startswith("I_") and len(label) > 2) else label
 
 
+def moment_name(label: str) -> str:
+    """Имя момента таблицы связи в текущей конвенции: старое «Gv» (скью-квадруполь) → «Gs»."""
+    return LEGACY_MOMENT_ALIAS.get(label, label)
+
+
 def load_coupling(tables_dir: str = TB) -> list[dict]:
     """Матрицы связи из БД → список dict в формате element_compare (name/kind/labels/outputs/M/devs...).
 
     Прямые (`forward`) строки собираются в матрицу M [моменты × обмотки]; `fixed` (PM — поле задано
-    конструкцией, обмоток нет) отдаётся отдельной веткой с pm=True.
+    конструкцией, обмоток нет) отдаётся отдельной веткой с pm=True. Имена моментов приводятся к текущей
+    конвенции (`moment_name`): таблица, снятая до переименования «Gv»→«Gs», читается так же.
     """
     path = os.path.join(tables_dir, COUPLING_TABLE)
     if not os.path.exists(path):
@@ -79,6 +90,9 @@ def load_coupling(tables_dir: str = TB) -> list[dict]:
             f"построить: py -3.14 element_compare.py library")
     with open(path, encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f, delimiter=";"))
+    for r in rows:                                           # момент — out у forward/fixed, in у inverse
+        r["out_label"] = moment_name(r.get("out_label", ""))
+        r["in_label"] = moment_name(r.get("in_label", ""))
 
     by_el: dict[str, list[dict]] = {}
     for r in rows:

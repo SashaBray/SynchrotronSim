@@ -135,8 +135,8 @@ struct Element {
                         double design_mev, bool sr, int order = 4, bool isr = false, int nsl_box = 40,
                         double lf1 = 0.0, double lf2 = 0.0) {
         Element e; e.kind = kind; e.Leff = Leff; e.nsl = nsl; e.ys = Yoshida(order); e.nsl_box = nsl_box;
+        // ЕДИНАЯ КОНВЕНЦИЯ: все mat_* абсолютные у любого вида (у «dipole» доли mat_B отменены) — matrix_tracker.py
         double b = B, g = G, gv = Gv, s = S, o = O;
-        if (kind == "dipole") { g *= b; gv *= b; s *= b; o *= b; }   // градиенты диполя заданы относит. поля
         double QP = qp();
         e.theta0 = QP * b * Leff;
         e.k1 = QP * g; e.k1v = QP * gv; e.k2 = QP * s; e.k3 = QP * o;
@@ -148,10 +148,7 @@ struct Element {
         e.psi2 = fringe_psi(lf2, edge2, rinv);
         bool bend = (kind == "dipole" || kind == "dq") && std::fabs(e.theta0) > 0.0;
         e.sector = bend;
-        bool nonzero = e.theta0 || e.k1 || e.k1v || e.k2 || e.k3 || e.kEdge1 || e.kEdge2;
-        e.kick = (!bend) && nonzero && (kind == "quad" || kind == "sext" || kind == "oct");
-        if (e.sector || e.kick) e.s_slice = Leff / e.nsl;           // ПРЕКЭШ длины среза
-        e.precache();
+        e.precache();                                                // флаг kick (по полю, не по виду) + прекэш
         if (e.sector && sr) {                                        // распределённое СИ (классическое)
             double gamma = design_mev / MC2_MEV;
             e.rad_coef = RAD_K * gamma * gamma * gamma / (e.rho0 * e.rho0);
@@ -172,7 +169,11 @@ struct Element {
     }
 
     // ПРЕКЭШ сектора (ρ, 1/ρ, bₙ, sin/cos стадий) — пересчитывается и у срезов изгиба (_bend_slices).
+    // Флаг kick — ПО ПОЛЮ, а не по виду: любой не-изгиб с мультиполями (квад/секступоль/октуполь, в т.ч. kicker
+    // или dq с θ0=0) идёт симплектическим кик-телом (matrix_tracker.kick_sector). Пересчёт здесь ⇒ возмущения
+    // DK/DK2/DK3/DSK на элементе с нулевым полем тоже действуют (раньше флаг замерзал при сборке).
     void precache() {
+        if (!sector) kick = Leff > 0.0 && (k1 != 0.0 || k1v != 0.0 || k2 != 0.0 || k3 != 0.0 || ks != 0.0);
         if (sector || kick) s_slice = Leff / nsl;
         if (sector) {
             rho0 = -Leff / theta0; h = 1.0 / rho0;                   // ρ>0 (конвенция elegant)
@@ -188,8 +189,9 @@ struct Element {
     // Диспетчер тела: изгиб → секторный интегратор; прямой мультиполь → кик; корректор с киком → «ящик»
     // (дрейф–кик–дрейф, n_slices из БД — как box-тело matrix_tracker для θ0 у неизгибающего); иначе дрейф.
     State body(const State& st, IsrRng* rng = nullptr) const {
-        // полевой-свободный корректор (kind=kicker) — отдельным путём дрейф–кик–дрейф (НЕ меняется)
-        if ((hkick != 0.0 || vkick != 0.0) && !kick && !sector) return body_kicker(st);
+        // полевой-свободный корректор (kind=kicker) — отдельным путём дрейф–кик–дрейф: кик коррекции hkick/vkick
+        // и/или статический θ0 прямого элемента (mat_B у kicker), как box-тело matrix_tracker
+        if ((hkick != 0.0 || vkick != 0.0 || theta0 != 0.0) && !kick && !sector) return body_kicker(st);
         State out = sector ? body_sector(st, rng) : (kick ? body_kick(st) : drift(st, Leff));
         // hkick/vkick на ПОЛЕВОМ элементе (квадруполь/секступоль/изгиб) = доп. дипольный кик: смещённый
         // магнит (feed-down K1·L·Δ) или ошибка поля. В обычных прогонах поле-элементы кика не несут —
@@ -257,22 +259,24 @@ private:
     }
 
     // Корректор (кик θ у неизгибающего элемента) — box-тело matrix_tracker при θ0≠0 и нулевых мультиполях:
-    // n_slices раз дрейф(ds/2) → кик θ/N → дрейф(ds/2).
+    // n_slices раз дрейф(ds/2) → кик θ/N → дрейф(ds/2). θ0 — статический (mat_B), hkick/vkick — коррекция.
     State body_kicker(const State& st) const {
         State p = st;
         int N = nsl_box; double ds = Leff / N;
         for (int i = 0; i < N; ++i) {
             p = drift(p, ds / 2.0);
-            p.px += hkick / N; p.py += vkick / N;
+            p.px += (hkick + theta0) / N; p.py += vkick / N;
             p = drift(p, ds / 2.0);
         }
         return p;
     }
 
-    // Прямой мультиполь (KQUAD/KSEXT/KOCT) — matrix_tracker._body_kick_symplectic.
+    // Прямой мультиполь (KQUAD/KSEXT/KOCT, а также поле от формы полюсов у любого не-изгиба) —
+    // matrix_tracker._body_kick_symplectic. θ0≠0 (mat_B у kicker с мультиполями) — дипольный член кика.
     State body_kick(const State& st) const {
         State p = st;
         int N = nsl; double ds = s_slice;          // Leff/nsl — ПРЕКЭШ
+        const double b0 = theta0 / Leff;           // статический дипольный член прямого элемента
         const int J = (int)ys.d.size();
         for (int i = 0; i < N; ++i) {
             for (int j = 0; j < J; ++j) {
@@ -284,6 +288,7 @@ private:
                          - (k3 / 6.0) * (x * x * x - 3.0 * x * y * y)) * kf;
                 p.py += (k1v * y - ks * x + k2 * x * y
                          + (k3 / 6.0) * (3.0 * x * x * y - y * y * y)) * kf;
+                if (b0 != 0.0) p.px += b0 * kf;    // θ0=0 у квадов ⇒ не входит (бит-в-бит)
             }
         }
         return p;

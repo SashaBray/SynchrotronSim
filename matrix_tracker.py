@@ -269,10 +269,9 @@ class Magnet:
             B += float(r.get("mat_B") or 0); G += float(r.get("mat_G") or 0)
             Gv += float(r.get("mat_Gv") or r.get("mat_G") or 0)   # дефолт = mat_G ⇒ гармонич. (совместимо)
             S += float(r.get("mat_S") or 0); O += float(r.get("mat_O") or 0)
-        # ДИПОЛЬ: mat_G/Gv/S/O заданы ОТНОСИТЕЛЬНО поля (доли mat_B, аппаратные константы) → в абсолютные.
-        # Даёт 1/f = θ₀·g (фокус ∝ изгибу): при излучении θ₀ пересчит. по текущему p, отношения фиксированы.
-        if self.kind == "dipole":
-            G *= B; Gv *= B; S *= B; O *= B                              # градиенты диполя заданы относительно поля
+        # ЕДИНАЯ КОНВЕНЦИЯ: все mat_* АБСОЛЮТНЫЕ у любого вида (у «dipole» раньше были доли mat_B — отменено,
+        # это давало ошибку импорта CSBEND с K2 без K1). Мультиполи — свойство поля, а не вида: kind задаёт
+        # только геометрию тела (изгиб = сектор, прочее = прямой элемент), см. kick_sector ниже.
         # силы по ОПОРНОЙ жёсткости (по L_eff — интеграл поля); δ-зависимость — в дрейфе.
         # k1=k1u (гор. фокус ∂Bz/∂u), k1v (верт. фокус ∂By/∂v): неголоморфн. диполь Gu≠Gv ⇒ |f_x|≠|f_y|.
         self.theta0 = QP * B * self.Leff
@@ -313,8 +312,11 @@ class Magnet:
         # ПРЯМОЙ (не изгибающий) мультиполь в секторном режиме — симплектика KQUAD/KSEXT/KOCT (порт elegant
         # integrate_kick_multipole_ordn, order 4, N=5). Даёт квады/секступоли/октуполи бит-в-бит с elegant
         # (box-модель = order 2, N=40 давала ~0.13мкм/шт). Рамки — обычные ⊥оси (прямой элемент, ветка else).
-        self.kick_sector = (SECTOR and not self.sector and self.nonzero
-                            and self.kind in ("quad", "sext", "oct"))
+        # Вид НЕ важен: любой не-изгиб с полевыми мультиполями (квад/секступоль/октуполь от формы полюсов, в т.ч.
+        # у kicker или dq с θ0=0) идёт этим телом; статический θ0 прямого элемента — дипольный член кика. Без
+        # мультиполей θ0 (корректор) остаётся «ящиком» box-тела — так же, как body_kicker в C++.
+        self.kick_sector = (SECTOR and not self.sector and self.Leff > 0
+                            and any(abs(v) > 0 for v in (self.k1, self.k1v, self.k2, self.k3)))
         # РАДИАЦИОННЫЕ КОЭФ. (распределённая SR): по умолчанию 0 (излучение выключено/не изгиб).
         # Считаются по ПРОЕКТНОЙ γ на изгибающих секторных элементах при SS_SR=1 (см. _body_sector_symplectic).
         self.rad_coef = 0.0                                    # классич. потеря энергии ∝ γ³/ρ²
@@ -481,6 +483,7 @@ class Magnet:
         k1, k1v, k2, k3 = self.k1, self.k1v, self.k2, self.k3
         N = self._nsl_sector; ds = self.Leff / N
         dfrac, kfrac = self._yoshida_dk
+        b0 = self.theta0 / self.Leff                           # статический дипольный член прямого элемента (kicker)
         for _ in range(N):
             for j in range(len(dfrac)):
                 x, px, y, py, t, d = _drift((x, px, y, py, t, d), ds * dfrac[j])   # дрейф по слопу
@@ -489,6 +492,8 @@ class Magnet:
                 kf = ds * kfrac[j]                             # доля кика на этот подшаг × длина среза
                 px += (-k1 * x - 0.5 * k2 * (x * x - y * y) - (k3 / 6.0) * (x ** 3 - 3.0 * x * y * y)) * kf
                 py += (k1v * y + k2 * x * y + (k3 / 6.0) * (3.0 * x * x * y - y ** 3)) * kf
+                if b0:                                         # θ0=0 у квадов ⇒ ветка не входит (бит-в-бит)
+                    px += b0 * kf
         return (x, px, y, py, t, d)
 
     def body(self, st):

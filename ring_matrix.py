@@ -102,7 +102,9 @@ def element_matrix(m):
 
     ТОЛЬКО секторный режим ядра (SS_SECTOR=1). В боксовой модели грани изгиба ⊥ оси ящика, опорная орбита
     входит в них под углом θ/2, и телу соответствует другая матрица — здесь она не реализована. Ядро в секторном режиме:
-    изгиб — край·тело·край, прямой мультиполь — толстая линза (секступоль/октуполь линейно = дрейф)."""
+    изгиб — край·тело·край, прямой мультиполь — толстая линза (секступоль/октуполь линейно = дрейф).
+    Тело выбирается ПО ПОЛЮ, как в ядре (флаги sector/kick_sector), а не по виду: градиент K1 у секступоля,
+    kicker или dq с θ0=0 — тоже толстая линза. Дипольный кик прямого элемента (корректор) — не оптика, не входит."""
     if not mt.SECTOR:
         raise RuntimeError("аналитические матрицы описаны для секторного режима ядра: нужен SS_SECTOR=1 "
                            "ДО импорта matrix_tracker")
@@ -110,14 +112,14 @@ def element_matrix(m):
     C = np.array([0.0, 0.0, 0.0, 0.0, L, 0.0])          # путь опорной частицы (пятая координата — абсолютная)
     if L <= 0 or not getattr(m, "nonzero", False):
         return C, drift(L)
-    if getattr(m, "theta0", 0.0):                      # изгиб: h > 0 в рамке ядра (rho0 = −Leff/θ0)
+    if getattr(m, "sector", False):                    # изгиб: h > 0 в рамке ядра (rho0 = −Leff/θ0)
         h = -m.theta0 / L
         e1, e2 = _edges(m)
         R = e2 @ sector_body(L, h, m.k1) @ e1
         return C, R
-    if m.kind == "quad":
+    if getattr(m, "kick_sector", False) and (m.k1 or m.k1v):   # прямой с градиентом — любого вида
         return C, quad(L, m.k1, m.k1v)
-    return C, drift(L)                                  # секступоль, октуполь, корректор
+    return C, drift(L)                                  # чистый секступоль/октуполь, корректор
 
 
 # ============================================================================ стыки (модифицированные дрейфы)
@@ -213,7 +215,7 @@ def radiation_integrals(ring, nodes=8):
     for m in mags:
         accC, accR = compose((accC, accR), junction_matrix(prev, m))
         L = float(getattr(m, "Leff", 0.0) or 0.0)
-        th = float(getattr(m, "theta0", 0.0) or 0.0)
+        th = float(getattr(m, "theta0", 0.0) or 0.0) if getattr(m, "sector", False) else 0.0   # излучают изгибы
         if L > 0 and getattr(m, "nonzero", False) and th:
             h = -th / L
             e1 = _edges(m)[0]

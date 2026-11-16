@@ -6,7 +6,8 @@
 Короткий диполь (SBM) был двумя слайсами по 24.43 мм, а это один магнит 59 мм.
 
 Что делает (только решётка 26, по месту, с бэкапами):
-  • ДЛИННЫЙ модуль (kind=dipole, L≈0.41783): eff_length → 0.410, mat_B ×= old_L/0.410.
+  • ДЛИННЫЙ модуль (kind=dipole, L≈0.41783): eff_length → 0.410, mat_B (и мультиполи mat_G/Gv/S/O,
+    если есть — они абсолютные) ×= old_L/0.410.
     Центр (x,y,z,yaw) НЕ трогается → зазор 417.83−410 = 7.83 мм открывается сам.
   • КОРОТКИЙ (sila26_SBM_1 + следующий sila26_SBM_2): сливаются в ОДИН 0.059-магнит,
     центр = середина пары, mat_B = суммарный изгиб / (QP·0.059), края = внешние (E1 первого,
@@ -32,6 +33,8 @@ LONG_IRON = 0.410           # м, железо длинного модуля DP_
 SHORT_IRON = 0.059          # м, железо короткого диполя DP_sh (один магнит вместо двух слайсов)
 LONG_MIN = 0.30             # дискриминатор: dipole с L>0.30 — длинный модуль DL/JL
 SHORT_MAX = 0.10            # dipole с L<0.10 — короткий (SBM)
+# все физкоэф. АБСОЛЮТНЫЕ (единая конвенция ядра) ⇒ при смене длины масштабируются все, сохраняя K·L
+MATS = ("mat_B", "mat_G", "mat_Gv", "mat_S", "mat_O")
 
 
 def _read(path):
@@ -86,7 +89,9 @@ def main():
         if kind == "dipole" and L > LONG_MIN:
             if abs(L - LONG_IRON) > 1e-6:
                 scale = L / LONG_IRON
-                r[ci["mat_B"]] = f"{float(r[ci['mat_B']] or 0) * scale:.15g}"
+                for c in MATS:                                   # все mat_* абсолютные ⇒ сохраняем K·L каждого
+                    if c in ci and r[ci[c]] not in ("", None):
+                        r[ci[c]] = f"{float(r[ci[c]] or 0) * scale:.15g}"
                 r[ci["eff_length"]] = f"{LONG_IRON:.12f}"
                 n_long += 1
             long_devs.add(dev); out.append(r); continue
@@ -99,14 +104,17 @@ def main():
             if r2 is None or not r2[ci["device_type_id"]].endswith("SBM_2"):
                 print(f"  [warn] SBM_1 iid={r[ci['instance_id']]}: партнёр SBM_2 не найден — пропуск")
                 out.append(r); continue
-            b1 = float(r[ci["mat_B"]] or 0) * float(r[ci["eff_length"]] or 0)
-            b2 = float(r2[ci["mat_B"]] or 0) * float(r2[ci["eff_length"]] or 0)
-            matB_new = (b1 + b2) / SHORT_IRON                     # суммарный изгиб / новая длина
+            L1, L2 = float(r[ci["eff_length"]] or 0), float(r2[ci["eff_length"]] or 0)
+            merged = {}                                          # интеграл каждого mat_* (K·L) пары / новая длина
+            for c in MATS:
+                if c in ci and (r[ci[c]] not in ("", None) or r2[ci[c]] not in ("", None)):
+                    merged[c] = (float(r[ci[c]] or 0) * L1 + float(r2[ci[c]] or 0) * L2) / SHORT_IRON
             # центр = середина пары (слайсы равной длины ⇒ среднее центров)
             for c in ("x", "y", "yaw"):
                 r[ci[c]] = f"{0.5 * (float(r[ci[c]] or 0) + float(r2[ci[c]] or 0)):.12f}"
             r[ci["eff_length"]] = f"{SHORT_IRON:.12f}"
-            r[ci["mat_B"]] = f"{matB_new:.15g}"
+            for c, v in merged.items():
+                r[ci[c]] = f"{v:.15g}"
             r[ci["edge2"]] = r2[ci["edge2"]]                      # внешний край = E2 второго слайса
             del_iids.add(iid2)                                   # SBM_2 удаляем
             short_devs.add(dev); n_merge += 1

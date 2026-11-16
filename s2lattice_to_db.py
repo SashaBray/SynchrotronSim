@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Импорт стороннего синхротрона s2lattice (configuration_v3_syberia/s2lattice.lte, PyAT/elegant)
 в БД проекта как решётку 2 для МАТРИЧНОЙ модели (kick-phys). Другая машина: 124 м, 12 SP,
-KQUAD/KSEXT/CSBEND. Физкоэф. из .lte: mat_G=K1/QP, mat_S=K2/QP, mat_O=K3/QP, mat_B=ANGLE/(QP·Leff)
-(⇒ трекер-k1=K1, θ=ANGLE — оптика верна независимо от энергии пучка). Геометрия — проход кольца
+KQUAD/KQUSE/KSEXT/KOCT/CSBEND. Физкоэф. из .lte у ЛЮБОГО типа: mat_G=K1/QP, mat_S=K2/QP, mat_O=K3/QP
+(абсолютные), у изгибов ещё mat_B=−ANGLE/(QP·Leff) (⇒ трекер-k1=K1, θ=ANGLE — оптика верна независимо
+от энергии пучка). Неучтённые параметры и типы — предупреждение, не молча. Геометрия — проход кольца
 (дрейф вдоль курса, CSBEND поворачивает курс на ANGLE). STL — плейсхолдеры SILA. Устройства s2_*.
 Запуск: py -3.14 s2lattice_to_db.py"""
 import re, math, csv, os
@@ -17,41 +18,87 @@ PFX = "s2_"                                                    # префикс 
 NSL = "40"                                                     # срезов на элемент в строке решётки
 MONITORS = False                                               # заводить ли MONI как датчики положения
 MONI_DEV = "BPM"                                               # готовое устройство kind=monitor из БД
-MAGKIND = {"KQUAD": "quad", "KSEXT": "sext", "KOCT": "oct", "CSBEND": "dipole"}
+MAGKIND = {"KQUAD": "quad", "KQUSE": "quad", "KSEXT": "sext", "KOCT": "oct", "CSBEND": "dipole"}
 ACTIVE = {"quad": "k1", "sext": "k2", "oct": "k3", "dipole": "theta_y", "dq": "theta_y|k1|k2",
           "kicker": "kick_y|kick_z"}
 STL = {"quad": "QPL_asm.stl", "sext": "SP_asm.stl", "oct": "OP_asm.stl", "dipole": "DPL_asm.stl",
        "dq": "DPL_asm.stl", "kicker": "SP_asm.stl"}
+# Параметры .lte, которые импорт ПЕРЕНОСИТ в БД; и те, что управляют интегратором/излучением elegant
+# (SynchrotronSim задаёт их сам — пропуск безвреден). Всё прочее НЕНУЛЕВОЕ у магнита — предупреждение.
+USED = {"L", "ANGLE", "K1", "K2", "K3", "F1", "F2", "F3", "XREFERENCE", "E1", "E2", "HGAP", "FINT",
+        "FINT1", "FINT2", "EDGE1_EFFECTS", "EDGE2_EFFECTS", "EDGE_ORDER"}
+HARMLESS = {"N_SLICES", "N_KICKS", "INTEGRATION_ORDER", "SYNCH_RAD", "ISR", "ISR1PART", "USE_RAD_DIST",
+            "ADD_OPENING_ANGLE", "SQRT_ORDER", "NONLINEAR", "EXPANSION_ORDER", "GROUP"}
+
+
+def lte_multipoles(e):
+    """(K1, K2, K3) нормальных мультиполей элемента .lte — у ЛЮБОГО типа (KQUAD/KQUSE/KSEXT/KOCT/CSBEND).
+    У CSBEND к ним добавляется дробная форма F1…F3 при XREFERENCE > 0 (мультиполи в долях дипольного поля на
+    радиусе XREF — формат «гармоники карты на опорном радиусе»). Как elegant csbend.c: b_n += F_n·n!/XREFⁿ,
+    b_n = K_n·ρ, ρ = L/ANGLE ⇒ K_n += F_n·n!/XREFⁿ·ANGLE/L."""
+    k = [e.get("K1", 0.0), e.get("K2", 0.0), e.get("K3", 0.0)]
+    xr = e.get("XREFERENCE", 0.0)
+    if e["type"] == "CSBEND" and xr > 0 and e.get("ANGLE") and e.get("L"):
+        inv_rho, term = e["ANGLE"] / e["L"], 1.0 / xr
+        for i in range(3):
+            k[i] += e.get(f"F{i + 1}", 0.0) * term * inv_rho
+            term *= (i + 2) / xr
+    return tuple(k)
 
 
 def kind_of(e):
-    """Вид элемента для ядра. Изгиб с градиентом — «dq», а НЕ «dipole»: у «dipole» ядро считает
-    mat_G относительным градиентом (умножает на mat_B), у «dq» — абсолютным, как его и пишет mat_of.
-    Секступоль с НУЛЕВОЙ K2 — это слот КОРРЕКТОРА (SH у СИЛА, SX/SZ у Сибири): kind=kicker (кик орбиты),
-    как в решётке 1. Мат-коэф. нулевые, кик задаётся коррекцией/опытами через KICK/VKICK."""
+    """Вид элемента для ядра = ГЕОМЕТРИЯ тела, а не состав поля: мультиполи (K1/K2/K3) допустимы у любого
+    вида и пишутся абсолютными (mat_of). Изгиб с градиентом помечается «dq» (метка; физика у dipole и dq одна —
+    секторное тело). KSEXT БЕЗ поля (все K = 0) — слот КОРРЕКТОРА (SH у СИЛА, SX/SZ у Сибири): kind=kicker,
+    кик задаётся коррекцией/опытами через KICK/VKICK. KSEXT с одним K1 остаётся секступолем (прямое тело с
+    градиентом)."""
     k = MAGKIND[e["type"]]
-    if k == "dipole" and e.get("K1"):
+    if k == "dipole" and lte_multipoles(e)[0]:
         return "dq"
-    if k == "sext" and not e.get("K2"):
+    if k == "sext" and not any(lte_multipoles(e)):
         return "kicker"
     return k
 
 
+def active_of(kind, e):
+    """active_coeffs устройства: собственные моменты вида + присутствующие в .lte мультиполи других порядков."""
+    acts = ACTIVE[kind].split("|")
+    acts += [f"k{n}" for n, v in zip((1, 2, 3), lte_multipoles(e)) if v and f"k{n}" not in acts]
+    return "|".join(acts)
+
+
+def unused_params(e):
+    """Ненулевые параметры магнита .lte, которых SynchrotronSim не учитывает (K4+, B1…B8, F4+, G1…G8, J1,
+    TILT, DX/DY, FSE, HKICK/VKICK…) + строковые (SYSTEMATIC_MULTIPOLES=… и т.п.) — для предупреждения.
+    F1…F3 без XREFERENCE или без изгиба тоже не учитываются."""
+    out = [k for k, v in e.items() if k not in USED | HARMLESS | {"type", "_str"} and v]
+    if not (e["type"] == "CSBEND" and e.get("XREFERENCE", 0.0) > 0 and e.get("ANGLE")):
+        out += [k for k in ("F1", "F2", "F3") if e.get(k)]
+    return sorted(out) + sorted(e.get("_str", ()))
+
+
 def parse():
+    """(elems, seq, skipped): определения поддержанных типов, порядок кольца и {имя: тип} определений
+    НЕПОДДЕРЖАННЫХ типов (MULT, QUAD, SBEN… — их длина в геометрию не попадёт; см. _warn_skipped)."""
     txt = open(LTE, encoding="utf-8").read()
-    elems = {}
+    elems, skipped = {}, {}
     # ВАЖНО: после типа стоит [ 	]*, а не \s* — \s захватывает перевод строки, и определение БЕЗ
     # параметров («BPM: MONI») съедало следующую строку: BPM получал чужую длину, а тот элемент терялся.
     for m in re.finditer(r"^([A-Za-z0-9_]+)\s*:\s*([A-Za-z]+)[ 	]*(.*)$", txt, re.M):
-        name, typ, rest = m.group(1), m.group(2).upper(), m.group(3)
+        name, typ, rest = m.group(1), m.group(2).upper(), m.group(3).split("!", 1)[0]   # «!» — комментарий
         d = {"type": typ}
         for kv in re.finditer(r"([A-Za-z0-9_]+)\s*=\s*([-+\d.eE]+)", rest):
             d[kv.group(1).upper()] = float(kv.group(2))
-        if typ in ("DRIF", "KQUAD", "KSEXT", "KOCT", "CSBEND", "MARK", "MONI"):
+        strs = [kv.group(1).upper() for kv in re.finditer(r'([A-Za-z0-9_]+)\s*=\s*"', rest)]
+        if strs:
+            d["_str"] = strs                                   # строковые параметры (файлы мультиполей и т.п.)
+        if typ in ("DRIF", "KQUAD", "KQUSE", "KSEXT", "KOCT", "CSBEND", "MARK", "MONI"):
             elems[name] = d
+        elif typ != "LINE":
+            skipped[name] = (typ, d.get("L", 0.0))
     mline = re.search(r"ring\s*:\s*LINE\s*=\s*\((.*?)\)", txt, re.S | re.I)
     seq = [s.strip() for s in re.sub(r"[&\s]", " ", mline.group(1)).replace(",", " ").split() if s.strip()]
-    return elems, seq
+    return elems, seq, skipped
 
 
 def mat_of(kind, e, L):
@@ -61,15 +108,13 @@ def mat_of(kind, e, L):
     (диполь x⁰, секступоль x²) — нет; секступолю переворот не нужен именно потому, что геометрия
     уложена НЕ зеркально. Раньше здесь было +ANGLE и th+=ang — решётка выходила зеркальной, и
     секступоли получали неверный знак (та же ошибка, что чинилась у СИЛЫ, коммит c97742a)."""
-    m = dict(mat_B=0.0, mat_G=0.0, mat_S=0.0, mat_O=0.0)
-    if kind == "quad":   m["mat_G"] = e.get("K1", 0.0) / QP
-    elif kind == "sext": m["mat_S"] = e.get("K2", 0.0) / QP
-    elif kind == "oct":  m["mat_O"] = e.get("K3", 0.0) / QP
-    elif kind in ("dipole", "dq"):
+    # Мультиполи — у ЛЮБОГО вида и всегда АБСОЛЮТНЫЕ (единая конвенция ядра; у «dipole» раньше ядро умножало
+    # их на mat_B — CSBEND с K2 без K1 из-за этого получал неверный секступоль). Поле от формы полюсов
+    # (секступоль квадруполя, градиент секступоля, октуполь изгиба…) доходит до ядра без потерь.
+    K1, K2, K3 = lte_multipoles(e)
+    m = dict(mat_B=0.0, mat_G=K1 / QP, mat_S=K2 / QP, mat_O=K3 / QP)
+    if kind in ("dipole", "dq"):
         m["mat_B"] = -e.get("ANGLE", 0.0) / (QP * L) if L else 0.0
-        # у «dq» ядро берёт mat_G/mat_S абсолютными — так их и пишем (у «dipole» их не бывает)
-        if e.get("K1"): m["mat_G"] = e["K1"] / QP
-        if e.get("K2"): m["mat_S"] = e["K2"] / QP
     return m
 
 
@@ -97,10 +142,35 @@ def _warn_edge_methods(devs):
               f"tg E/ρ, по вертикали tg(E−ψ)/ρ) — нелинейных членов этих методов в ядре нет")
 
 
+def _warn_unused(devs):
+    """Сводка параметров .lte, которые импорт НЕ переносит (раньше выбрасывались молча)."""
+    by_par = {}
+    for nm, e in devs.items():
+        for p in unused_params(e):
+            by_par.setdefault(p, []).append(nm)
+    for p, names in sorted(by_par.items()):
+        print(f"[!] параметр {p} не учитывается SynchrotronSim ({len(names)} эл.: {', '.join(sorted(names)[:5])}"
+              f"{'…' if len(names) > 5 else ''}) — ядро знает нормальные K1…K3 (и F1…F3 при XREFERENCE у CSBEND)")
+
+
+def _warn_skipped(seq, skipped):
+    """Элементы кольца неподдержанных типов: их длина НЕ попадёт в геометрию (предупредить, а не молча)."""
+    cnt = {}
+    for nm in seq:
+        if nm in skipped:
+            t, L = skipped[nm]
+            c = cnt.setdefault(t, [0, 0.0]); c[0] += 1; c[1] += L
+    for t, (n, L) in sorted(cnt.items()):
+        print(f"[!] тип {t} не импортируется ({n} в кольце, суммарная длина {L:.6g} м выпадает из геометрии) — "
+              f"сначала lte_flatten.py (QUAD/SEXT/SBEN… → K-типы); MULT (тонкий мультиполь) ядро не поддерживает")
+
+
 def main():
-    elems, seq = parse()
+    elems, seq, skipped = parse()
     # уникальные магниты-типы
     devs = {nm: e for nm, e in elems.items() if e["type"] in MAGKIND}
+    _warn_unused(devs)
+    _warn_skipped(seq, skipped)
     # 1) hardware_library + element_transforms
     hw_all = list(csv.reader(open(os.path.join(TB, "hardware_library.csv"), encoding="utf-8"), delimiter=";"))
     hw_hdr = hw_all[0]; hw_col = {c: i for i, c in enumerate(hw_hdr)}
@@ -118,7 +188,7 @@ def main():
                         "use_symmetry": "1", "nominal_arg": "-", "field_direction": "1",
                         "correct_coeff": "1", "eff_length": f"{L:.12f}",
                         "edge_ff": "0", "synthetic": "False", "scaled_from": ""})
-        et_rows.append({"device_type_id": dev, "kind": kind, "active_coeffs": ACTIVE[kind],
+        et_rows.append({"device_type_id": dev, "kind": kind, "active_coeffs": active_of(kind, e),
                         "n_slices": NSL, "notes": f"импорт .lte, {e['type']}"})
     upsert_by(os.path.join(TB, "hardware_library.csv"), "device_type_id", hw_hdr, hw_rows)
     upsert_by(os.path.join(TB, "element_transforms.csv"), "device_type_id", et_hdr, et_rows)

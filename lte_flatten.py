@@ -12,8 +12,10 @@
     определение — так же, как это читает elegant).
   • Разворачивает выбранную линию рекурсивно: вложенные LINE, `n*ИМЯ`, `-ИМЯ` (обратный порядок).
   • Переводит МАТРИЧНЫЕ типы в КИКОВЫЕ: SBEN/RBEN/BEND → CSBEND, QUAD → KQUAD, SEXT → KSEXT,
-    OCTU/OCT → KOCT, EDRIFT/DRIFT → DRIF. Параметры (L, ANGLE, K1…K3, E1, E2, TILT, фриндж HGAP/FINT/
-    FINT1/FINT2, EDGE1/2_EFFECTS, EDGE_ORDER) переносятся как есть.
+    OCTU/OCT → KOCT, EDRIFT/DRIFT → DRIF; KQUSE (квад+секступоль) — как есть, KQUAD с K2 → KQUSE.
+    Параметры (L, ANGLE, мультиполи K1…K3 у ЛЮБОГО типа, у CSBEND ещё F1…F3 + XREFERENCE, E1, E2, TILT,
+    фриндж HGAP/FINT/FINT1/FINT2, EDGE1/2_EFFECTS, EDGE_ORDER) переносятся как есть; прочие ненулевые
+    (K4+, G1…G8, J1, DX, FSE, файлы мультиполей…) — в отчёт «не перенесено параметров».
   • Выбрасывает то, чего нет в матричной модели: ВЧ, апертуры, импеданс, заряд, WATCH. Что именно
     выброшено — печатает; ВЧ подставляет сама сверка (elegant_diag.write_lattice).
   • Ставит N_SLICES на киковые элементы (по умолчанию 5 — конвенция проекта для СИЛА).
@@ -36,14 +38,18 @@ import lte_to_lattice as _geom          # ЕДИНСТВЕННЫЙ источн�
 # матричный тип elegant → киковый (тот же магнит, но с интегратором по срезам)
 KICKIFY = {"SBEN": "CSBEND", "SBEND": "CSBEND", "RBEN": "CSBEND", "RBEND": "CSBEND", "BEND": "CSBEND",
            "CSBEND": "CSBEND", "CCBEND": "CSBEND", "KSBEND": "CSBEND",
-           "QUAD": "KQUAD", "KQUAD": "KQUAD", "QUADRUPOLE": "KQUAD",
+           "QUAD": "KQUAD", "KQUAD": "KQUAD", "QUADRUPOLE": "KQUAD", "KQUSE": "KQUSE",
            "SEXT": "KSEXT", "KSEXT": "KSEXT", "SEXTUPOLE": "KSEXT",
            "OCTU": "KOCT", "OCT": "KOCT", "KOCT": "KOCT", "OCTUPOLE": "KOCT",
            "DRIF": "DRIF", "DRIFT": "DRIF", "EDRIFT": "DRIF", "CSRDRIFT": "DRIF",
            "MONI": "MONI", "MONITOR": "MONI", "MARK": "MARK", "MARKER": "MARK"}
-SLICED = ("CSBEND", "KQUAD", "KSEXT", "KOCT")          # у кого есть N_SLICES
-KEEP = ("L", "ANGLE", "K1", "K2", "K3", "E1", "E2", "TILT", "HGAP", "FINT", "FINT1", "FINT2",
-        "EDGE1_EFFECTS", "EDGE2_EFFECTS", "EDGE_ORDER")
+SLICED = ("CSBEND", "KQUAD", "KQUSE", "KSEXT", "KOCT")  # у кого есть N_SLICES
+# мультиполи переносятся у ЛЮБОГО типа (поле от формы полюсов); F1…F3 + XREFERENCE — дробная форма CSBEND
+KEEP = ("L", "ANGLE", "K1", "K2", "K3", "F1", "F2", "F3", "XREFERENCE", "E1", "E2", "TILT", "HGAP", "FINT",
+        "FINT1", "FINT2", "EDGE1_EFFECTS", "EDGE2_EFFECTS", "EDGE_ORDER")
+# управляют интегратором/излучением elegant — их задаёт сама сверка/ядро, пропуск безвреден
+HARMLESS = ("N_SLICES", "N_KICKS", "INTEGRATION_ORDER", "SYNCH_RAD", "ISR", "ISR1PART", "USE_RAD_DIST",
+            "ADD_OPENING_ANGLE", "SQRT_ORDER", "NONLINEAR", "EXPANSION_ORDER", "GROUP")
 # параметры, у которых НОЛЬ значим (не равен умолчанию elegant): FINT по умолчанию 0.5, FINT1/FINT2 = −1
 # (⇒ FINT), EDGE*_EFFECTS = 1 — FINT2=0 на внутренней грани нарезанного диполя выключает там фриндж
 KEEP_ZERO = ("FINT", "FINT1", "FINT2", "EDGE1_EFFECTS", "EDGE2_EFFECTS")
@@ -72,6 +78,9 @@ def read(path):
         d = {"type": t.group(1).upper()}
         for kv in re.finditer(r"([A-Za-z0-9_]+)\s*=\s*(-?[\d.]+(?:[eE][-+]?\d+)?)", body):
             d[kv.group(1).upper()] = float(kv.group(2))
+        strs = [k.upper() for k in re.findall(r'([A-Za-z0-9_]+)\s*=\s*"', body)]
+        if strs:
+            d["_str"] = strs                                   # строковые (файлы мультиполей и т.п.) — не переносятся
         elems[name] = d
     return elems, lines, order
 
@@ -131,9 +140,17 @@ def flatten(src, beamline=None, n_slices=5, line_name="ring"):
     used = sorted({t for t in kept}, key=kept.index)
     out = [f"! сгенерировано lte_flatten.py из {os.path.basename(src)}, линия {beamline}",
            f"! матричные типы переведены в киковые, N_SLICES={n_slices}; служебные элементы убраны"]
+    lost = collections.Counter()                               # ненулевые параметры, которые НЕ переносятся
     for t in used:
         e = elems[t]
         typ = KICKIFY[e["type"]]
+        if typ == "KQUAD" and e.get("K2"):
+            typ = "KQUSE"                                      # у KQUAD нет K2 в elegant; квад+секступоль = KQUSE
+        for k, v in e.items():
+            if k not in KEEP and k not in HARMLESS and k not in ("type", "_str") and v:
+                lost[k] += 1
+        for k in e.get("_str", ()):
+            lost[k] += 1
         par = [f"{k}={num(e[k])}" for k in KEEP
                if k in e and (e[k] != 0.0 or k in KEEP_ZERO) or (k == "L" and "L" in e)]
         par = list(dict.fromkeys(par))
@@ -159,6 +176,7 @@ def flatten(src, beamline=None, n_slices=5, line_name="ring"):
     rep = {"beamline": beamline, "позиций": len(seq), "оставлено": len(kept), "типов": len(used),
            "периметр, м": sum(elems[t].get("L", 0.0) for t in kept), "ΣANGLE/2π": ang / (2 * math.pi),
            "зазор кольца, мм": math.hypot(x, y) * 1e3, "выброшено": dict(dropped),
+           "не перенесено параметров (типов эл.)": dict(lost),
            "состав": dict(collections.Counter(KICKIFY[elems[t]["type"]] for t in kept))}
     return "\n".join(out) + "\n", rep
 

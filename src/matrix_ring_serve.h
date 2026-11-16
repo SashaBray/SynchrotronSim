@@ -14,7 +14,9 @@
 //   PIECES n             + n·6           → OK m + n·(n_pieces+1)·6 (старт + после каждого куска)
 //   JUNCTION n           + 24 + n·6      → OK m + n·6 (стык плоскостей A→B: p, axis, u, v каждой)
 //   PIECEMETA / INFO                     → OK k + k текстовых строк
-//   KICK j theta | VKICK j theta | YAW j alpha | DK j dk | RESET   → OK 0
+//   KICK j theta | VKICK j theta | YAW j alpha | DK j dk | DSK j dk | DK2 j dk | DK3 j dk | RESET   → OK 0
+// Срезы (PIECES/PIECEMETA) — копии магнитов: возмущения KICK..DK3 помечают их устаревшими, и они лениво
+// пересобираются перед следующим PIECES/PIECEMETA (YAW меняет только рамки магнита — их срезы читают напрямую).
 #pragma once
 #include "matrix_ring.h"
 #include <cstdio>
@@ -46,7 +48,8 @@ struct RingModel {
     Node plane;
     std::vector<double> s_in, s_out;
     double circumference = 0.0;
-    std::vector<Piece> pieces;
+    std::vector<Piece> pieces;                       // читать через currentPieces(): после возмущения устаревают
+    bool pieces_stale = false;
     uint64_t requests = 0;
 
     void build() {
@@ -68,6 +71,7 @@ struct RingModel {
     }
 
     // Изгиб → его срезы (копии с L/N, θ/N, одним срезом и краями только на крайних) — ring_analysis._bend_slices.
+    // Доп. кик hkick/vkick body() кладёт ПОСЛЕ тела ⇒ у срезов — только на последнем (иначе он вошёл бы N раз).
     void buildPieces() {
         pieces.clear();
         for (size_t j = 0; j < mags.size(); ++j) {
@@ -81,6 +85,8 @@ struct RingModel {
                     c.kEdge2 = (i == N - 1) ? m.kEdge2 : 0.0;
                     c.psi1 = (i == 0) ? m.psi1 : 0.0;          // фриндж грани — тоже только на крайних срезах
                     c.psi2 = (i == N - 1) ? m.psi2 : 0.0;
+                    c.hkick = (i == N - 1) ? m.hkick : 0.0;
+                    c.vkick = (i == N - 1) ? m.vkick : 0.0;
                     c.precache();
                     pieces.push_back({ (int)j, i == 0, c });
                 }
@@ -88,6 +94,14 @@ struct RingModel {
                 pieces.push_back({ (int)j, true, m });
             }
         }
+        pieces_stale = false;
+    }
+
+    // Срезы по ТЕКУЩИМ магнитам: после KICK/VKICK/DK/DSK/DK2/DK3 копии в pieces устарели — пересобрать.
+    // Число кусков от возмущений не меняется (изгиб определяет θ0, его они не трогают) ⇒ READY n_pieces верен.
+    const std::vector<Piece>& currentPieces() {
+        if (pieces_stale) buildPieces();
+        return pieces;
     }
 
     double beta(double d) const {
@@ -209,8 +223,9 @@ struct RingModel {
 
     std::vector<double> piecesTrack(const std::vector<State>& in) {
         ++requests;
+        const std::vector<Piece>& pcs = currentPieces();             // пересборка до параллельного цикла
         const double NaN = std::numeric_limits<double>::quiet_NaN();
-        size_t n = pieces.size(), row = (n + 1) * 6;
+        size_t n = pcs.size(), row = (n + 1) * 6;
         std::vector<double> out(in.size() * row, NaN);
         #pragma omp parallel for schedule(dynamic)
         for (long p = 0; p < (long)in.size(); ++p) {
@@ -222,7 +237,7 @@ struct RingModel {
             const Frame* prev = &plane.fr_out;
             try {
                 for (size_t q = 0; q < n; ++q) {
-                    const Piece& pc = pieces[q];
+                    const Piece& pc = pcs[q];
                     if (pc.junction) {
                         s = modified_drift(s, *prev, mags[pc.mag].fr_in, mags[pc.mag].same_plane_as_prev);
                         prev = &mags[pc.mag].fr_out;
@@ -237,33 +252,40 @@ struct RingModel {
     }
 
     // ---- возмущения (как ring_analysis: кик корректора, поворот магнита) --------------------------
+    // Каждое полевое возмущение меняет mags[j].phys ⇒ копии в pieces устарели (pieces_stale, currentPieces).
     void kick(int j, double theta) {                 // доп. гор. кик; body() применяет его к любому элементу
         if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("KICK: нет магнита");
         mags[j].phys.hkick = theta;                  // (включая секторные — для отклика DQ/диполей в orbit_infer)
+        pieces_stale = true;
     }
     void vkick(int j, double theta) {                // доп. верт. кик (корректор орбиты; и отклик секторных)
         if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("VKICK: нет магнита");
         mags[j].phys.vkick = theta;
+        pieces_stale = true;
     }
     void dk(int j, double dq) {                       // BBA: транзитно изменить нормальный градиент k1 (обе плоскости)
         if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("DK: нет магнита");
         mags[j].phys.k1 += dq; mags[j].phys.k1v += dq;
         mags[j].phys.precache();                      // у секторного обновит b1=k1·ρ (body_sector читает прекэш)
+        pieces_stale = true;
     }
     void dsk(int j, double dq) {                       // коррекция связи: транзитно изменить скью-градиент ks
         if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("DSK: нет магнита");
         mags[j].phys.ks += dq;                         // киковый путь читает ks напрямую, прекэш не нужен
         mags[j].phys.precache();
+        pieces_stale = true;
     }
     void dk2(int j, double dq) {                       // нелинейный тюнер: транзитно изменить секступольную силу k2
         if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("DK2: нет магнита");
         mags[j].phys.k2 += dq;                         // у секторного precache обновит b2=k2·ρ
         mags[j].phys.precache();
+        pieces_stale = true;
     }
     void dk3(int j, double dq) {                       // нелинейный тюнер: транзитно изменить октупольную силу k3
         if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("DK3: нет магнита");
         mags[j].phys.k3 += dq;                         // у секторного precache обновит b3=k3·ρ
         mags[j].phys.precache();
+        pieces_stale = true;
     }
     void yaw(int j, double alpha) {                  // ring_analysis.yaw_element: поворот рамок вокруг v входа
         if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("YAW: нет магнита");
@@ -355,7 +377,7 @@ inline int serveRing(RingModel& R) {
             } else if (cmd == "PIECEMETA") {
                 std::vector<std::string> out;
                 char b[512];
-                for (auto& pc : R.pieces) {
+                for (auto& pc : R.currentPieces()) {         // срезы по текущим (возмущённым) магнитам
                     std::snprintf(b, sizeof(b), "%d %d %d %.17g %.17g %.17g %.17g %.17g", pc.mag, pc.junction ? 1 : 0,
                                   pc.el.sector ? 1 : 0, pc.el.Leff, pc.el.theta0, pc.el.k1, pc.el.k2, pc.el.k3);
                     out.push_back(b);

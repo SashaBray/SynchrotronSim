@@ -224,7 +224,7 @@ def add_structural_columns():
     геометрию/тип. Значения по device_type_id: eff_length из hardware_library, kind/n_slices из
     element_transforms; edge1/edge2 — краевые углы E1/E2 из .lte (Фаза 3, пока пусто/сохраняются).
     Идемпотентна: mat_* и прочие столбцы НЕ трогает, только эти 6 (фикс-порядок после mat_*).
-    C++ ядро читает их по индексам [20..25]."""
+    C++ ядро читает столбцы ПО ИМЕНИ (src/matrix_ring.h, lc.col), отсутствующий столбец = значение по умолчанию."""
     p = os.path.join(TB, "lattice_configs.csv")
     data = list(csv.DictReader(open(p, encoding="utf-8"), delimiter=";"))
     if not data:

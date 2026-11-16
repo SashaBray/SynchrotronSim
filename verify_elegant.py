@@ -405,7 +405,7 @@ def _lte_matrices():
             ps1, ps2 = mt._fringe_psi(lf1, e1, h), mt._fringe_psi(lf2, e2, h)
             Mel = (rm.edge(math.tan(e2) * h, math.tan(e2 - ps2) * h) @ rm.sector_body(L, h, q.get("K1", 0.0))
                    @ rm.edge(math.tan(e1) * h, math.tan(e1 - ps1) * h))
-        elif t == "KQUAD":
+        elif t in ("KQUAD", "KQUSE", "KSEXT") and q.get("K1", 0.0):   # градиент у любого прямого (KSEXT K1, KQUSE)
             Mel = rm.quad(L, q.get("K1", 0.0))
         elif t in ("MONI", "MARK"):
             Mel = np.eye(6)

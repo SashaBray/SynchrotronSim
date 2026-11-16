@@ -1168,13 +1168,17 @@ def _finalize_demo_config(lat_id, dev, kind, coeffs, Leff):
     lattice-1). build_windings ОБНУЛЯЕТ mat_* (диффур берёт карту), но КИКОВАЯ модель (viz_html) читает
     mat_* — без этого показывала бы НУЛЕВОЙ кик (прямые линии). Кик = фит ⇒ совпадает с диффуром."""
     src = LCROW.get(dev, {})
-    matmap = {"B": "mat_B", "G": "mat_G", "S": "mat_S", "O": "mat_O", "Gv": "mat_Gv"}
+    # mat_Gv ПУСТО (⇒ ядро берёт Gv = mat_G): фит ведётся с Gv = G (track/_KickServer шлют G и в Gv). Раньше
+    # писалось "0.0" ⇒ ядро считало верт. градиент нулевым, не таким, как в фите. Все mat_* — абсолютные
+    # (единая конвенция ядра; у kind=dipole фит через C++-сервер теперь тоже даёт абсолютный G).
+    matmap = {"B": "mat_B", "G": "mat_G", "S": "mat_S", "O": "mat_O"}
     h, rows = _rows("lattice_configs.csv"); ci = {c: i for i, c in enumerate(h)}
     for r in rows:
         if not (r and r[ci["lattice_id"]] == str(lat_id) and r[ci["device_type_id"]] == dev):
             continue
         for k, mc in matmap.items():
             if mc in ci: r[ci[mc]] = repr(float(coeffs.get(k, 0.0)))
+        if "mat_Gv" in ci: r[ci["mat_Gv"]] = ""
         if "eff_length" in ci: r[ci["eff_length"]] = repr(float(Leff))
         if "kind" in ci: r[ci["kind"]] = kind
         for c in ("n_slices", "edge1", "edge2"):                     # геометрия изгибов (края) из lattice-1
@@ -1281,13 +1285,22 @@ def setup_viz_all(start_id=VIZ_START):
 
 # ============================ МАТРИЦЫ СВЯЗИ ТОК→ФИЗКОЭФ + РАЗДЕЛ ОТЧЁТА =======================
 # Мультипольные моменты, извлекаемые из КИКА (изменения угла): гориз/верт диполь, норм/скью квад, секступ, окт.
-MULTIPOLES = ["B", "Bv", "G", "Gv", "S", "O"]
+# Gs — СКЬЮ-квадруполь (связь y→x′, −∂x′/∂y). НЕ путать с mat_Gv ядра: там нормальный ВЕРТИКАЛЬНЫЙ градиент
+# k1v = QP·mat_Gv (∂By/∂v, фокусировка y→y′). До 2026-11-16 момент назывался «Gv» — старые таблицы читаются
+# через LEGACY_MOMENT_ALIAS (design_currents).
+MULTIPOLES = ["B", "Bv", "G", "Gs", "S", "O"]
+# Момент матрицы связи → столбец mat_* решётки (проектное значение для обратной задачи). Только моменты, у
+# которых СМЫСЛ столбца совпадает с моментом. Gs здесь НЕТ: скью-квадруполя в столбцах БД нет, а mat_Gv
+# означает другое (нормальный k1v) — скью никогда не читается из mat_Gv и не пишется в него.
+MOMENT_MATCOL = {"B": "mat_B", "Bv": "mat_Bv", "G": "mat_G", "S": "mat_S", "O": "mat_O"}
 
 
 def extract_coeffs(windings, L):
-    """Диффур комбинации СО-ЛОКОВАННЫХ обмоток (прямой элемент, yaw=0) → мультипольные mat_* из КИКА:
+    """Диффур комбинации СО-ЛОКОВАННЫХ обмоток (прямой элемент, yaw=0) → мультипольные моменты из КИКА:
     выходной наклон (sy=dY/dX гориз, sz=dZ/dX верт) 13 частиц раскладывается по (Y,Z) до октуполя.
-    Даёт ВСЕ моменты, вкл. ВЕРТИКАЛЬНЫЙ диполь (Bv), которого нет в столбцах БД. Возврат dict MULTIPOLES→коэф."""
+    Даёт ВСЕ моменты, вкл. ВЕРТИКАЛЬНЫЙ диполь (Bv) и СКЬЮ-квадруполь (Gs = −∂x′/∂y /(QP·L)), которых нет в
+    столбцах БД. Нормальный вертикальный градиент ∂y′/∂y (mat_Gv ядра) здесь НЕ извлекается. Возврат dict
+    MULTIPOLES→коэф."""
     trajs, _ = run_diffur_windings(windings, 0.0)
     Y = np.array([p[0] for p in PROBES]); Z = np.array([p[1] for p in PROBES])
     sy, sz = [], []
@@ -1300,7 +1313,7 @@ def extract_coeffs(windings, L):
     ay = np.linalg.lstsq(A, np.array(sy), rcond=None)[0]
     az = np.linalg.lstsq(A, np.array(sz), rcond=None)[0]
     QPL = mt.QP * L                                                  # физкоэф = -кик/(QP·L) (диполь без минуса)
-    return {"B": ay[0] / QPL, "Bv": az[0] / QPL, "G": -ay[1] / QPL, "Gv": -ay[2] / QPL,
+    return {"B": ay[0] / QPL, "Bv": az[0] / QPL, "G": -ay[1] / QPL, "Gs": -ay[2] / QPL,   # Gs: ∂x′/∂y — скью
             "S": -ay[3] / QPL, "O": -ay[5] / QPL}
 
 
@@ -1748,7 +1761,8 @@ def _coupling_summary(doc, mats, lo):
     doc.add_heading("Обозначения", level=2)
     leg = [("I, I₁,I₂,I₃, I_c1..main", "токи обмоток, А (одиночная / секступоль-DQ / корректор)"),
            ("B, Bv", "гориз./верт. дипольный момент (mat_B; Bv извлечён из вертикального кика)"),
-           ("G, Gv", "норм./скью квадрупольный градиент (mat_G / mat_Gv)"),
+           ("G, Gs", "норм. квадрупольный градиент (mat_G) / скью-квадруполь Gs — связь y→x′, столбца в БД "
+                     "нет (НЕ mat_Gv: там нормальный верт. градиент ядра)"),
            ("S, O", "секступольный / октупольный коэф. (mat_S / mat_O)"),
            ("M", "прямая матрица: строки — моменты, столбцы — токи обмоток; [коэф]/А"),
            ("M⁻¹, M⁺", "обратная матрица (коэф→ток): (токи)ᵀ = M⁺·(моменты)ᵀ; M⁺ = M⁻¹ для квадратной невырожденной"),
@@ -1793,7 +1807,9 @@ def _coupling_summary(doc, mats, lo):
         "в разделе элемента, датасеты combo_verify_<элемент>.csv). Секступоли — невязка <0.1%. Корректор: сильные "
         "моменты (гориз./верт. диполь) сверяются на 1–4%, а слабые квадрупольный и особенно секступольный моменты "
         "у корректора на ШУМОВОМ ПОЛУ карты (невязка не убывает с амплитудой) — они мало влияют на коррекцию.",
-        "Вертикальный диполь Bv извлечён из вертикального кика (столбца mat_Bv в БД нет). Октуполь O показан "
+        "Вертикальный диполь Bv извлечён из вертикального кика (столбца mat_Bv в БД нет). Скью-квадруполь Gs — "
+        "из связи y→x′ горизонтального кика; столбца в БД у него нет (mat_Gv ядра — это нормальный вертикальный "
+        "градиент, другая величина). Октуполь O показан "
         "только у октуполя (у прочих — шум кубического члена при 1 мм).",
         "Вырождения нормальны (обе обмотки секступоля дают один момент; у DQ I₂≡I₃): прямая задача ток→коэф "
         "корректна, ОБРАТНАЯ коэф→ток недоопределена — псевдообратная M⁺ даёт решение минимальной нормы "
@@ -1871,7 +1887,10 @@ def _matrix_table_rows(m):
 
 def upsert_coupling_table(rows_by_element):
     """UPSERT в workspace/tables/coupling_matrices.csv: нет файла → создать; есть → удалить строки ТОЛЬКО
-    обновляемых элементов (колонка element) и дописать новые. rows_by_element: dict element→list[row]."""
+    обновляемых элементов (колонка element) и дописать новые. rows_by_element: dict element→list[row].
+    Сохраняемые строки приводятся к текущим именам моментов (старое «Gv» скью → «Gs», см. MULTIPOLES) —
+    таблица мигрирует при любом upsert, значения не меняются."""
+    from design_currents import moment_name
     path = os.path.join(TB, COUPLING_TABLE)
     existing = []
     if os.path.exists(path):
@@ -1879,7 +1898,10 @@ def upsert_coupling_table(rows_by_element):
             rd = list(csv.reader(f, delimiter=";"))
         existing = rd[1:] if rd else []
     upd = set(rows_by_element)
-    keep = [r for r in existing if r and r[0] not in upd]            # чужие элементы не трогаем
+    keep = [r for r in existing if r and r[0] not in upd]            # чужие элементы не трогаем (кроме имени момента)
+    for r in keep:
+        for k in (5, 6):                                             # out_label, in_label
+            if len(r) > k: r[k] = moment_name(r[k])
     new = keep + [row for el in rows_by_element for row in rows_by_element[el]]
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=";"); w.writerow(COUPLING_HEADER); w.writerows(new)
@@ -1986,7 +2008,7 @@ MOMENT_DESC = {                                                     # физич
     "B":  "нормальный диполь (горизонтальный изгиб)",
     "Bv": "скью диполь (вертикальный изгиб)",
     "G":  "нормальный квадруполь (градиент, фокусировка)",
-    "Gv": "скью квадруполь (связь плоскостей x–y)",
+    "Gs": "скью квадруполь (связь плоскостей x–y)",
     "S":  "нормальный секступоль",
     "O":  "нормальный октуполь",
 }
@@ -2066,11 +2088,12 @@ def _design_ivec(m):
     """Проектные токи обмоток элемента (сырой arg): проектные mat_* (.lte, решётка 1) → решение матрицы связи
     под проектные моменты (N управляемых моментов ⇒ первые N обмоток; остальные 0). Возврат (Ivec, ctrl,
     design): токи-arg по обмоткам, список управляемых моментов (пуст ⇒ проекта нет, напр. корректор),
-    словарь проектных значений."""
-    matcol = {"B": "mat_B", "Bv": "mat_Bv", "G": "mat_G", "Gv": "mat_Gv", "S": "mat_S", "O": "mat_O"}
+    словарь проектных значений. Момент без столбца в MOMENT_MATCOL (скью Gs) проекта не имеет ⇒ 0, не
+    управляется: mat_Gv решётки (нормальный k1v ядра) за скью-квадруполь не принимается."""
     nI = len(m["labels"])
     row0 = LCROW.get(m["devs"][0], {})
-    design = {mp: float(row0.get(matcol.get(mp, ""), 0.0) or 0.0) for mp in m["outputs"]}
+    design = {mp: float((row0.get(MOMENT_MATCOL[mp]) if mp in MOMENT_MATCOL else 0.0) or 0.0)
+              for mp in m["outputs"]}
     M = np.asarray(m["M"], float)
     ctrl = [mp for mp in m["outputs"] if abs(design.get(mp, 0.0)) > 1e-30]   # управляемые моменты (есть проект .lte)
     Ivec = np.zeros(nI)                                             # arg_val обмоток (суррогат); нет проекта ⇒ 0

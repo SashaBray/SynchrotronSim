@@ -13,7 +13,11 @@
     track_pieces(states)              → (n, n_pieces+1, 6) — после каждого среза изгиба
     with_kick(j, θ) / with_yaw(j, α)  → новое кольцо с возмущением (C++ и описание магнитов)
     perturbed(kicks, yaws)            → то же для нескольких возмущений
+    apply_perturb(kicks, …, dk3s)     → транзитные возмущения на том же сервере (RESET + набор)
     junction(states, A, B)            → стык двух произвольных плоскостей (проверка матриц стыков)
+
+Возмущения двух сортов: «базовые» (with_*/perturbed — часть кольца, переживают RESET, копии их наследуют) и
+транзитные (apply_perturb — заменяются его следующим вызовом). Описание магнитов mags/plane всегда по обоим.
 
 Протокол сервера — в шапке src/matrix_ring_serve.h.
 """
@@ -44,7 +48,8 @@ class CppRing:
         self.ws = ws                            # путь к workspace с ВОЗМУЩЁННОЙ решёткой (ансамбли ошибок); None — обычная БД
         self.timeout = timeout                  # сторож: команда дольше timeout с → убить процесс (защита от зависаний)
         self.settings = settings
-        self._perturb = []                      # [("KICK"|"YAW", j, value)] — для копий и описания магнитов
+        self._perturb = []                      # базовые [(cmd, j, value)] — with_*/perturbed: переживают RESET
+        self._transient = []                    # транзитные — от последнего apply_perturb
         self._py = None
         self._start()
 
@@ -71,9 +76,12 @@ class CppRing:
         self.s_out = np.array([float(l.split()[2]) for l in info])
         self.kinds = [l.split()[4] if l.split()[4] != "-" else "" for l in info]
         self.names = [l.split()[5] for l in info]
-        for cmd, j, v in self._perturb:
-            self._text(f"{cmd} {j} {v!r}")
+        self._replay(self._perturb + self._transient)
         _LIVE.add(self)
+
+    def _replay(self, perturb):
+        for cmd, j, v in perturb:
+            self._text(f"{cmd} {j} {v!r}")
 
     def close(self):
         p = getattr(self, "_proc", None)
@@ -182,16 +190,48 @@ class CppRing:
             finally:
                 for k, v in saved.items():
                     os.environ.pop(k, None) if v is None else os.environ.update({k: v})
-            for cmd, j, v in self._perturb:              # те же возмущения в описании
-                m = copy.copy(r.mags[j]); r.mags = list(r.mags)
-                if cmd == "YAW":
-                    r.mags[j] = ra.yaw_element(m, v)
-                else:
-                    m.theta0 = v; m.nonzero = True; m.xref = None; r.mags[j] = m
+            r.mags = self._describe(r.mags, self._perturb + self._transient)
             if abs(r.circumference - self.circumference) > 1e-9 or len(r.mags) != self.n_mag:
                 raise RuntimeError("геометрия Python-описания и C++-ядра разошлась")
             self._py = r
         return self._py
+
+    _FIELD = {"DK": ("k1", "k1v"), "DSK": ("ks",), "DK2": ("k2",), "DK3": ("k3",)}
+
+    def _describe(self, base, perturb):
+        """Магниты Python-описания с возмущениями сервера (копии; base не трогается) — та же физика, что у
+        Element в C++ (matrix_ring_serve.h): KICK/VKICK задают доп. кики hkick/vkick (последний выигрывает),
+        DK/DSK/DK2/DK3 прибавляют к k1(+k1v)/ks/k2/k3, YAW поворачивает рамки (ra.yaw_element).
+        Тело — ПО ПОЛЮ, как Element::precache: элемент с появившимся градиентом/мультиполем идёт кик-телом.
+        Гор. кик «ящика» (не изгиб, без поля — корректор) = его θ0 box-тела, как ra.kicked; у изгиба и полевого
+        элемента θ0 не трогается (у изгиба это кривизна h для ring_matrix), кик лишь записан в hkick/vkick.
+        Верт. кика в Python-эталоне нет: vkick — только атрибут (ring_matrix кики корректоров не учитывает)."""
+        import ring_analysis as ra
+        import matrix_tracker as mt
+        mags = list(base); touched = set()
+        for cmd, j, v in perturb:
+            m = copy.copy(mags[j])
+            if cmd == "YAW":
+                m = ra.yaw_element(m, v)
+            elif cmd in ("KICK", "VKICK"):
+                setattr(m, "hkick" if cmd == "KICK" else "vkick", v)
+            else:
+                for a in self._FIELD[cmd]:
+                    setattr(m, a, float(getattr(m, a, 0.0) or 0.0) + v)
+            mags[j] = m; touched.add(j)
+        for j in touched:
+            m = mags[j]
+            if not m.sector:
+                m.kick_sector = (mt.SECTOR and m.Leff > 0
+                                 and any(abs(float(getattr(m, a, 0.0) or 0.0)) > 0 for a in ("k1", "k1v", "k2", "k3")))
+                if m.kick_sector and not hasattr(m, "_nsl_sector"):      # нулевой элемент получил поле
+                    m._nsl_sector = self.nsl; m._yoshida_dk = mt._yoshida(self.order)
+                hk = float(getattr(m, "hkick", 0.0) or 0.0)
+                if hk and not m.kick_sector:                             # «ящик» корректора — как ra.kicked
+                    m.theta0 = base[j].theta0 + hk; m.xref = None
+            m.nonzero = any(abs(float(getattr(m, a, 0.0) or 0.0)) > 0 for a in
+                            ("theta0", "k1", "k1v", "k2", "k3", "kEdge", "kEdge1", "kEdge2", "wkfoc"))
+        return mags
 
     @property
     def mags(self):
@@ -203,8 +243,14 @@ class CppRing:
 
     # ---- возмущения --------------------------------------------------------------------------------
     def _copy_with(self, cmd, j, value):
+        return self._spawn([(cmd, int(j), float(value))])
+
+    def _spawn(self, extra):
+        """Новое кольцо (свой процесс) = это кольцо КАК ЕСТЬ (базовые + транзитные возмущения) + extra; всё
+        это — базовые возмущения копии (порядок сохранён, переживают её RESET)."""
         r = copy.copy(self)
-        r._perturb = list(self._perturb) + [(cmd, int(j), float(value))]
+        r._perturb = list(self._perturb) + list(self._transient) + list(extra)
+        r._transient = []
         r._py = None
         r._start()
         return r
@@ -224,35 +270,27 @@ class CppRing:
     def apply_perturb(self, kicks=(), vkicks=(), dks=(), dsks=(), dk2s=(), dk3s=()):
         """Применить возмущения НА ТОМ ЖЕ сервере (RESET + KICK/VKICK/DK/DSK/DK2/DK3), без нового процесса. Для
         матрицы отклика, коррекции орбиты, BBA, коррекции связи и нелинейного тюнера. RESET пересобирает кольцо
-        из ws (ошибки рассогласования СОХРАНЯЮТСЯ, сбрасываются только прежние возмущения). dks=[(j,dk)] — k1
-        квадруполя (BBA); dsks=[(j,ks)] — скью (связь); dk2s=[(j,dk2)]/dk3s=[(j,dk3)] — секступ./октуп. силы
-        (нелинейный тюнер ν(δ)). Возврат self."""
-        self._text("RESET")
-        for j, v in kicks:
-            self._text(f"KICK {int(j)} {float(v)!r}")
-        for j, v in vkicks:
-            self._text(f"VKICK {int(j)} {float(v)!r}")
-        for j, v in dks:
-            self._text(f"DK {int(j)} {float(v)!r}")
-        for j, v in dsks:
-            self._text(f"DSK {int(j)} {float(v)!r}")
-        for j, v in dk2s:
-            self._text(f"DK2 {int(j)} {float(v)!r}")
-        for j, v in dk3s:
-            self._text(f"DK3 {int(j)} {float(v)!r}")
+        из ws (ошибки рассогласования СОХРАНЯЮТСЯ), затем возвращаются базовые возмущения кольца (with_*/
+        perturbed) — сбрасываются только транзитные от прежнего apply_perturb. dks=[(j,dk)] — k1 квадруполя
+        (BBA); dsks=[(j,ks)] — скью (связь); dk2s=[(j,dk2)]/dk3s=[(j,dk3)] — секступ./октуп. силы (нелинейный
+        тюнер ν(δ)). Описание mags/plane следует за ними. apply_perturb() — вернуть кольцо в исходное. Возврат self."""
+        new = [(cmd, int(j), float(v)) for cmd, pairs in (("KICK", kicks), ("VKICK", vkicks), ("DK", dks),
+                                                          ("DSK", dsks), ("DK2", dk2s), ("DK3", dk3s))
+               for j, v in pairs]
         self._py = None
+        self._transient = []                    # до RESET: при сбое описание не припишет кольцу чужих возмущений
+        self._text("RESET")
+        self._replay(self._perturb)
+        self._replay(new)
+        self._transient = new
         return self
 
     def perturbed(self, kicks=(), yaws=(), vkicks=()):
         """Кольцо с несколькими возмущениями сразу: kicks=[(j, θ)] (гор.), vkicks=[(j, θ)] (верт.),
         yaws=[(j, α)] — один процесс сервера."""
-        r = copy.copy(self)
-        r._perturb = (list(self._perturb) + [("KICK", int(j), float(v)) for j, v in kicks]
-                      + [("VKICK", int(j), float(v)) for j, v in vkicks]
-                      + [("YAW", int(j), float(v)) for j, v in yaws])
-        r._py = None
-        r._start()
-        return r
+        return self._spawn([("KICK", int(j), float(v)) for j, v in kicks]
+                           + [("VKICK", int(j), float(v)) for j, v in vkicks]
+                           + [("YAW", int(j), float(v)) for j, v in yaws])
 
     def junction(self, states, A, B):
         """Стык плоскостей C++-ядра: выход рамки A → вход рамки B (рамки — (p, axis, u, v))."""

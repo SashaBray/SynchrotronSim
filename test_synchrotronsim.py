@@ -1108,6 +1108,126 @@ class TestRingCpp(unittest.TestCase):
         np.testing.assert_allclose(cy.track(self.st), pert.track(self.st), atol=1e-11)
         cy.close()
 
+    def test_field_perturbation_on_zero_element(self):
+        """DK2 на элементе с НУЛЕВЫМ полем (секступоль Сибири, mat_S=0) действует и совпадает с Python-эталоном
+        (раньше флаг кик-тела замерзал при сборке, и возмущение терялось)."""
+        import copy
+        j = next(i for i, m in enumerate(self.py.mags) if self.py.kinds[i] == "sext" and not m.k2 and m.Leff > 0)
+        base = self.cpp.track(self.st)
+        try:
+            got = self.cpp.apply_perturb(dk2s=[(j, 50.0)]).track(self.st)
+        finally:
+            self.cpp.apply_perturb()                            # RESET — прочие тесты класса на чистом кольце
+        self.assertGreater(float(np.max(np.abs(got - base))), 1e-9)
+        m = copy.copy(self.py.mags[j]); m.k2 = 50.0; m.nonzero = True; m.kick_sector = True
+        m._nsl_sector = self.NSL; m._yoshida_dk = mt._yoshida(4)
+        pert = copy.copy(self.py); pert.mags = list(self.py.mags); pert.mags[j] = m
+        np.testing.assert_allclose(got, pert.track(self.st), atol=1e-11)
+
+    def test_pieces_follow_perturbation(self):
+        """Срезы (track_pieces/piece_meta) видят возмущения apply_perturb и совпадают с Python-эталоном: те же
+        DK/DK2/KICK на копиях магнитов, срезы изгибов по ring_analysis._bend_slices (раньше копии магнитов в
+        срезах собирались один раз при сборке/RESET, и возмущения в них не попадали)."""
+        import copy
+        mags, kinds = self.py.mags, self.py.kinds
+        jb = next(i for i, m in enumerate(mags) if m.sector)                        # изгиб: DK + DK2 (b1, b2 сектора)
+        jq = next(i for i, k in enumerate(kinds) if k == "quad" and i > 5)           # квадруполь: DK (кик-тело)
+        js = next(i for i, m in enumerate(mags) if kinds[i] == "sext" and not m.k2 and m.Leff > 0)   # KICK (ящик)
+        dkb, dkq, dk2b, th = 0.3, 0.2, 5.0, 1e-4
+        try:
+            self.cpp.apply_perturb(kicks=[(js, th)], dks=[(jb, dkb), (jq, dkq)], dk2s=[(jb, dk2b)])
+            meta, got = self.cpp.piece_meta(), self.cpp.track_pieces(self.st)
+        finally:
+            self.cpp.apply_perturb()                            # RESET — прочие тесты класса на чистом кольце
+        pert = list(mags)
+        for j, dk, dk2 in ((jb, dkb, dk2b), (jq, dkq, 0.0)):
+            m = copy.copy(mags[j]); m.k1 += dk; m.k1v += dk; m.k2 += dk2; pert[j] = m
+        pieces = []                                             # (магнит, стык перед куском, кусок)
+        for j, m in enumerate(pert):
+            pieces += [(j, i == 0, c) for i, c in enumerate(self.ra._bend_slices(m) if m.sector else [m])]
+        self.assertEqual(len(meta), len(pieces))
+        self.assertEqual([(a, b, c) for a, b, c, *_ in meta], [(j, jn, bool(c.sector)) for j, jn, c in pieces])
+        np.testing.assert_allclose(np.array([r[3:] for r in meta]),
+                                   np.array([(c.Leff, c.theta0, c.k1, c.k2, c.k3) for _, _, c in pieces]),
+                                   rtol=1e-12, atol=1e-15)
+        m = copy.copy(mags[js]); m.theta0 = th; m.nonzero = True; m.xref = None   # кик корректора, как ra.kicked
+        pert[js] = m
+        pieces = [(j, jn, m if j == js else c) for j, jn, c in pieces]
+        ref = np.full_like(got, np.nan)
+        for p, z in enumerate(self.st):
+            cur = tuple(map(float, z)); ref[p, 0] = cur; prev = self.py.plane
+            for q, (j, jn, c) in enumerate(pieces):
+                if jn:
+                    cur = mt.modified_drift(cur, prev, pert[j]); prev = pert[j]
+                cur = c.body(cur); ref[p, q + 1] = cur
+        np.testing.assert_allclose(got, ref, atol=1e-11)
+
+    def test_pieces_match_elements_after_perturb(self):
+        """Срезы после любых возмущений, включая KICK/VKICK на изгибе (у Python-эталона такого нет), сшиваются
+        в магниты: состояние после последнего среза = выход магнита в track_elements. Доп. кик у секторного
+        кладётся только на последний срез, иначе он входил бы N раз."""
+        jb = next(i for i, m in enumerate(self.py.mags) if m.sector)
+        jq = next(i for i, k in enumerate(self.py.kinds) if k == "quad" and i > 5)
+        try:
+            self.cpp.apply_perturb(kicks=[(jb, 1e-4)], vkicks=[(jb, -2e-4)], dsks=[(jq, 0.05)], dk3s=[(jq, 30.0)])
+            meta, P, E = self.cpp.piece_meta(), self.cpp.track_pieces(self.st), self.cpp.track_elements(self.st)
+        finally:
+            self.cpp.apply_perturb()
+        last = {}
+        for q, r in enumerate(meta):
+            last[r[0]] = q + 1
+        np.testing.assert_allclose(P[:, [last[j] for j in range(self.cpp.n_mag)]], E[:, :-1], atol=1e-11)
+
+    def test_description_follows_apply_perturb(self):
+        """Описание магнитов CppRing.mags (для ring_matrix/ring_response) несёт возмущения apply_perturb: та же
+        физика, что у сервера — Python-трекинг описания = C++; после RESET описание снова чистое."""
+        import copy
+        mags, kinds = self.py.mags, self.py.kinds
+        jb = next(i for i, m in enumerate(mags) if m.sector)
+        jq = next(i for i, k in enumerate(kinds) if k == "quad" and i > 5)
+        js, js2 = [i for i, m in enumerate(mags) if kinds[i] == "sext" and not m.k2 and m.Leff > 0][:2]
+        try:
+            self.cpp.apply_perturb(kicks=[(js, 1e-4)], dks=[(jb, 0.3), (jq, 0.2)], dk2s=[(jb, 5.0), (js2, 50.0)])
+            d = self.cpp.mags
+            got = self.cpp.track(self.st)
+        finally:
+            self.cpp.apply_perturb()
+        self.assertAlmostEqual(d[jb].k1, mags[jb].k1 + 0.3, places=14)
+        self.assertAlmostEqual(d[jq].k1v, mags[jq].k1v + 0.2, places=14)
+        self.assertEqual(d[jb].theta0, mags[jb].theta0)
+        self.assertTrue(d[js2].kick_sector)                     # нулевой секступоль с k2 — кик-тело, как в C++
+        self.assertEqual(d[js].theta0, 1e-4)                    # кик «ящика» = θ0 box-тела (ra.kicked)
+        pr = copy.copy(self.py); pr.mags = d
+        np.testing.assert_allclose(got, pr.track(self.st), atol=1e-11)
+        self.assertEqual([m.k1 for m in self.cpp.mags], [m.k1 for m in mags])
+
+    def test_base_perturbations_survive_reset(self):
+        """Возмущения создания (with_*/perturbed) — часть кольца: apply_perturb() их не сбрасывает, описание их
+        держит. KICK/VKICK изгиба не трогает его θ0 (кривизну h для ring_matrix), VKICK — не гор. θ0."""
+        import copy
+        mags, kinds = self.py.mags, self.py.kinds
+        jb = next(i for i, m in enumerate(mags) if m.sector)
+        q = next(i for i, k in enumerate(kinds) if k == "quad" and i > 5)
+        js = next(i for i, m in enumerate(mags) if kinds[i] == "sext" and not m.k2 and m.Leff > 0)
+        yawed = self.ra.yaw_element(copy.copy(mags[q]), 2e-4)
+        r = self.cpp.with_yaw(q, 2e-4)
+        try:
+            ref = r.track(self.st)
+            r.apply_perturb(kicks=[(jb, 1e-4)], vkicks=[(jb, -2e-4)])
+            m = r.mags[jb]
+            self.assertEqual(m.theta0, mags[jb].theta0)
+            self.assertEqual((m.hkick, m.vkick), (1e-4, -2e-4))
+            np.testing.assert_allclose(r.mags[q].fr_in[1], yawed.fr_in[1], atol=1e-15)
+            r.apply_perturb()
+            np.testing.assert_array_equal(r.track(self.st), ref)
+        finally:
+            r.close()
+        v = self.cpp.with_vkick(js, 1e-4)
+        try:
+            self.assertEqual((v.mags[js].theta0, v.mags[js].vkick), (mags[js].theta0, 1e-4))
+        finally:
+            v.close()
+
     def test_junction_command(self):
         from beam_injection import PlaneMagnet
         ax = np.array([1.0, 0.0, 0.0]); v = np.array([0.0, 0.0, 1.0])
@@ -1337,6 +1457,131 @@ class TestDipoleFringe(unittest.TestCase):
         h = 1e-5
         self.assertAlmostEqual(da.coef(py, (0, 0, 1, 0, 0, 0)), -k(0.0), delta=1e-15)
         self.assertAlmostEqual(da.coef(py, (0, 0, 1, 0, 0, 1)), -(k(h) - k(-h)) / (2 * h), delta=1e-9)
+
+
+class TestMultipolesAnyKind(unittest.TestCase):
+    """Мультиполи K1/K2/K3 — свойство ПОЛЯ, а не вида: kind задаёт только геометрию тела (изгиб = сектор,
+    прочее = прямой кик). Все mat_* абсолютные (у «dipole» доли mat_B отменены). Импорт .lte переносит
+    мультиполи любого типа (поле от формы полюсов) и предупреждает о неучтённых параметрах."""
+    ST = (1e-3, 2e-4, 0.5e-3, -1e-4, 0.0, 1e-3)
+
+    def test_straight_body_kind_independent(self):
+        """Одинаковое поле ⇒ бит-в-бит одинаковое тело у quad/sext/oct/kicker/dq и dipole с θ0=0."""
+        f = dict(k1=0.8, k2=-35.0, k3=900.0)
+        ref = make_magnet("quad", 0.2, **f).body(self.ST)
+        for kind in ("sext", "oct", "kicker", "dq", "dipole", "monitor"):
+            m = make_magnet(kind, 0.2, **f)
+            self.assertTrue(m.kick_sector, kind)
+            self.assertEqual(m.body(self.ST), ref, kind)
+
+    def test_dipole_multipoles_absolute(self):
+        """У «dipole» мультиполи абсолютные, как у «dq»: k2 = K2 (не K2·mat_B); тело = dq бит-в-бит."""
+        g = dict(angle=0.0094691022946895, k2=-5.0, k3=40.0, edge1=-0.0127, edge2=0.0031)
+        a, b = make_magnet("dipole", 0.4178302891796566, **g), make_magnet("dq", 0.4178302891796566, **g)
+        self.assertTrue(a.sector)
+        self.assertAlmostEqual(a.k2, -5.0, places=12); self.assertAlmostEqual(a.k3, 40.0, places=10)
+        self.assertEqual(a.body(self.ST), b.body(self.ST))
+
+    def test_kicker_static_dipole(self):
+        """mat_B прямого элемента = дипольный кик: без мультиполей — «ящик» корректора, с ними — член θ0/L
+        кик-тела. У опорной частицы Δpx = θ0 в обоих случаях."""
+        box = make_magnet("kicker", 0.1, angle=1e-3)
+        self.assertFalse(box.kick_sector)
+        self.assertAlmostEqual(box.body((0.0,) * 6)[1], box.theta0, delta=1e-15)
+        kick = make_magnet("kicker", 0.1, angle=1e-3, k2=30.0)
+        self.assertTrue(kick.kick_sector)
+        self.assertAlmostEqual(kick.body((0.0,) * 6)[1], kick.theta0, delta=1e-8)   # секступоль на смещении θL/2
+
+    def test_symplectic_new_paths(self):
+        for m in (make_magnet("kicker", 0.1, angle=1e-3, k1=0.5, k2=30.0), make_magnet("dq", 0.4, k1=-1.5),
+                  make_magnet("sext", 0.166, k1=0.8, k2=-136.0),
+                  make_magnet("dq", 1.0, angle=0.0247680586728496, k1=-1.96, k2=3.0, k3=150.0,
+                              edge1=-0.01168, edge2=-0.01168)):
+            M = jacobian4(m.body, TestSymplecticity.BASE)
+            self.assertLess(float(np.max(np.abs(M.T @ J4 @ M - J4))), 1e-6, m.kind)
+
+    def test_ring_matrix_gradient_any_kind(self):
+        """Линейная оптика: K1 у секступоля/kicker/dq с θ0=0 — толстая линза (раньше дрейф) = якобиан тела."""
+        import ring_matrix as rm
+        for kind in ("sext", "kicker", "dq"):
+            m = make_magnet(kind, 0.3, k1=0.4)     # слабый градиент: ошибка Йошиды-4 (N=5) ≪ допуска
+            _, R = rm.element_matrix(m)
+            F = jacobian4(m.body, (0.0,) * 6, h=1e-6)
+            self.assertLess(float(np.max(np.abs(R[:4, :4] - F))), 1e-6, kind)
+
+    def test_ring_map_follows_field(self):
+        """Ряды ring_map у kicker с полем = тело ядра (раньше kicker в рядах был дрейфом)."""
+        import ring_map as rmap
+        mp = rmap.RingMap(None, order=4); da = mp.da
+        m = make_magnet("kicker", 0.3, k1=1.2, k2=40.0, k3=500.0)
+        ser = mp.element(da.identity(), m)
+        z = (1e-3, 2e-4, 0.5e-3, -1e-4, 0.0, 0.0)
+        val = [s[0] for s in da.compose(ser, [da.const(v) for v in z])]
+        self.assertLess(max(abs(a - b) for a, b in zip(val[:4], m.body(z)[:4])), 1e-9)
+
+    def test_importer_multipoles_any_type(self):
+        import s2lattice_to_db as s2
+        QP = s2.QP
+        q = {"type": "KQUSE", "L": 0.3, "K1": 2.0, "K2": 15.0}
+        self.assertEqual(s2.kind_of(q), "quad")
+        self.assertAlmostEqual(s2.mat_of("quad", q, 0.3)["mat_S"] * QP, 15.0, places=12)
+        b = {"type": "CSBEND", "L": 1.0, "ANGLE": 0.025, "K2": 3.0, "K3": 150.0}   # K2/K3 без K1
+        self.assertEqual(s2.kind_of(b), "dipole")
+        mb = s2.mat_of("dipole", b, 1.0)
+        self.assertAlmostEqual(mb["mat_S"] * QP, 3.0, places=12)
+        self.assertAlmostEqual(mb["mat_O"] * QP, 150.0, places=10)
+        self.assertEqual(s2.kind_of({"type": "KSEXT", "L": 0.1, "K1": 0.5}), "sext")   # градиент — не слот корректора
+        self.assertEqual(s2.kind_of({"type": "KSEXT", "L": 0.1}), "kicker")
+        self.assertEqual(s2.active_of("quad", q), "k1|k2")
+
+    def test_importer_fractional_multipoles(self):
+        """F1…F3 при XREFERENCE (как elegant): профиль поля на радиусе XREF = 1 + F1 + F2 + F3."""
+        import s2lattice_to_db as s2
+        e = {"type": "CSBEND", "L": 1.0, "ANGLE": 0.02, "XREFERENCE": 0.01, "F1": 0.1, "F2": 0.02, "F3": 0.003}
+        K = s2.lte_multipoles(e)
+        rho, xr = 1.0 / 0.02, 0.01
+        prof = sum(K[n] * rho * xr ** (n + 1) / math.factorial(n + 1) for n in range(3))
+        self.assertAlmostEqual(prof, 0.1 + 0.02 + 0.003, places=12)
+        self.assertEqual(s2.lte_multipoles({"type": "KQUAD", "L": 0.3, "F1": 0.1, "XREFERENCE": 0.01}),
+                         (0.0, 0.0, 0.0))                     # дробная форма — только у изгиба
+
+    def test_importer_reports_unused(self):
+        import s2lattice_to_db as s2
+        e = {"type": "CSBEND", "L": 1.0, "ANGLE": 0.02, "K4": 10.0, "TILT": 0.0, "DX": 1e-4, "N_SLICES": 5,
+             "_str": ["SYSTEMATIC_MULTIPOLES"]}
+        self.assertEqual(s2.unused_params(e), ["DX", "K4", "SYSTEMATIC_MULTIPOLES"])
+        self.assertEqual(s2.unused_params({"type": "KQUAD", "L": 0.3, "F1": 0.1}), ["F1"])
+
+    def test_importer_parse_comments_and_skipped(self):
+        import s2lattice_to_db as s2, tempfile
+        txt = ('Q1: KQUAD, L=0.3, K1=2.0 ! K2=99\nM1: MULT, L=0.0, KNL=0.1, ORDER=2\n'
+               'S1: KSEXT, L=0.1, SYSTEMATIC_MULTIPOLES="m.sdds"\nring: LINE=(Q1,M1,S1)\n')
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.lte")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(txt)
+            old = s2.LTE; s2.LTE = p
+            try:
+                elems, seq, skipped = s2.parse()
+            finally:
+                s2.LTE = old
+        self.assertNotIn("K2", elems["Q1"])                  # «!» — комментарий
+        self.assertEqual(skipped["M1"][0], "MULT")
+        self.assertEqual(elems["S1"]["_str"], ["SYSTEMATIC_MULTIPOLES"])
+        self.assertEqual(seq, ["Q1", "M1", "S1"])
+
+    def test_flatten_kquse_and_lost(self):
+        import lte_flatten as lf, tempfile
+        txt = ('Q1: QUAD, L=0.3, K1=2.0, K2=15.0\nB1: SBEN, L=1.0, ANGLE=0.02, K3=150.0, K4=7.0, '
+               'XREFERENCE=0.01, F2=0.01\nR: LINE=(Q1,B1)\n')
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.lte")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(txt)
+            out, rep = lf.flatten(p, "R")
+        self.assertIn("Q1: KQUSE", out)                       # у KQUAD нет K2 в elegant
+        self.assertIn("K3=150", out); self.assertIn("F2=0.01", out); self.assertIn("XREFERENCE=0.01", out)
+        self.assertEqual(rep["не перенесено параметров (типов эл.)"], {"K4": 1})
 
 
 class _LinearOpticsPlant:
