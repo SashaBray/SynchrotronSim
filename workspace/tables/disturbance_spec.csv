@@ -6,3 +6,4 @@ dip_field_ripple;dipole;;tone;0.00005;50;0;common;field:b1
 quad_field_ripple;quad;;tone;0.00002;50;0;common;field:k1
 sext_field_ripple;sext;;tone;0.0001;50;0;independent;field:k2
 oct_field_ripple;oct;;tone;0.0001;50;0;independent;field:k3
+circumference_tide;ring;;tone;0.00002;7.5;0;common;circumference

@@ -4,8 +4,23 @@
 Регулятор — ЧИСТЫЙ алгоритм: читает показания/состояние, возвращает свой ВКЛАД в target.
 Он не видит кольцо и не трогает plant; темп задаёт планировщик (не сам регулятор).
 Матрица отклика — не хардкод, а РЕСУРС: регулятор просит её у Resources в setup().
+
+МОДУЛЬНОСТЬ: `provides()` даёт ВХОД В СХЕМУ ВЫЧИСЛЕНИЯ СВОЕЙ наблюдаемой — как она считается из `ObsContext`
+(и какие тяжёлые промежуточные вводит). Так контур — ОДИН самодостаточный файл (закон + вычисление сенсора);
+платформа собирает реестр Observer'а из активных контуров, а не хардкодит его в plant'е/observer.py.
 """
+from dataclasses import dataclass, field
+
 import numpy as np
+
+
+@dataclass
+class ObsContribution:
+    """Вклад контура в схему вычисления наблюдаемых (см. control/observer.py `Observer`/`ObsContext`).
+      observables   — {obs_id: fn(ctx)->ndarray}  как посчитать наблюдаемую этого контура из контекста;
+      intermediates — {key: fn(ctx)->value}       тяжёлые ОБЩИЕ шаги, которые контур вводит (кэш в ctx)."""
+    observables: dict = field(default_factory=dict)
+    intermediates: dict = field(default_factory=dict)
 
 
 class ResponseMatrix:
@@ -89,3 +104,9 @@ class Controller:
     def reset(self):
         """Сброс внутреннего состояния (интеграторы и т.п.)."""
         pass
+
+    def provides(self):
+        """ВХОД В СХЕМУ ВЫЧИСЛЕНИЯ своей наблюдаемой (модульность): как считать свой сенсор из `ObsContext`
+        и какие тяжёлые промежуточные контур вводит. Дефолт — ничего (контур читает уже готовую наблюдаемую,
+        её даёт plant/другой контур). Платформа собирает реестр Observer'а из `provides()` активных контуров."""
+        return ObsContribution()

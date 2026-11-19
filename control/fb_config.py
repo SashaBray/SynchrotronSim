@@ -7,7 +7,9 @@
 `disturbance.load_spec()`, отфильтрованного по именам из `fb_disturbances`. Только чтение БД.
 
 Схема таблиц (разделитель «;», точка — десятичная):
-  fb_experiments: fb_exp_id;lattice_id;steps;stride;settle;seed;sr;nsl;note;status;plant;drift_k1/k2/k3;realistic_drives
+  fb_experiments: fb_exp_id;lattice_id;steps;stride;settle;seed;sr;nsl;note;status;plant;drift_k1/k2/k3;realistic_drives;
+                  relative_orbit (opt., 0/1: показания BPM относительно опорной орбиты; пусто = 0);
+                  center_bunch (opt., 0/1: центроид пучка на старте — на замкнутую орбиту; пусто = как relative_orbit)
   fb_loops:       fb_exp_id;loop;sensor;actuator_key;gain;rcond;rate_hz;ref;enabled
   fb_disturbances:fb_exp_id;name                        (джойн на disturbance_spec.csv по name)
   fb_record:      fb_exp_id;signal;params;cadence;enabled   (ПОДПИСКА: за чем следить/что писать)
@@ -103,6 +105,8 @@ class FbConfig:
     drift: tuple = (0.0, 0.0, 0.0)                         # дрейф градиентов (drift_k1/k2/k3) для optics-plant
     realistic_drives: bool = False                         # opt-in: конечная скорость+лаг приводов ВСЕХ магнитов
     drive_profile: dict = field(default_factory=dict)      # богатый профиль приводов из fb_drives (пусто = дефолт)
+    relative_orbit: bool = False                           # opt-in: BPM относительно опорной (golden) орбиты
+    center_bunch: object = None                            # opt-in: старт центроида на CO (None = как relative_orbit)
 
     def enabled_records(self):
         return [r for r in self.records if r.enabled]
@@ -138,4 +142,6 @@ def load(fb_exp_id):
         plant=(m.get("plant") or "tbt").strip() or "tbt",
         drift=(_f("drift_k1"), _f("drift_k2"), _f("drift_k3")),
         realistic_drives=_b(m.get("realistic_drives", "0")),
-        drive_profile=_drive_profile(fb_exp_id))
+        drive_profile=_drive_profile(fb_exp_id),
+        relative_orbit=_b(m.get("relative_orbit") or "0"),
+        center_bunch=(_b(m["center_bunch"]) if (m.get("center_bunch") or "").strip() else None))

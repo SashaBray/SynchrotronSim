@@ -54,9 +54,13 @@ def main():
     # --- KPI ---
     kpis = []
     for lab, sig, unit in (("орбита X", "orbit_rms.x", "мкм rms"), ("орбита Y", "orbit_rms.y", "мкм rms"),
+                           ("орбита X, среднее по времени", "orbit_dc.x", "мкм rms"),
+                           ("орбита Y, среднее по времени", "orbit_dc.y", "мкм rms"),
                            ("свет X", "light.x", "мкм rms"), ("свет Y", "light.y", "мкм rms"),
                            ("резкость конуса", "screen.sharpness_pct", "% идеала"),
-                           ("джиттер угла X", "screen.jitter_x_urad", "мкрад")):
+                           ("джиттер угла X", "screen.jitter_x_urad", "мкрад"),
+                           ("удлинение кольца", "rf.circ_um", "мкм"), ("энергия δ", "rf.delta_true_ppm", "ppm"),
+                           ("частота ВЧ Δf", "rf.df_hz", "Гц")):
         v = _last(res, sig)
         if v is not None:
             kpis.append(_kpi(lab, f"{v:.2f}", unit))
@@ -81,6 +85,28 @@ def main():
                          legend=dict(orientation="h", y=1.02, yanchor="bottom"))
         fo.update_xaxes(title_text="окно усреднения"); fo.update_yaxes(title_text="мкм rms", rangemode="tozero")
         body.append(f'<h2>Сенсоры во времени (контур ОС по окнам)</h2><div class="pic">{rep.fig_div(fo)}</div>')
+
+    # --- резонатор и энергия (рекордер rf): ΔC, δ (истинная и оценка по BPM), Δf ---
+    rfs = [("rf.delta_true_ppm", "δ истинная, ppm", "#2b7bba", "y"), ("rf.delta_ppm", "δ̂ по BPM, ppm", "#76b7b2", "y"),
+           ("rf.circ_um", "ΔC, мкм", "#9c755f", "y2"), ("rf.df_hz", "Δf ВЧ, Гц", "#e15759", "y2")]
+    prf = [(s, n, c, ax) for s, n, c, ax in rfs if s in res and res[s][1]]
+    if prf:
+        frf = go.Figure()
+        for sig, name, col, ax in prf:
+            order = np.argsort(res[sig][0])
+            x = np.asarray(res[sig][0])[order]; y = np.asarray(res[sig][1])[order]
+            frf.add_trace(go.Scatter(x=x, y=y, mode="lines+markers", name=name, yaxis=ax,
+                                     line=dict(width=1.8, color=col, dash=("dot" if sig == "rf.delta_ppm" else None))))
+        frf.update_layout(height=360, margin=dict(l=60, r=60, t=10, b=42), plot_bgcolor="white",
+                          legend=dict(orientation="h", y=1.02, yanchor="bottom"),
+                          yaxis=dict(title="энергия δ, ppm"),
+                          yaxis2=dict(title="ΔC, мкм  ·  Δf, Гц", overlaying="y", side="right"))
+        frf.update_xaxes(title_text="окно усреднения")
+        body.append('<h2>Резонатор и энергия пучка</h2><div class="unitbox">Длина кольца ΔC (возмущение '
+                    'circumference) сдвигает равновесную энергию δ ≈ −ΔC/(αc·C); контур ВЧ-частоты (если включён) '
+                    'держит δ, двигая f_RF на Δf ≈ −f·ΔC/C. δ̂ — оценка по дисперсионной компоненте орбиты BPM '
+                    '(датчик контура), δ — средняя энергия частиц пучка относительно проектного равновесия.</div>'
+                    f'<div class="pic">{rep.fig_div(frf)}</div>')
 
     # --- оптика во времени (tune/chroma/adts) — для plant=optics ---
     optics = [("tune.x", "νx", "#2b7bba"), ("tune.y", "νy", "#e15759"),

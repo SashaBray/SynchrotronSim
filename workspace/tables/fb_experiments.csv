@@ -1,3 +1,7 @@
-fb_exp_id;lattice_id;steps;stride;settle;seed;sr;nsl;note;status;plant;drift_k1;drift_k2;drift_k3;realistic_drives
-1;26;180;15;250;1;1;8;орбитный FOFB под реалистичным шумом + запись орбиты/света/интерференции;new;tbt;0;0;0;0
-2;26;24;1;0;1;0;8;оптические контуры tune/chroma на OpticsPlant (ADTS выкл — октуполи ранг-1);new;optics;0.001;0.01;0.03;0
+fb_exp_id;lattice_id;steps;stride;settle;seed;sr;nsl;note;status;plant;drift_k1;drift_k2;drift_k3;realistic_drives;relative_orbit;center_bunch
+1;26;180;15;250;1;1;8;орбитный FOFB под реалистичным шумом + запись орбиты/света/интерференции;new;tbt;0;0;0;0;;
+2;26;24;1;0;1;0;8;оптические контуры tune/chroma на OpticsPlant (ADTS выкл — октуполи ранг-1);new;optics;0.001;0.01;0.03;0;;
+3;26;600;15;250;3;1;8;длина кольца плывёт (ΔC до 20 мкм — ускоренный прилив/нагрев): FOFB x/y БЕЗ контура ВЧ — контроль;done;tbt;0;0;0;0;1;
+4;26;600;15;250;3;1;8;то же + контур ВЧ-частоты (rf.delta → rf.freq): энергия пучка держится;done;tbt;0;0;0;0;1;
+5;26;360;15;250;1;1;8;пол горизонтали (как опыт 1: FOFB под реалистичным шумом, BPM абсолютно) БЕЗ контура ВЧ — контроль;done;tbt;0;0;0;0;0;1
+6;26;360;15;250;1;1;8;то же + контур ВЧ-частоты (rf.delta → rf.freq): снимает ли он радиационно-дисперсионный пол X;done;tbt;0;0;0;0;0;1

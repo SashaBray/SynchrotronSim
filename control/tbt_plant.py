@@ -14,7 +14,10 @@
     машине: SVD-петля обращает линейную модель и применяет её к нелинейной реальности. Зазор
     модель↔реальность — ровно предмет опытов режима 2.
 
-Актуаторы (schema): кики корректоров hkick/vkick. Сенсоры (observables): ebpm.x/ebpm.y (орбита в
+Актуаторы (schema): кики корректоров hkick/vkick; opt-in (rf_actuator=True) — ЧАСТОТА ВЧ `rf.freq` (Δf от
+номинала h·c/C, Гц: актуатор энергии пучка, контур control/controllers/rf_frequency.py). Возмущение длины
+кольца (disturbance quantity=circumference, ΔC) plant вносит как эквивалентную длину ВЧ-оборота C_RF − ΔC.
+Сенсоры (observables): ebpm.x/ebpm.y (орбита в
 мониторах), photon.x/photon.y (центроид фотонного пучка в прямых промежутках, x+d·x'); history хранит
 снимок (x, px, y, py) во всех мониторах → фазовый портрет и датчики плоскости для режима 2. Возмущение —
 feed-down квадруполей по фикс. пространственному паттерну (амплитуда статична/медленна); опц. впрыск
@@ -45,7 +48,8 @@ PHASE_DEG = 165.0                                             # фаза ВЧ д
 class TbtPlant:
     def __init__(self, lattice=26, nsl=8, n_part=NP, stride=STRIDE, dist_amp=0.3e-6,
                  dist_rho=1.0, meas_noise=0.0, settle_turns=300, seed=1, dist_seed=11, n_photon=8,
-                 avg_chunks=9, resp_dims=4, sr=True, disturbance_spec=None, gap_mm=5.0, observer=None):
+                 avg_chunks=9, resp_dims=4, sr=True, disturbance_spec=None, gap_mm=5.0, observer=None,
+                 relative_orbit=False, rf_actuator=False, center_bunch=None):
         self.stride = stride
         self.gap_mm = float(gap_mm)                           # стартовый зазор ондуляторов (мм); живёт в state.undulators
         self.sr = bool(sr)                                    # СИ вкл/выкл (режим 2: затухание vs сохранение)
@@ -84,6 +88,11 @@ class TbtPlant:
             self.Hc = self._build_resp_6d("ebpm.x", "hkick")  # (дисперсия/энергия в горизонтали учтены — как LOCO)
             self.Hcy = self._build_resp_6d("ebpm.y", "vkick")
         self.CO = ra.closed_orbit(self.ring, dims=6)
+        # --- ВЧ: номинальная частота h·c/C; opt-in актуатор rf.freq (Δf, Гц) + возмущение длины кольца ΔC
+        self._rf0 = dict(self.ring.rf)                        # исходный ВЧ (для точного возврата к номиналу)
+        self.F0 = float(self.ring.rf_frequency())             # номинал f_RF = h·c/C, Гц
+        self.rf_ids = ["rf.freq"] if rf_actuator else []
+        self._rf_key = (0.0, 0.0); self.rf_df = 0.0; self.rf_dC = 0.0   # применённые Δf (Гц) и ΔC (м)
         self.TREV = float(inf.get("t_rev", 0.0)) or self._trev_from_ring()
         # якоря ондуляторов для остаточного орбитного кика (гэп-зависимый I1): dev=und_UFC, s-порядок ↔ group_id
         _ufc = sorted(i for i, m in enumerate(self.ring.mags) if str(getattr(m, "dev", "") or "") == "und_UFC")
@@ -116,18 +125,46 @@ class TbtPlant:
         subs = ["ebpm.x", "ebpm.y"] + (["photon.x", "photon.y"] if self.SIDX.size else [])
         self.observer = observer or Observer(subscribe=subs)
 
+        # опорная (golden) орбита на BPM: невозмущённое кольцо (design), замкнутая орбита в мониторах.
+        # При relative_orbit показания BPM отдаём ОТНОСИТЕЛЬНО неё → отклонения (≈0 на невозмущённой машине;
+        # возмущение/коррекция видны как уход от нуля). НЕ трогает трекинг/карты/токи — только отчёт о показании.
+        self.relative_orbit = bool(relative_orbit)
+        self.ref_x = np.zeros(self.n_mon); self.ref_y = np.zeros(self.n_mon)
+        # center_bunch: центроид пучка — ТОЧНО на замкнутую орбиту (убираем КОГЕРЕНТНЫЙ стартовый сдвиг центроида
+        # по энергии ~σ_δ/√N ≈ 350 ppm при N=8 → через дисперсию горизонт. синхротронный переходник ±10 мкм,
+        # затухающий ~τ_δ ≈ 4660 об). Разброс по частицам (размер пучка) сохраняется. None → как раньше: только
+        # при relative_orbit (кокпит — старт у нуля, без долгого звона); True — и при абсолютных BPM.
+        self.center_bunch = self.relative_orbit if center_bunch is None else bool(center_bunch)
+        if self.center_bunch:
+            self._bunch0 = self._bunch0 - (self._bunch0.mean(axis=0) - self.CO)
+        if self.relative_orbit:
+            try:                                                  # ТОЙ ЖЕ измерит. цепью, что _measure, но без возмущения:
+                self.ring.apply_perturb()                         # design (корректоры=0, возмущение off)
+                self._last_kick = None
+                rb = self._bunch0.copy()
+                for _ in range(max(0, int(round(self.settle_turns / self.stride)))):   # декогеренция бетатрона
+                    rb = np.asarray(self.ring.track_tbt(rb.tolist(), self.stride))[:, self.stride, :]
+                snaps = [np.mean(np.asarray(self.ring.track_elements(rb.tolist())), axis=0)
+                         for _ in range(max(1, self.avg_chunks))]  # усреднение окна ≈ такт (как BPM-показание)
+                ref = np.mean(snaps, axis=0)
+                self.ref_x = ref[self.mon, 0].copy(); self.ref_y = ref[self.mon, 2].copy()
+            except Exception:
+                pass
+
     def _trev_from_ring(self):
         C = float(getattr(self.ring, "circumference", 1110.089))
         return C / 2.99792458e8
 
     # --- контракт Plant --------------------------------------------------------------------------
     def schema(self):
-        return Schema(self.hk_ids + self.vk_ids)
+        return Schema(self.hk_ids + self.vk_ids + self.rf_ids)
 
     def history(self):
         return History(self.mon_ids, moments=("x", "px", "y", "py"))
 
     def build_response(self, actuators, observables):
+        if list(actuators) == self.rf_ids and self.rf_ids:     # частота ВЧ → наблюдаемые (через Observer)
+            return self._build_rf_resp(list(observables))
         cols = [self._col[a] for a in actuators]
         if tuple(observables) == ("ebpm.x",):
             return ResponseMatrix(self.Hc[:, cols], self.mon_ids, actuators)
@@ -137,6 +174,65 @@ class TbtPlant:
 
     def fingerprint(self):
         return ("tbt", self.resp_dims, self.Hc.shape)
+
+    # --- ВЧ-частота: применение и отклик --------------------------------------------------------------
+    def _set_rf(self, df, dC):
+        """Резонатор на f = F0 + Δf при длине кольца, растянутой на ΔC. Растяжение = лишний путь ΔC за оборот
+        ⇔ часы ВЧ уходят на C_RF − ΔC: f_eff = h·c/(h·c/f − ΔC). Δf = ΔC = 0 ⇒ ровно исходный ВЧ (бит-в-бит)."""
+        if df == 0.0 and dC == 0.0:
+            self.ring.rf = dict(self._rf0); self.ring._send_rf()
+        else:
+            hc = float(self._rf0["harmonic"]) * 2.99792458e8
+            self.ring.set_rf(freq_hz=hc / (hc / (self.F0 + df) - dC))
+        self.rf_df, self.rf_dC = float(df), float(dC)
+
+    def _apply_rf(self, state):
+        """Частота ВЧ (актуатор rf.freq) + возмущение длины кольца → резонатор. ΔC зовём РАЗ за такт (walk)."""
+        df = float(state.actual["rf.freq"] + state.dynamics["rf.freq"]) if self.rf_ids else 0.0
+        dC = self.dist.circumference(self._t, self._dt) if self.dist is not None else 0.0
+        if (df, dC) != self._rf_key:
+            self._set_rf(df, dC)
+            self._rf_key = (df, dC)
+
+    def _build_rf_resp(self, observables, eps=5.0):
+        """Отклик наблюдаемых на Δf (центральная разность ±eps Гц) на 6D-равновесии СОБСТВЕННОГО кольца (СИ+ВЧ):
+        замкнутая орбита → снимок → та же цепь, что в такте (relative_orbit, Observer из provides() контуров).
+        Кэш на диск по контентному отпечатку кольца. Кольцо на входе чистое (корректоры=0, ВЧ номинал)."""
+        import hashlib, pickle
+        from .observer import ObsContext
+        from .response import ring_fingerprint, CACHE_DIR
+        self.ring.apply_perturb(); self._last_kick = None        # чистое кольцо (отпечаток без транзитных)
+        self._set_rf(0.0, 0.0); self._rf_key = (0.0, 0.0)
+        tag = hashlib.md5(repr((ring_fingerprint(self.ring), "rfresp", self.relative_orbit, list(observables),
+                                eps)).encode()).hexdigest()[:12]
+        path = os.path.join(CACHE_DIR, f"resp_{tag}.pkl")
+        if os.path.exists(path):
+            try:
+                with open(path, "rb") as f:
+                    R = pickle.load(f)
+                return ResponseMatrix(R, [f"{o}.{i}" for o in observables for i in range(R.shape[0])], self.rf_ids)
+            except Exception:
+                pass
+
+        def read(df):
+            self._set_rf(df, 0.0)
+            co = ra.closed_orbit(self.ring, dims=6)
+            snap = np.asarray(self.ring.track_elements([co]))[0]
+            ex = snap[self.mon, 0] - (self.ref_x if self.relative_orbit else 0.0)
+            ey = snap[self.mon, 2] - (self.ref_y if self.relative_orbit else 0.0)
+            ctx = ObsContext(None, self, ring=self.ring, intermediates=self.observer.intermediates)
+            ctx.set("orbit_x", ex).set("orbit_y", ey)
+            out = self.observer.compute(ctx, observables)
+            return np.concatenate([np.ravel(np.asarray(out[o], float)) for o in observables])
+
+        try:
+            R = ((read(+eps) - read(-eps)) / (2.0 * eps)).reshape(-1, 1)
+        finally:
+            self._set_rf(0.0, 0.0); self._rf_key = (0.0, 0.0)
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(path, "wb") as f:
+            pickle.dump(R, f)
+        return ResponseMatrix(R, [f"{o}.{i}" for o in observables for i in range(R.shape[0])], self.rf_ids)
 
     def _build_resp_6d(self, obs, kind):
         """Матрица отклика корректор→орбита, снятая с СОБСТВЕННОГО 6D-кольца (СИ+ВЧ, dims=6): дисперсия и
@@ -237,6 +333,7 @@ class TbtPlant:
         """Применить текущий набор киков к кольцу. apply_perturb дорог (~113 мс, RESET+набор) —
         зовём ТОЛЬКО когда набор изменился."""
         kk, vv, extra = self.kick_lists(state)
+        self._apply_rf(state)                                 # частота ВЧ + длина кольца (дёшево: команда RF)
         key = (tuple(kk), tuple(vv), tuple(sorted((k, tuple(v)) for k, v in extra.items())))
         if key == self._last_kick:
             return
@@ -254,6 +351,8 @@ class TbtPlant:
         state.history.data[:, 2] = snap[self.mon, 2]; state.history.data[:, 3] = snap[self.mon, 3]
         # BPM-показание — орбита (+ электронный шум), УСРЕДНЁННАЯ по окну ≈ такт: бетатрон и шум сбиваются
         ex = snap[self.mon, 0].copy(); ey = snap[self.mon, 2].copy()
+        if self.relative_orbit:                               # показания ОТНОСИТЕЛЬНО опорной (golden) орбиты
+            ex -= self.ref_x; ey -= self.ref_y
         mn = self._meas_noise(state)                          # живой шум датчика из state.sensors, иначе дефолт
         if mn:
             ex += mn * self._rng.standard_normal(self.n_mon)
@@ -262,7 +361,7 @@ class TbtPlant:
         phy = snap[self.SIDX, 2] + snap[self.SIDX, 3] * self.DVEC if self.SIDX.size else None
         self._buf.append((ex, ey, phx, phy))
         # усреднённое сырьё (сенсорная модель выше) → в ObsContext; наблюдаемые собирает Observer
-        ctx = ObsContext(state, self, ring=self.ring)
+        ctx = ObsContext(state, self, ring=self.ring, intermediates=self.observer.intermediates)
         ctx.set("orbit_x", np.mean([e[0] for e in self._buf], axis=0))
         ctx.set("orbit_y", np.mean([e[1] for e in self._buf], axis=0))
         if self.SIDX.size:
@@ -359,3 +458,10 @@ class MachineView:
             if chan in fld:
                 out[k] += float(fld[chan][i])
         return out
+
+    def orientation(self, magnet):
+        """Углы ориентации прибора (yaw, pitch, roll), рад, из решётки: yaw — азимут (куда смотрит элемент
+        в глобальной раме, накапливается по кольцу), pitch/tilt — наклоны (0 у идеальной выставки, ненулевые
+        при разъюстировке). Базовое возмущение правит только dx/dy/поле, не ориентацию, — поэтому статично."""
+        i = self.index(magnet); m = self._p.ring.mags[i]
+        return {k: float(getattr(m, k, 0.0) or 0.0) for k in ("yaw", "pitch", "roll")}

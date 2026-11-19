@@ -21,13 +21,15 @@ class ObsContext:
     `get(key)` отдаёт: сырьё (если plant его положил) → кэш → построенное билдером `_INTERMEDIATES[key]`
     (считается РАЗ, кэшируется). Так tune и chroma делят одну карту оборота, а adts — ту же RingMap."""
 
-    def __init__(self, state, plant, ring=None, order=4):
+    def __init__(self, state, plant, ring=None, order=4, intermediates=None):
         self.state = state
         self.plant = plant
         self.ring = ring
         self.order = order
         self._raw = {}
         self._cache = {}
+        # карта билдеров ПРОМЕЖУТОЧНЫХ — инъекция (её собирают из contributions контуров); дефолт — базис
+        self._intermediates = intermediates if intermediates is not None else _INTERMEDIATES
 
     def set(self, key, value):
         self._raw[key] = value
@@ -38,30 +40,25 @@ class ObsContext:
             return self._raw[key]
         if key in self._cache:
             return self._cache[key]
-        if key not in _INTERMEDIATES:
+        if key not in self._intermediates:
             raise KeyError(f"ObsContext: нет сырья/билдера для {key!r}")
-        self._cache[key] = _INTERMEDIATES[key](self)
+        self._cache[key] = self._intermediates[key](self)
         return self._cache[key]
 
 
 # --- билдеры ПРОМЕЖУТОЧНЫХ (один раз на такт, кэш в ObsContext) --------------------------------------
+# ЗДЕСЬ — только ОБЩИЕ примитивы кольца (не привязаны к наблюдаемой). Оптические промежуточные
+# (chroma_raw, normal_form) ПЕРЕЕХАЛИ в файлы-контуры (optics_tune.py / optics_adts.py): их вводит тот
+# контур, которому они нужны, через Controller.provides() — модульность (observer.py НЕ знает про tune/adts).
 def _b_ringmap(ctx):
     return rmap.RingMap(ctx.ring, ctx.order)
 
 def _b_one_turn(ctx):
     return ctx.get("ringmap").one_turn()
 
-def _b_chroma_raw(ctx):
-    return ctx.get("ringmap").chromaticity(ctx.get("one_turn"))   # даёт nux/nuy и xi_x/xi_y сразу
-
-def _b_normal_form(ctx):
-    return rmap.normal_form(ctx.ring, ctx.order, rmap=ctx.get("ringmap"))
-
 _INTERMEDIATES = {
     "ringmap": _b_ringmap,
     "one_turn": _b_one_turn,
-    "chroma_raw": _b_chroma_raw,
-    "normal_form": _b_normal_form,
 }
 
 
@@ -71,23 +68,10 @@ class ObsSpec:
     compute: object        # fn(ctx) -> ndarray
 
 
-# --- экстракторы НАБЛЮДАЕМЫХ ------------------------------------------------------------------------
-def _tune(ctx):
-    ch = ctx.get("chroma_raw"); return np.array([float(ch["nux"]), float(ch["nuy"])])
-
-def _chroma(ctx):
-    ch = ctx.get("chroma_raw"); return np.array([float(ch["xi_x"][1]), float(ch["xi_y"][1])])
-
-def _adts(ctx):
-    nf = ctx.get("normal_form")
-    return np.array([float(nf["dnux/dJx"]), float(nf["dnuy/dJy"]), float(nf["dnux/dJy"])])
-
+# --- наблюдаемые БАЗИСА ------------------------------------------------------------------------------
+# Оптику (tune/chroma/adts) здесь НЕТ — её несут файлы-контуры. Орбита — пас-сквозь усреднённого сырья
+# (сенсорная модель живёт в plant'е; это НЕ «вычисление контура», а сырьё plant'а — остаётся базисом).
 OBSERVABLES = {
-    # оптика (OpticsPlant): tune/chroma делят промежуточный chroma_raw (одна карта оборота)
-    "tune":     ObsSpec(("chroma_raw",), _tune),
-    "chroma":   ObsSpec(("chroma_raw",), _chroma),
-    "adts":     ObsSpec(("normal_form",), _adts),
-    # орбита (TbtPlant): пас-сквозь усреднённого сырья (сенсорная модель — в plant'е)
     "ebpm.x":   ObsSpec(("orbit_x",), lambda ctx: ctx.get("orbit_x")),
     "ebpm.y":   ObsSpec(("orbit_y",), lambda ctx: ctx.get("orbit_y")),
     "photon.x": ObsSpec(("photon_x",), lambda ctx: ctx.get("photon_x")),
@@ -99,12 +83,20 @@ class Observer:
     """Сборщик наблюдаемых: по подписке заполняет `state.observables` из `ObsContext`. Кастомизируется
     своим `registry` (добавить ObsSpec) и/или `subscribe` (что считать). Промежуточные — через кэш ctx."""
 
-    def __init__(self, registry=None, subscribe=None):
+    def __init__(self, registry=None, subscribe=None, intermediates=None):
         self.registry = dict(registry if registry is not None else OBSERVABLES)
         self.subscribe = None if subscribe is None else list(subscribe)
+        # билдеры ПРОМЕЖУТОЧНЫХ, которые plant прокинет в ObsContext (собираются из contributions контуров)
+        self.intermediates = dict(intermediates) if intermediates is not None else dict(_INTERMEDIATES)
 
     def names(self):
         return list(self.subscribe) if self.subscribe is not None else list(self.registry)
+
+    @staticmethod
+    def _compute(spec, ctx):
+        """Реестр терпит и ObsSpec(.compute), и голый callable fn(ctx) — плагины дают простые функции."""
+        fn = getattr(spec, "compute", None) or spec
+        return fn(ctx)
 
     def compute(self, ctx, names=None):
         """Посчитать названные наблюдаемые из ctx → dict (для build_response/nominal). Промежуточные общие."""
@@ -112,7 +104,7 @@ class Observer:
         for n in (names if names is not None else self.names()):
             spec = self.registry.get(n)
             if spec is not None:
-                out[n] = spec.compute(ctx)
+                out[n] = self._compute(spec, ctx)
         return out
 
     def update(self, state, ctx):
@@ -122,6 +114,6 @@ class Observer:
             if spec is None:
                 continue
             try:
-                state.observables[n] = spec.compute(ctx)
+                state.observables[n] = self._compute(spec, ctx)
             except KeyError:                                   # нет нужного сырья на этом plant'е — сигнал недоступен
                 continue

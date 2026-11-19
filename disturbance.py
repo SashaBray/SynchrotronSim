@@ -6,6 +6,10 @@
     position           — поперечные позиции магнитов (dx,dy) [м]; вызывающий код вносит feed-down киком.
     field:b1/k1/k2/k3  — РЯБЬ ПОЛЯ (имитация тока): ΔK = amplitude(отн.)·K_номин·осц. b1→kicks (изгиб),
                          k1→dks (градиент), k2→dk2s, k3→dk3s. field:skew→dsks (амплитуда АБСОЛЮТНАЯ, K_ном=1).
+    circumference      — ДЛИНА КОЛЬЦА ΔC [м] (приливы, температура тоннеля): одно число на всё кольцо, мишень и
+                         корреляция не важны. Пучок обязан набрать за оборот прежнее время h/f_RF ⇒ энергия
+                         сдвигается δ ≈ −ΔC/(αc·C) — дисперсионная орбита; парирует частота ВЧ (контур rf).
+                         Применяет plant (TbtPlant): эквивалентная длина ВЧ-оборота C_RF − ΔC.
     У КАЖДОЙ пары (тип магнита × компонента) свой закон — разные обмотки/источники шумят по-разному.
   ФОРМА:   tone — A·sin(2πf·t+φ);   walk — случайная ломаная (кусочно-пост. скорость, рывок с частотой f).
   КОРРЕЛЯЦИЯ: independent — независимо по магнитам; girder — общая на опору (s-близость); ground — гладкая
@@ -66,9 +70,15 @@ class Disturbance:
         gid, ng = girder_groups(ring)
         nom = {c: np.array([float(getattr(ring.mags[i], a, 0.0) or 0.0) for i in range(self.n)])
                for c, a in _FNOM.items()}                    # номиналы b1/k1/k2/k3 по магнитам
-        self.pos = []; self.fld = []
+        self.pos = []; self.fld = []; self.circ = []
         for k, c in enumerate(spec):
             rng = np.random.default_rng(seed + 1000 * (k + 1))
+            if c["quantity"] == "circumference":              # скаляр на кольцо: одна единица эволюции
+                self.circ.append(dict(name=c["name"], form=c["form"], amp=c["amplitude"], f=c["freq_hz"],
+                                      ph=np.radians(c["phase_deg"]), nu=1, w=np.zeros(1),
+                                      v=(rng.normal(0, c["amplitude"], 1) if c["form"] == "walk" else None),
+                                      rng=rng))
+                continue
             tgt = np.ones(self.n, bool) if c["target"] == "all" else (kinds == c["target"])
             # пространственный паттерн (RMS=1 на мишени)
             if c["correlation"] == "girder":
@@ -128,6 +138,11 @@ class Disturbance:
             if c["plane"] != "x":
                 dy += off
         return dx, dy
+
+    def circumference(self, t, dt):
+        """Сдвиг длины кольца ΔC(t), м (сумма компонент quantity=circumference; 0, если их нет). Звать РАЗ за
+        такт: walk продвигает интегратор."""
+        return float(sum(float(self._u(c, t, dt)[0]) for c in self.circ))
 
     def field(self, t, dt):
         """{арг apply_perturb: вектор ΔK по магнитам} для компонент поля (рябь тока)."""

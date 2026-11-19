@@ -51,11 +51,27 @@ class Recorder:
 
 
 class OrbitRmsRecorder(Recorder):
-    """СКО орбиты в мониторах по окнам: orbit_rms.x / orbit_rms.y (мкм)."""
+    """СКО орбиты в мониторах по окнам: orbit_rms.x / orbit_rms.y (мкм). В конце — СТАТИКА: orbit_dc.x/y =
+    СКО по мониторам орбиты, усреднённой по времени за вторую половину прогона (после схождения контуров;
+    синхротронное колебание и быстрые тона гасятся усреднением, остаётся статическая/медленная часть)."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._ox, self._oy = [], []
 
     def sample(self, state, widx, plant):
-        self.rows.append(("orbit_rms.x", widx, _rms(state.observables.get("ebpm.x")) * 1e6))
-        self.rows.append(("orbit_rms.y", widx, _rms(state.observables.get("ebpm.y")) * 1e6))
+        ex, ey = state.observables.get("ebpm.x"), state.observables.get("ebpm.y")
+        self.rows.append(("orbit_rms.x", widx, _rms(ex) * 1e6))
+        self.rows.append(("orbit_rms.y", widx, _rms(ey) * 1e6))
+        if ex is not None and ey is not None:
+            self._ox.append(np.asarray(ex, float).copy()); self._oy.append(np.asarray(ey, float).copy())
+
+    def finalize(self, state, plant):
+        n = len(self._ox)
+        if n >= 2:
+            h = n // 2
+            self.rows.append(("orbit_dc.x", 0, _rms(np.mean(self._ox[h:], axis=0)) * 1e6))
+            self.rows.append(("orbit_dc.y", 0, _rms(np.mean(self._oy[h:], axis=0)) * 1e6))
 
 
 class LightRecorder(Recorder):
@@ -95,12 +111,28 @@ class ScreenRecorder(Recorder):
     результаты — ряд E₁(окно) и резкость. Нет живого зазора на доске → fallback на зашитый GAP_MM.
     УПРОЩЕНИЕ v1: картина на оси, источник = photon[0]; геометрия экрана из `screens.csv` даёт плечо D."""
 
-    def __init__(self, params="", cadence="final", mesh=121, **kw):
+    def __init__(self, params="", cadence="final", mesh=121, point=(0.0, 0.0), **kw):
         super().__init__(params, cadence)
         self.mesh = int(mesh)
+        self._point = (float(point[0]), float(point[1])) if point else (0.0, 0.0)   # точка на экране (мм)
         self._spot = []
         self._gapser = []                                    # (widx, gap_mm) по окнам — как зазор менялся
         self._srcname = None                                 # кэш имени ондулятора-источника экрана
+
+    def spectrum_at(self, tr, scale, beam, D, K, n=600):
+        """Спектр излучения (поток vs энергия фотона) в ТОЧКЕ экрана `self._point` (мм). Точка → угол
+        (thx,thy)=(u/D,v/D); (0,0)=на оси. Через `center_spectrum` (одноэлектрон + смаз пучком)."""
+        import undulator_sr as sr
+        from screen_spectrum import center_spectrum
+        u, v = self._point
+        thx, thy = (u * 1e-3) / D, (v * 1e-3) / D            # мм→м→угол
+        E1 = float(sr.harmonic_energy_keV(1, K, 0.0))
+        Emax = float(sr.harmonic_energy_keV(9, K, 0.0)) * 1.05
+        Es = np.linspace(0.3 * E1, max(Emax, 1.5 * E1), n)
+        Ise, Ibeam = center_spectrum(tr, scale, thx, thy, Es, beam)
+        flux = Ibeam if Ibeam is not None else Ise
+        return {"E_keV": np.asarray(Es, float), "flux": np.asarray(flux, float),
+                "u_mm": float(u), "v_mm": float(v), "E1_keV": E1}
 
     def sample(self, state, widx, plant):
         px = state.observables.get("photon.x"); py = state.observables.get("photon.y")
@@ -130,9 +162,17 @@ class ScreenRecorder(Recorder):
         return self._srcname
 
     def _live_gap(self, state):
-        """Зазор ондулятора-источника экрана из живой доски; нет записи → зашитый GAP_MM."""
+        """Зазор ондулятора-источника экрана из живой доски. Источник: source_ref из screens.csv; нет строки
+        в csv → имя ондулятора прямо из id экрана (`SCR_<gid>`→`<gid>`). Нет и так → зашитый GAP_MM.
+        БАГ, который это чинит: экраны ондуляторов БЕЗ строки в screens.csv читали GAP_MM (=зашитый 5 мм) и
+        картина выглядела одинаково у включённого и у разведённого ондулятора — зазор просто не доходил."""
+        uns = getattr(state, "undulators", None) or {}
         src = self._screen_source(self.params)
-        u = (getattr(state, "undulators", None) or {}).get(src)
+        if src not in uns and self.params.startswith("SCR_"):   # фолбэк: источник из id экрана
+            cand = self.params[len("SCR_"):]
+            if cand in uns:
+                src = cand
+        u = uns.get(src)
         return float(u.gap_mm) if u is not None else GAP_MM
 
     def finalize(self, state, plant):
@@ -169,13 +209,20 @@ class ScreenRecorder(Recorder):
         Iend, pk_e, ext_e, E1_e, win_e = pattern_at(gap_end, 0.0, 0.0)   # идеал при КОНЕЧНОМ зазоре
         Imeas, pk_m, _, _, _ = pattern_at(gap_end, jx, jy)               # измеренный (джиттер) при конечном зазоре
 
+        Kend = sr.K_of_B0(sr.B0_of_gap(gap_end))                          # спектр в выбранной точке (конечный зазор)
+        try:
+            tr_e = trajectory(Kend, sr.P.lam_u, sr.P.N, g, 64); scale_e, _ = calibrate(tr_e)
+            spec = self.spectrum_at(tr_e, scale_e, beam0, D, Kend)
+        except Exception:
+            spec = None
+
         series = np.asarray([[w, gp, e1_of(gp)] for w, gp in self._gapser], float) if self._gapser \
             else np.zeros((0, 3))
         self._art = ("screen", {"ideal_start": Istart, "ideal_end": Iend, "measured": Imeas,
                                 "extent": ext_e, "jitter_urad": np.array([jx * 1e6, jy * 1e6]),
                                 "D_m": np.array([D]), "gap_start_mm": np.array([gap_start]),
                                 "gap_end_mm": np.array([gap_end]), "energy_start_keV": np.array([E1_s]),
-                                "energy_end_keV": np.array([E1_e]), "gap_series": series,
+                                "energy_end_keV": np.array([E1_e]), "gap_series": series, "spectrum": spec,
                                 "window_mm": np.array([win_e * D * 1e3])},
                      f"screen={self.params} зазор {gap_start:.1f}->{gap_end:.1f}мм E1 {E1_s:.2f}->{E1_e:.2f}кэВ")
         self.rows += [("screen.gap_start_mm", 0, gap_start), ("screen.gap_end_mm", 0, gap_end),
@@ -216,8 +263,27 @@ class AdtsRecorder(VectorRecorder):
     SIGNAL = "adts"; LABELS = ["xx", "yy", "xy"]         # ∂νx/∂Jx, ∂νy/∂Jy, ∂νx/∂Jy
 
 
+class RfRecorder(Recorder):
+    """Резонатор и энергия по окнам: rf.df_hz — отклонение частоты ВЧ от номинала h·c/C (Гц); rf.circ_um —
+    сдвиг длины кольца ΔC (мкм, возмущение circumference); rf.delta_ppm — оценка энергии δ̂ по орбите
+    (датчик контура ВЧ, ×10⁶); rf.delta_true_ppm — истинная энергия: средняя δ частиц пучка ОТНОСИТЕЛЬНО
+    проектного равновесия (δ 6D-замкнутой орбиты, plant.CO[5]), ×10⁶ — сопоставима с δ̂."""
+
+    def sample(self, state, widx, plant):
+        self.rows.append(("rf.df_hz", widx, float(getattr(plant, "rf_df", 0.0))))
+        self.rows.append(("rf.circ_um", widx, float(getattr(plant, "rf_dC", 0.0)) * 1e6))
+        d = state.observables.get("rf.delta")
+        if d is not None:
+            self.rows.append(("rf.delta_ppm", widx, float(np.ravel(d)[0]) * 1e6))
+        b = getattr(plant, "bunch", None)
+        if b is not None and np.size(b):
+            d0 = float(np.asarray(getattr(plant, "CO", np.zeros(6)), float)[5])
+            self.rows.append(("rf.delta_true_ppm", widx, (float(np.mean(np.asarray(b, float)[:, 5])) - d0) * 1e6))
+
+
 REGISTRY = {
     "orbit_rms": OrbitRmsRecorder,
+    "rf": RfRecorder,
     "light": LightRecorder,
     "bpm": BpmRecorder,
     "phase": PhaseRecorder,

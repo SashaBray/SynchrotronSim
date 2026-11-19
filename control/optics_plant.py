@@ -56,8 +56,15 @@ class OpticsPlant:
         self.k3_nom = {i: float(getattr(mags[i], "k3", 0.0) or 0.0) for i in self.o_idx}
         self.drift = np.array([drift_k1, drift_k2, drift_k3]); self.rho = rho
         self._rng = np.random.default_rng(seed); self._a = np.zeros(3)
-        # Observer собирает наблюдаемые из возмущённого кольца; дефолт — подписка = observe
-        self.observer = observer or Observer(subscribe=list(self.observe))
+        # Observer собирает наблюдаемые из возмущённого кольца. Схему вычисления tune/chroma/adts несут
+        # ФАЙЛЫ-КОНТУРЫ (модульность): дефолтный observer собираем из их `provides()`, а не из observer.py.
+        if observer is None:
+            from .obs_assembly import observer_for
+            from .controllers.optics_tune import TuneLoop
+            from .controllers.optics_chroma import ChromaLoop
+            from .controllers.optics_adts import AdtsLoop
+            observer = observer_for([TuneLoop(), ChromaLoop(), AdtsLoop()], serves=set(self.observe))
+        self.observer = observer
         # зазор ондулятора → фокус UFC (k1/k1v ∝ K²) → отклик ТЮНА; UFC↔ондулятор по s-порядку
         self.gap_mm = float(gap_mm); self.gap_ref = 5.0
         _sr = _undulator_sr()
@@ -102,7 +109,8 @@ class OpticsPlant:
         """Контекст наблюдателя на ВОЗМУЩЁННОМ кольце (общие промежуточные: карта оборота считается раз)."""
         gaps = ({gid: c.gap_mm for gid, c in state.undulators.items()}
                 if state is not None and state.undulators else None)      # живые зазоры → фокус UFC → тюн
-        return ObsContext(state, self, ring=self._perturbed(pk1, pk2, pk3, gaps), order=self.order)
+        return ObsContext(state, self, ring=self._perturbed(pk1, pk2, pk3, gaps), order=self.order,
+                          intermediates=self.observer.intermediates)       # билдеры optics-промежуточных — из контуров
 
     def _optics(self, pk1, pk2, pk3, only=None):
         """Посчитать наблюдаемые через реестр Observer'а (для build_response/nominal)."""

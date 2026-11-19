@@ -2,3 +2,11 @@ fb_exp_id;name
 1;ground_vibration
 1;fast_tone
 1;dip_field_ripple
+3;circumference_tide
+4;circumference_tide
+5;ground_vibration
+5;fast_tone
+5;dip_field_ripple
+6;ground_vibration
+6;fast_tone
+6;dip_field_ripple

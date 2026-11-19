@@ -3,7 +3,8 @@
 результаты в БД. Отчёт строится ОТДЕЛЬНО, по требованию (control/mode4_report.py).
 
 Поток: fb_config.load(fb_exp_id) → TbtPlant (нелинейное 6D-кольцо СИЛА) с многоканальным возмущением из
-disturbance_spec + Scheduler с контурами (IntegralSVD по fb_loops) → по окнам усреднения зовём рекордеры
+disturbance_spec + Scheduler с контурами по fb_loops (класс — по датчику, LOOP_CLASSES; дефолт IntegralSVD:
+rf.delta → контур ВЧ-частоты RfFrequencyLoop) → по окнам усреднения зовём рекордеры
 ПОДПИСКИ (fb_record: за чем следить) → результаты пишем в fb_results.csv + артефакты (.npz + fb_artifacts).
 Статус эксперимента (new→in_progress→done) — прерывание-безопасность: упал на середине → остался
 in_progress. Диффур-ядро/поля заморожены; всё через apply_perturb.
@@ -21,7 +22,20 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from control import ExperimentState, Scheduler, NoiseModel, DRIVE_PROFILE_DEFAULTS
 from control.tbt_plant import TbtPlant
 from control.controllers.integral_svd import IntegralSVD
+from control.controllers.rf_frequency import RfFrequencyLoop
+from control.obs_assembly import observer_for
 from control import fb_config, fb_store, recorders
+
+# датчик контура → класс плагина (свой вход в схему вычисления наблюдаемой — provides()); прочие — IntegralSVD
+LOOP_CLASSES = {"rf.delta": RfFrequencyLoop}
+TBT_SERVES = ("ebpm.x", "ebpm.y", "photon.x", "photon.y", "rf.delta")   # наблюдаемые, для которых у TbtPlant есть сырьё
+
+
+def make_loop(l):
+    """fb_config.Loop → объект контура (класс по датчику)."""
+    cls = LOOP_CLASSES.get(l.sensor, IntegralSVD)
+    return cls(name=l.name, sensor=l.sensor, actuator_key=l.actuator_key, gain=l.gain, rcond=l.rcond,
+               ref=(l.ref or None))
 
 
 def main():
@@ -92,10 +106,19 @@ def main():
         for q, v in plant.nominal().items():                 # уставки контуров = проектная оптика
             state.refs[f"{q}.target"] = v
     else:                                                    # tbt: орбита turn-by-turn на TbtPlant
+        loops = [make_loop(l) for l in cfg.enabled_loops()]
+        # датчики из provides() контуров (+ энергия δ̂ для записи rf, даже если контура ВЧ нет — контроль)
+        sensors = loops + ([RfFrequencyLoop()] if any(r.signal == "rf" for r in cfg.enabled_records()) else [])
         plant = TbtPlant(lattice=cfg.lattice_id, nsl=cfg.nsl, sr=cfg.sr, stride=cfg.stride,
-                         settle_turns=settle, seed=cfg.seed, dist_seed=cfg.seed, n_photon=8)
+                         settle_turns=settle, seed=cfg.seed, dist_seed=cfg.seed, n_photon=8,
+                         relative_orbit=cfg.relative_orbit, center_bunch=cfg.center_bunch,
+                         rf_actuator=any(l.actuator_key.startswith("rf.") for l in cfg.enabled_loops()),
+                         observer=observer_for(sensors, TBT_SERVES))
         state = ExperimentState(plant.schema(), history=plant.history())
         state.noise = NoiseModel(cfg.disturbance_spec)       # закон шума — в доске (живой)
+        if cfg.relative_orbit or plant.rf_ids:
+            print(f"BPM {'относительно опорной орбиты' if cfg.relative_orbit else 'абсолютно'}; "
+                  f"актуатор ВЧ-частоты: {'да (номинал ' + format(plant.F0 / 1e6, '.6f') + ' МГц)' if plant.rf_ids else 'нет'}")
 
     if cfg.realistic_drives:                                 # opt-in: богатый профиль приводов (slew+лаг+ОДЗ) ВСЕХ магнитов
         profile = cfg.drive_profile or DRIVE_PROFILE_DEFAULTS
@@ -107,8 +130,8 @@ def main():
     sch = Scheduler(plant, state, dt)
     for l in cfg.enabled_loops():
         rate = 1.0 / (dt * window) if l.rate_hz == "auto" else float(l.rate_hz)
-        sch.add(IntegralSVD(name=l.name, sensor=l.sensor, actuator_key=l.actuator_key,
-                            gain=l.gain, rcond=l.rcond, ref=(l.ref or None)), rate_hz=rate)
+        ctl = next((c for c in loops if c.name == l.name), None) if cfg.plant != "optics" else None
+        sch.add(ctl or make_loop(l), rate_hz=rate)
     recs = recorders.build(cfg.enabled_records(), mesh=mesh)
 
     fb_store.set_status(cfg.fb_exp_id, "in_progress")
