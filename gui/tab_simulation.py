@@ -107,7 +107,13 @@ class SimulationTab(TabBase):
         # --- излучение ---------------------------------------------------------
         self.rad_on = QCheckBox("синхротронное излучение (потери энергии в изгибах)")
         self.rad_isr = QCheckBox("квантовое возбуждение ISR (равновесный эмиттанс)")
-        self.rad_rf = QCheckBox("идеальный ВЧ-резонатор (компенсация потерь ⇒ затухание)")
+        self.rad_rf = QComboBox()                         # тип резонатора (radiation_params.rf)
+        for label, key in (("нет", "none"), ("идеальный (компенсация потерь ⇒ затухание)", "ideal"),
+                           ("синусоидальный (V, h, фаза, частота — из таблицы)", "sine")):
+            self.rad_rf.addItem(label, key)
+        self.rad_rf.setToolTip("ideal — возвращает потерю за оборот; sine — реальный резонатор: синхротронные "
+                               "колебания, энергия зависит от частоты ВЧ (rf_voltage_mv/rf_harmonic/rf_phase_deg/"
+                               "rf_freq_hz в radiation_params.csv)")
         self.rad_mev = QDoubleSpinBox()
         self.rad_mev.setRange(1.0, 1e6)
         self.rad_mev.setDecimals(0)
@@ -124,7 +130,7 @@ class SimulationTab(TabBase):
         fr = QFormLayout(box_rad)
         fr.addRow("", self.rad_on)
         fr.addRow("", self.rad_isr)
-        fr.addRow("", self.rad_rf)
+        fr.addRow("ВЧ-резонатор:", self.rad_rf)
         fr.addRow("Проектная энергия:", self.rad_mev)
         fr.addRow("", self.rad_note)
 
@@ -255,7 +261,8 @@ class SimulationTab(TabBase):
         if row:
             self.rad_on.setChecked(True)
             self.rad_isr.setChecked((row.get("isr") or "0").strip() == "1")
-            self.rad_rf.setChecked((row.get("rf") or "none").strip() == "ideal")
+            i = self.rad_rf.findData((row.get("rf") or "none").strip().lower())
+            self.rad_rf.setCurrentIndex(max(0, i))
             try:
                 self.rad_mev.setValue(float(row.get("design_energy_mev") or 6000))
             except ValueError:
@@ -294,7 +301,7 @@ class SimulationTab(TabBase):
             w.setEnabled(not diff)
         self.rad_rf.setEnabled(not diff and long_mode and self.rad_on.isChecked())
         if not self.rad_rf.isEnabled():
-            self.rad_rf.setChecked(False)
+            self.rad_rf.setCurrentIndex(0)
         self.rad_isr.setEnabled(not diff and self.rad_on.isChecked())
         self.turns.setEnabled(not diff)
         self.record.setEnabled(not diff)
@@ -307,7 +314,7 @@ class SimulationTab(TabBase):
                                   f"Переключатели применятся к строке этого опыта (прежняя таблица уйдёт в копию).")
         else:
             self.rad_note.setText("Python киковое ядро принимает флаги излучения напрямую "
-                                  "(--sr / --isr / --rf ideal / --design-mev); таблица базы не меняется.")
+                                  "(--sr / --isr / --rf ideal|sine / --design-mev); таблица базы не меняется.")
 
     def _apply_rad_row(self, exp: int) -> None:
         """Привести строку `radiation_params.csv` опыта в соответствие переключателям (для C++ ядра)."""
@@ -317,17 +324,22 @@ class SimulationTab(TabBase):
             return
         header, rows, enc = read_csv(p)
         idx = {h: i for i, h in enumerate(header)}
+        mine = [r for r in rows if (r[idx["exp_id"]] if idx["exp_id"] < len(r) else "") == str(exp)]
         keep = [r for r in rows if (r[idx["exp_id"]] if idx["exp_id"] < len(r) else "") != str(exp)]
         if self.rad_on.isChecked():
-            new = [""] * len(header)
+            # от прежней строки опыта: параметры резонатора (rf_voltage_mv/…/rf_freq_hz) не теряются
+            new = (list(mine[0]) + [""] * len(header))[:len(header)] if mine else [""] * len(header)
             new[idx["exp_id"]] = str(exp)
             new[idx["design_energy_mev"]] = str(int(self.rad_mev.value()))
             new[idx["isr"]] = "1" if self.rad_isr.isChecked() else "0"
-            new[idx["rf"]] = "ideal" if self.rad_rf.isChecked() else "none"
+            rf = self.rad_rf.currentData() or "none"
+            new[idx["rf"]] = rf
             keep.append(new)
             what = (f"энергия {int(self.rad_mev.value())} МэВ, ISR "
-                    f"{'вкл' if self.rad_isr.isChecked() else 'выкл'}, "
-                    f"ВЧ {'ideal' if self.rad_rf.isChecked() else 'none'}")
+                    f"{'вкл' if self.rad_isr.isChecked() else 'выкл'}, ВЧ {rf}")
+            if rf == "sine" and not all((new[idx[k]] if k in idx else "").strip()
+                                        for k in ("rf_voltage_mv", "rf_harmonic")):
+                what += " — ВНИМАНИЕ: для sine задайте rf_voltage_mv и rf_harmonic в таблице"
         else:
             what = "строка удалена (излучение не учитывается)"
         keep.sort(key=lambda r: int(r[idx["exp_id"]]) if (r[idx["exp_id"]] or "").isdigit() else 0)
@@ -387,7 +399,7 @@ class SimulationTab(TabBase):
             if self.rad_isr.isChecked():
                 args.append("--isr")
             args += ["--design-mev", int(self.rad_mev.value())]
-        if self.rad_rf.isChecked():
-            args += ["--rf", "ideal"]
+        if (self.rad_rf.currentData() or "none") != "none":
+            args += ["--rf", self.rad_rf.currentData()]
         self.runner.run(*[j for j in (pre, py_job(f"Python киковое ядро, опыт {exp}",
                                                  "track3.py", *args)) if j])

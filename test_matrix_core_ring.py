@@ -115,6 +115,33 @@ class TestMatrixCoreRing(unittest.TestCase):
         self.assertLess(worst, 1e-9, f"full-режим расходится с эталоном: {worst:.2e}")
         print(f"  [СИЛА exp1, full] точек/частицу {len(r['parts'][0]['S'])}; локальн.+глоб. vs эталон: {worst:.2e}")
 
+    def test_sine_rf_sila26(self):
+        # РЕАЛЬНЫЙ резонатор (radiation_params: exp 26, rf=sine, 8 МВ, h=1296, фаза auto): C++ --track против
+        # Python-эталона по ВСЕМ шести координатам (t — запаздывание от часов ВЧ, δ — синхротронное движение).
+        import matrix_tracker as mt
+        npz26 = os.path.join(ROOT, "workspace", "results", "trajectories_local_exp26.npz")
+        bak = npz26 + ".testbak" if os.path.exists(npz26) else None
+        if bak:
+            shutil.copy2(npz26, bak)
+        try:
+            spec = mt.rf_spec(mt.load_radiation(26))
+            self.assertIsInstance(spec, dict); self.assertEqual(spec["type"], "sine")
+            turns = 3
+            d = mte.long_trajectories(26, 1, n_turns=turns, rf=spec)
+            cpp = cpp_track(26, turns)
+            self.assertAlmostEqual(d["rf_phase_rad"], 2.8239, delta=2e-3)     # φs ≈ 161,8° (U0 ≈ 2,50 МэВ)
+            worst = 0.0
+            for i, (fin, surv) in enumerate(zip(d["finals"], d["surv_turns"])):
+                self.assertEqual(surv, turns); self.assertNotEqual(cpp[i][0], "LOST")
+                worst = max(worst, max(abs(a - b) for a, b in zip(fin, cpp[i][:6])))
+            self.assertLess(worst, 1e-9, f"sine-ВЧ: C++ vs Python {worst:.2e}")
+            self.assertEqual(mte.read_local_npz(npz26)["rf"], "sine")
+            print(f"  [СИЛА-26 exp26, ВЧ sine, {turns} об.] 6D C++ vs Python: {worst:.2e}; "
+                  f"U0={d['rf_u0_mev']:.4f} МэВ")
+        finally:
+            if bak and os.path.exists(bak):
+                shutil.move(bak, npz26)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -12,6 +12,7 @@
 //   <exp_id>   (в разработке) — автономный трек всего кольца из БД. Каркас/чтение БД — следующий слой;
 //              физический движок (matrix_core.h) уже готов и провалидирован.
 #include <iostream>
+#include <cctype>
 #include <string>
 #include <sstream>
 #include <cstdio>
@@ -133,6 +134,41 @@ static int runServe() {
     return 0;
 }
 
+// Резонатор опыта из строки radiation_params.csv (rf: none/ideal/sine + rf_voltage_mv/rf_harmonic/rf_phase_deg/
+// rf_freq_hz) — как matrix_tracker.load_radiation + rf_spec. Пустая фаза или auto ⇒ синхронная.
+struct RfRow { std::string type = "none"; double volt = 0, h = 0, phase_deg = 0, freq = 0; bool phase_auto = true; };
+
+static bool readRfRow(const mc::Table& rp, const std::vector<std::string>& r, RfRow& o, std::string& err) {
+    auto c = [&](const char* k) { return mc::cell(r, rp.col(k)); };
+    o.type = c("rf"); if (o.type.empty()) o.type = "none";
+    for (auto& ch : o.type) ch = (char)std::tolower((unsigned char)ch);
+    if (o.type != "none" && o.type != "ideal" && o.type != "sine") {
+        err = "неизвестный тип резонатора rf=" + o.type + " (допустимо: none, ideal, sine)"; return false;
+    }
+    if (o.type == "sine") {
+        if (c("rf_voltage_mv").empty() || c("rf_harmonic").empty()) {
+            err = "тип rf=sine требует rf_voltage_mv и rf_harmonic"; return false;
+        }
+        o.volt = std::stod(c("rf_voltage_mv")); o.h = std::stod(c("rf_harmonic"));
+        std::string ph = c("rf_phase_deg");
+        for (auto& ch : ph) ch = (char)std::tolower((unsigned char)ch);
+        o.phase_auto = ph.empty() || ph == "auto";
+        if (!o.phase_auto) o.phase_deg = std::stod(ph);
+        if (!c("rf_freq_hz").empty()) o.freq = std::stod(c("rf_freq_hz"));
+    }
+    return true;
+}
+
+static mc::RfSpec makeRf(const RfRow& rr, const mc::Injection& inj, double design) {
+    mc::RfSpec rf;
+    if (rr.type == "ideal") rf.type = mc::RfSpec::IDEAL;
+    if (rr.type == "sine") {
+        rf.type = mc::RfSpec::SINE; rf.volt = rr.volt; rf.h = rr.h; rf.design = design;
+        rf.prepare(inj, rr.freq, rr.phase_auto, rr.phase_deg);
+    }
+    return rf;
+}
+
 // --track <exp_id> <turns> [x0_mm y0_mm] — АВТОНОМНЫЙ трек кольца из БД: инжекция + N оборотов + ВЧ.
 // Пишет results/trajectories_local_exp<exp>.npz (mode=long) для traj_analyzer + печатает финальные состояния
 // (для регрессии): "<idx> x px y py t delta surv" или "<idx> LOST surv". x0/y0 (мм) ⇒ ОДНА частица (скан).
@@ -152,30 +188,38 @@ static int runTrack(const std::string& ws, int exp, int turns, double x0_mm, dou
     }
     if (lattice < 0) { std::cerr << "Experiment " << exp << " not found\n"; return 1; }
     // радиация: строка в radiation_params.csv → СИ вкл (энергия/ВЧ оттуда); нет строки → выкл.
-    bool sr = false, rf_ideal = false; double design = 6000.0;
+    bool sr = false; double design = 6000.0;
+    RfRow rr;
     mc::Table rp = mc::readTable(ws + "tables/radiation_params.csv");
-    int re = rp.col("exp_id"), rd = rp.col("design_energy_mev"), rrf = rp.col("rf");
+    int re = rp.col("exp_id"), rd = rp.col("design_energy_mev");
     for (auto& r : rp.rows) if (mc::cell(r, re) == std::to_string(exp)) {
         sr = true;
         if (!mc::cell(r, rd).empty()) design = std::stod(mc::cell(r, rd));
-        rf_ideal = (mc::cell(r, rrf) == "ideal");
+        std::string err;
+        if (!readRfRow(rp, r, rr, err)) { std::cerr << "radiation_params: " << err << "\n"; return 1; }
         break;
     }
     mc::Injection inj = mc::inject(ws, lattice, group, design, sr, stg);
+    mc::RfSpec rf;
+    try { rf = makeRf(rr, inj, design); }
+    catch (const std::exception& e) { std::cerr << e.what() << "\n"; return 1; }
     if (x0_mm != 0.0 || y0_mm != 0.0) {                        // ОДНА частица со смещением (скан апертуры/затухания)
         inj.states.clear();
         inj.states.push_back({ x0_mm * 1e-3, 0.0, y0_mm * 1e-3, 0.0, 0.0, 0.0 });
     }
     std::printf("# exp %d lattice %d group %d: %zu particles, %s, %zu elements, sr=%d rf=%s design=%.0f turns=%d\n",
                 exp, lattice, group, inj.states.size(), inj.closed ? "closed" : "open",
-                inj.ordered.size(), (int)sr, rf_ideal ? "ideal" : "none", design, turns);
+                inj.ordered.size(), (int)sr, rf.name(), design, turns);
+    if (rf.type == mc::RfSpec::SINE)
+        std::printf("# rf sine: V=%.6g MV h=%.6g C_RF=%.17g m phase=%.17g rad%s U0=%.17g MeV\n",
+                    rf.volt, rf.h, rf.c_rf, rf.phase, rf.auto_phase ? " (auto)" : "", rf.U0);
     // трек + сбор turn-by-turn для .npz (mode=long). Частицы НЕЗАВИСИМЫ → OpenMP (кольцо read-only).
     std::vector<double> tx, txp, ty, typ;
     std::vector<int64_t> tt_counts, surv;
     std::vector<mc::LongResult> results(inj.states.size());
 #pragma omp parallel for schedule(dynamic)
     for (int i = 0; i < (int)inj.states.size(); ++i)
-        results[i] = mc::trackLong(inj, inj.states[i], turns, rf_ideal);
+        results[i] = mc::trackLong(inj, inj.states[i], turns, rf);
     for (size_t i = 0; i < results.size(); ++i) {              // сбор В ПОРЯДКЕ + вывод (серийно, детерминизм)
         mc::LongResult& lr = results[i];
         tt_counts.push_back((int64_t)lr.tt.size());
@@ -197,7 +241,7 @@ static int runTrack(const std::string& ws, int exp, int turns, double x0_mm, dou
     npz.addScalarF8("ring_len", inj.ring_len);
     npz.addScalarI8("lattice", lattice); npz.addScalarI8("group", group);
     npz.addScalarI8("sr", sr ? 1 : 0); npz.addScalarI8("isr", 0);
-    npz.addScalarStr("rf", rf_ideal ? "ideal" : "none");
+    npz.addScalarStr("rf", rf.name());
     npz.addScalarF8("design_mev", design);
     std::error_code ec; std::filesystem::create_directories(ws + "results", ec);
     std::string npzPath = ws + "results/trajectories_local_exp" + std::to_string(exp) + ".npz";

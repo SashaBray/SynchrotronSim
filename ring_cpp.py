@@ -14,7 +14,11 @@
     with_kick(j, θ) / with_yaw(j, α)  → новое кольцо с возмущением (C++ и описание магнитов)
     perturbed(kicks, yaws)            → то же для нескольких возмущений
     apply_perturb(kicks, …, dk3s)     → транзитные возмущения на том же сервере (RESET + набор)
+    set_rf(volt_mv=…, freq_hz=…)      → параметры ВЧ на лету (частота ВЧ — актуатор энергии), переживает RESET
     junction(states, A, B)            → стык двух произвольных плоскостей (проверка матриц стыков)
+
+rf = dict(volt_mv, harmonic, phase_deg[, freq_hz]): без freq_hz f_RF = h·c/C (как всегда); с freq_hz —
+расстроенный резонатор, C_RF = h·c/f_RF (см. шапку src/matrix_ring_serve.h).
 
 Возмущения двух сортов: «базовые» (with_*/perturbed — часть кольца, переживают RESET, копии их наследуют) и
 транзитные (apply_perturb — заменяются его следующим вызовом). Описание магнитов mags/plane всегда по обоим.
@@ -76,8 +80,35 @@ class CppRing:
         self.s_out = np.array([float(l.split()[2]) for l in info])
         self.kinds = [l.split()[4] if l.split()[4] != "-" else "" for l in info]
         self.names = [l.split()[5] for l in info]
+        if self.rf and float(self.rf.get("freq_hz") or 0.0) > 0:     # расстроенный ВЧ: частота — командой RF
+            self._send_rf()
         self._replay(self._perturb + self._transient)
         _LIVE.add(self)
+
+    def _send_rf(self):
+        rf = self.rf or {}
+        self._text(f"RF {1 if self.rf else 0} {float(rf.get('volt_mv', 0.0))!r} {float(rf.get('harmonic', 0.0))!r} "
+                   f"{float(rf.get('phase_deg', 0.0))!r} {float(rf.get('freq_hz') or 0.0)!r}")
+
+    def set_rf(self, **kw):
+        """Сменить параметры ВЧ НА ЛЕТУ (volt_mv/harmonic/phase_deg/freq_hz) на том же сервере, без RESET:
+        состояние магнитов и возмущения не трогаются, переживает apply_perturb. freq_hz ≤ 0/None ⇒ f_RF = h·c/C.
+        Новый dict (копии кольца со старым rf не задеваются). Возврат self."""
+        if not self.rf:
+            raise ValueError("set_rf: кольцо построено без ВЧ (rf=None)")
+        self.rf = {**self.rf, **kw}
+        self._send_rf()
+        return self
+
+    def rf_circumference(self):
+        """Длина ВЧ-оборота C_RF (м): h·c/f_RF при заданной частоте, иначе периметр."""
+        f = float((self.rf or {}).get("freq_hz") or 0.0)
+        return self.rf["harmonic"] * 299792458.0 / f if f > 0 else self.circumference
+
+    def rf_frequency(self):
+        """Текущая частота ВЧ, Гц: заданная freq_hz или h·c/C (резонатор на геометрическом периметре)."""
+        f = float((self.rf or {}).get("freq_hz") or 0.0)
+        return f if f > 0 else self.rf["harmonic"] * 299792458.0 / self.circumference
 
     def _replay(self, perturb):
         for cmd, j, v in perturb:

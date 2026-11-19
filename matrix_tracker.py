@@ -46,9 +46,17 @@ def load_radiation(exp_id):
     """Радиационный конфиг ОПЫТА из radiation_params.csv по exp_id (энергия СИ + ВЧ).
 
     ПРАВИЛО (трекер проверяет ПЕРЕД запуском): нет строки для опыта → возврат None = синхротронное
-    излучение НЕ учитывается. Строка есть → dict(design_mev, isr, rf, rf_voltage_mv, rf_harmonic);
-    пустые ячейки → дефолты/None. Столбцы: exp_id; design_energy_mev; isr(0/1); rf(none/ideal);
-    rf_voltage_mv; rf_harmonic (два последних — задел под синусоидальный ВЧ)."""
+    излучение НЕ учитывается. Строка есть → dict(design_mev, isr, rf, rf_voltage_mv, rf_harmonic,
+    rf_phase_deg, rf_freq_hz); пустые ячейки → дефолты/None. Столбцы: exp_id; design_energy_mev; isr(0/1);
+    rf(none/ideal/sine); rf_voltage_mv; rf_harmonic; rf_phase_deg; rf_freq_hz.
+    Типы резонатора (rf):
+      none  — ВЧ нет, δ дрейфует вниз от излучения;
+      ideal — идеальный: за оборот возвращает ровно потерянную энергию (без синхротронных колебаний);
+      sine  — реальный синусоидальный (RFCA): ΔE = V·sin(φ + 2πh·t/C_RF), C_RF = h·c/f_RF. Нужны
+              rf_voltage_mv и rf_harmonic; rf_phase_deg — число (°) или пусто/auto = синхронная фаза
+              π − asin(U0/V) по потере U0 опорной частицы за оборот; rf_freq_hz — пусто = h·c/L (резонатор
+              на длине линии), число — расстроенный резонатор (сдвиг равновесной энергии δ ≈ −Δf/(η·f)).
+    Сборка спецификации для трекеров — rf_spec(rad)."""
     if exp_id is None:
         return None
     p = os.path.join(TB, "radiation_params.csv")
@@ -61,8 +69,34 @@ def load_radiation(exp_id):
                         isr=g("isr") in ("1", "true", "yes"),
                         rf=g("rf") or "none",
                         rf_voltage_mv=float(g("rf_voltage_mv")) if g("rf_voltage_mv") else None,
-                        rf_harmonic=int(g("rf_harmonic")) if g("rf_harmonic") else None)
+                        rf_harmonic=int(g("rf_harmonic")) if g("rf_harmonic") else None,
+                        rf_phase_deg=(None if g("rf_phase_deg").lower() in ("", "auto")
+                                      else float(g("rf_phase_deg"))),
+                        rf_freq_hz=float(g("rf_freq_hz")) if g("rf_freq_hz") else None)
     return None
+
+
+RF_TYPES = ("none", "ideal", "sine")
+
+
+def rf_spec(rad):
+    """Спецификация резонатора для трекеров (matrix_traj_export.long_trajectories, C++ --track) из строки
+    radiation_params (load_radiation): None — ВЧ нет; "ideal" — идеальный; dict(type="sine", volt_mv,
+    harmonic, phase_deg|None(=синхронная), freq_hz|None(=h·c/L), design_mev) — синусоидальный."""
+    if not rad:
+        return None
+    t = (rad.get("rf") or "none").strip().lower()
+    if t not in RF_TYPES:
+        raise SystemExit(f"radiation_params: неизвестный тип резонатора rf={t!r} (допустимо: {', '.join(RF_TYPES)})")
+    if t == "none":
+        return None
+    if t == "ideal":
+        return "ideal"
+    if not rad.get("rf_voltage_mv") or not rad.get("rf_harmonic"):
+        raise SystemExit("radiation_params: тип rf=sine требует rf_voltage_mv и rf_harmonic")
+    return dict(type="sine", volt_mv=float(rad["rf_voltage_mv"]), harmonic=float(rad["rf_harmonic"]),
+                phase_deg=rad.get("rf_phase_deg"), freq_hz=rad.get("rf_freq_hz"),
+                design_mev=float(rad.get("design_mev") or 6000.0))
 
 
 def _read(name):

@@ -187,7 +187,7 @@ def main():
     ap.add_argument("--long", action="store_true", help="длинный турн-by-turn трек (сектор m.body, много оборотов) → trajectories_local_exp{id}.npz (mode=long) для traj_analyzer; минует боксовый глоб. путь")
     ap.add_argument("--sr", action="store_true", help="распределённое синхротронное излучение (потери энергии в изгибах, ∝γ⁴ по ПРОЕКТНОЙ энергии --design-mev)")
     ap.add_argument("--isr", action="store_true", help="+ квантовое возбуждение ISR (гауссов шум фотонов; равновесный эмиттанс/энергоразброс). Требует --sr")
-    ap.add_argument("--rf", choices=["none", "ideal"], default="none", help="ВЧ-резонатор (компенсация потерь SR): ideal — восстановление δ за оборот ⇒ поперечное затухание. Требует --long")
+    ap.add_argument("--rf", choices=["none", "ideal", "sine"], default="none", help="ВЧ-резонатор (компенсация потерь SR): ideal — восстановление δ за оборот ⇒ поперечное затухание; sine — реальный синусоидальный (V/h/фаза/частота из radiation_params.csv) ⇒ синхротронные колебания. Требует --long")
     ap.add_argument("--design-mev", type=float, default=None, help="ПРОЕКТНАЯ энергия пучка для SR, МэВ (СИЛА 6000; трекер гоняет сурогатный γ≈7, а SR ∝ γ⁴ берётся по проектной)")
     ap.add_argument("--x0-mm", type=float, default=0.0, help="(--long) ОДНА частица со смещением по x, мм (скан апертуры/затухания) вместо пучка группы")
     ap.add_argument("--y0-mm", type=float, default=0.0, help="(--long) смещение одной частицы по y, мм")
@@ -254,7 +254,10 @@ def main():
         turns = max(1, a.turns)
         author_experiment(lattice, group, a.exp, loss_mm=settings.loss_radius_m * 1e3)
         print(f"  параметры ядра: {settings}")
-        rf = None if rf_mode == "none" else rf_mode
+        if rf_mode == "sine":                              # реальный резонатор: параметры — из строки опыта
+            rf = mt.rf_spec({**(rad or {}), "rf": "sine", "design_mev": design_mev or 6000.0})
+        else:
+            rf = None if rf_mode == "none" else rf_mode
         sr_txt = (f"СИ{' +ISR' if isr_on else ''} [проект {design_mev or 6000:.0f} МэВ], " if sr_on else "СИ выкл, ")
         who = f"1 частица x0={a.x0_mm}мм y0={a.y0_mm}мм" if (a.x0_mm or a.y0_mm) else "пучок группы"
         print(f"  радиация: источник {rad_src}; ДЛИННЫЙ режим {turns} об., {sr_txt}ВЧ={rf_mode}, {who}")

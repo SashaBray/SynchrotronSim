@@ -18,8 +18,9 @@
 t в track/track_tbt — запаздывание относительно света за целые обороты, в метрах: Σ(путь/β(δ)) − n·C
 (β — по проектной энергии, как время пролёта в elegant); в track_elements — путь от плоскости, м.
 
-ВЧ-резонатор (rf=dict(volt_mv, harmonic, phase_deg)) стоит у плоскости наблюдения в конце оборота и
-повторяет RFCA elegant с FIDUCIAL="light", FREQ = h·c/C: ΔE = e·V·sin(φ + 2πh·t/C). Излучение (sr, isr) —
+ВЧ-резонатор (rf=dict(volt_mv, harmonic, phase_deg[, freq_hz])) стоит у плоскости наблюдения в конце оборота
+и повторяет RFCA elegant с FIDUCIAL="light": ΔE = e·V·sin(φ + 2πh·t/C_RF), C_RF = h·c/f_RF. Без freq_hz
+f_RF = h·c/C (C_RF = C); с freq_hz резонатор расстроен и равновесная энергия сдвигается. Излучение (sr, isr) —
 распределённое в изгибах ядра (SS_SR / SS_ISR), по проектной энергии design_mev.
 
 Показатели:
@@ -49,6 +50,7 @@ class Ring:
 
     label = "SynchrotronSim"
     MC2_MEV = 0.51099895069
+    C_LIGHT = 299792458.0
 
     def __init__(self, lattice=1, start_before_first_m=None, settings=None, sr=False, isr=False, rf=None,
                  design_mev=6000.0):
@@ -94,16 +96,28 @@ class Ring:
         for j in range(1, len(mags)):
             st = mt.modified_drift(st, mags[j - 1], mags[j]); st = mags[j].body(st)
         x, px, y, py, t, d = mt.modified_drift(st, mags[-1], self.plane)
-        t = t0 + (t - t0) / self.beta(d) - self.circumference   # запаздывание относительно света, м
+        # запаздывание от часов ВЧ, м: за оборот часы уходят на C_RF (без ВЧ/без частоты — ровно периметр)
+        t = t0 + (t - t0) / self.beta(d) - (self.rf_circumference() if self.rf else self.circumference)
         if self.rf:
             d = self.rf_kick(t, d)
         return (x, px, y, py, t, d)
 
+    def rf_circumference(self):
+        """Длина ВЧ-оборота C_RF: rf['freq_hz'] > 0 ⇒ h·c/f_RF (расстроенный резонатор), иначе периметр C
+        (f_RF = h·c/C — как было). Как RingModel::updateRf в C++ (matrix_ring_serve.h)."""
+        f = float((self.rf or {}).get("freq_hz") or 0.0)
+        return self.rf["harmonic"] * self.C_LIGHT / f if f > 0 else self.circumference
+
+    def set_rf(self, **kw):
+        """Сменить параметры ВЧ (volt_mv/harmonic/phase_deg/freq_hz) — новый dict (копии кольца не задеваются)."""
+        self.rf = {**(self.rf or {}), **kw}
+        return self
+
     def rf_kick(self, t, d):
-        """RFCA: ΔE = e·V·sin(φ + 2πh·t/C); канонические поперечные импульсы не меняются."""
+        """RFCA: ΔE = e·V·sin(φ + 2πh·t/C_RF); канонические поперечные импульсы не меняются."""
         rf = self.rf
         dE = rf["volt_mv"] * math.sin(math.radians(rf["phase_deg"]) + 2 * math.pi * rf["harmonic"] * t
-                                      / self.circumference)
+                                      / self.rf_circumference())
         pc = self.design_mev * (1.0 + d)
         E = math.sqrt(pc * pc + self.MC2_MEV ** 2) + dE
         return math.sqrt(E * E - self.MC2_MEV ** 2) / self.design_mev - 1.0

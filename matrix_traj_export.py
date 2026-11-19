@@ -9,7 +9,7 @@
 Запуск:  py -3.14 matrix_traj_export.py [exp_id=40] [lattice=107]
 Просмотр: py -3.14 visualize.py 40
 """
-import os, sys, csv, struct, shutil
+import os, sys, csv, struct, shutil, math
 import numpy as np
 import matrix_tracker as mt
 import matrix_optimizer as mo
@@ -259,8 +259,56 @@ def _radiation_meta(rf=None):
     режим ВЧ (параметр rf), проектная энергия для SR (МэВ). Пишется в результат трекинга."""
     return dict(sr=int(os.environ.get("SS_SR", "") == "1"),
                 isr=int(os.environ.get("SS_ISR", "") == "1"),
-                rf=str(rf or "none"),
+                rf=_rf_name(rf),
                 design_mev=float(os.environ.get("SS_DESIGN_MEV", "") or 6000.0))
+
+
+def _rf_name(rf):
+    """Имя типа резонатора для .npz: none / ideal / sine (rf — None, строка или dict из mt.rf_spec)."""
+    if isinstance(rf, dict):
+        return str(rf.get("type", "sine"))
+    return str(rf or "none")
+
+
+C_LIGHT = 299792458.0
+MC2_MEV = 0.51099895069
+
+
+class SineRF:
+    """Синусоидальный резонатор (RFCA) у плоскости финиша — как ring_analysis.Ring.rf_kick и C++ mc::RfSpec.
+    t частицы — запаздывание от часов ВЧ (м): за оборот t ← t0 + (путь)/β(δ) − C_RF; ΔE = V·sin(φ + 2πh·t/C_RF).
+    C_RF = h·c/f_RF (freq_hz) или длина линии (резонатор на ней настроен). phase_deg=None ⇒ синхронная фаза
+    φs = π − asin(U0/V) над критической энергией; U0 — потеря энергии опорной частицы (нули) за оборот без ВЧ."""
+
+    def __init__(self, spec, line_len, one_turn_delta=None):
+        self.V = float(spec["volt_mv"]); self.h = float(spec["harmonic"])
+        self.design = float(spec.get("design_mev") or 6000.0)
+        f = float(spec.get("freq_hz") or 0.0)
+        self.c_rf = self.h * C_LIGHT / f if f > 0 else float(line_len)
+        if spec.get("phase_deg") is None:                    # синхронная фаза по потере опорной частицы
+            d1 = float(one_turn_delta())
+            pc0 = self.design; pc1 = self.design * (1.0 + d1)
+            self.U0 = math.sqrt(pc0 * pc0 + MC2_MEV * MC2_MEV) - math.sqrt(pc1 * pc1 + MC2_MEV * MC2_MEV)
+            if not (abs(self.U0) < self.V):
+                raise SystemExit(f"ВЧ sine: напряжения {self.V} МВ не хватает на потерю {self.U0:.4g} МэВ/оборот")
+            self.phase = math.pi - math.asin(self.U0 / self.V)
+        else:
+            self.U0 = None
+            self.phase = float(spec["phase_deg"]) * math.pi / 180.0
+
+    def beta(self, d):
+        pc = self.design * (1.0 + d)
+        return pc / math.sqrt(pc * pc + MC2_MEV * MC2_MEV)
+
+    def apply(self, st, t0):
+        """Конец оборота: время → запаздывание от часов ВЧ, затем энергетический кик. st — 6-кортеж."""
+        x, px, y, py, t, d = st
+        t = t0 + (t - t0) / self.beta(d) - self.c_rf
+        dE = self.V * math.sin(self.phase + 2.0 * math.pi * self.h * t / self.c_rf)
+        pc = self.design * (1.0 + d)
+        E = math.sqrt(pc * pc + MC2_MEV * MC2_MEV) + dE
+        d = math.sqrt(E * E - MC2_MEV * MC2_MEV) / self.design - 1.0
+        return (x, px, y, py, t, d)
 
 
 def local_trajectories(lattice, group, source="physical", settings=None, n_turns=1, target=30000,
@@ -339,7 +387,9 @@ def long_trajectories(lattice, group, source="physical", settings=None, n_turns=
     rf: ВЧ-резонатор (компенсация потерь SS_SR). None — выключен (δ дрейфует вниз от излучения). 'ideal' —
     ИДЕАЛЬНЫЙ ВЧ: восстанавливает δ до значения в начале оборота (точная компенсация потери каждой частицы,
     без синхротронных колебаний/энергоразброса). Именно ВЧ переводит падение канонического импульса в диполях
-    (радиация) в затухание поперечного УГЛА — см. matrix_tracker._body_sector_symplectic."""
+    (радиация) в затухание поперечного УГЛА — см. matrix_tracker._body_sector_symplectic.
+    dict(type='sine', …) из mt.rf_spec — РЕАЛЬНЫЙ синусоидальный резонатор (SineRF): синхротронные колебания,
+    равновесная энергия от частоты ВЧ; t частицы — запаздывание от часов ВЧ (м), как в ring_analysis.Ring."""
     import beam_injection as bi
     plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings)
     if states_override is not None:
@@ -353,24 +403,39 @@ def long_trajectories(lattice, group, source="physical", settings=None, n_turns=
     n_turns = max(1, int(n_turns))
     if not closed:
         n_turns = 1
-    tt_all = []; surv_turns = []
+
+    def one_turn(st):                                          # плоскость → кольцо → финиш, без ВЧ
+        st = mt.modified_drift(st, plane, ordered[0]); st = ordered[0].body(st)
+        for j in range(1, len(ordered)):
+            st = mt.modified_drift(st, ordered[j - 1], ordered[j]); st = ordered[j].body(st)
+        return mt.modified_drift(st, ordered[-1], finish)
+
+    sine = None
+    if isinstance(rf, dict):
+        line_len = gap_in                                      # длина линии — та же сумма, что C++ inj.ring_len
+        for j in range(1, len(ordered)):
+            line_len = line_len + ordered[j - 1].L + ord_gaps[j - 1]
+        line_len = line_len + ordered[-1].L + gap_out
+        sine = SineRF(rf, line_len, one_turn_delta=lambda: one_turn((0.0, 0.0, 0.0, 0.0, 0.0, 0.0))[5])
+    tt_all = []; surv_turns = []; finals = []
     for st0 in states:
         st = tuple(map(float, st0)); done = 0
         tt = [(st[0], st[1], st[2], st[3])]                     # состояние у плоскости на старте
         try:
             for _turn in range(n_turns):                       # оборот: плоскость→кольцо→финиш(=плоскость)
-                d0 = st[5]                                      # δ в начале оборота (для идеального ВЧ)
-                st = mt.modified_drift(st, plane, ordered[0]); st = ordered[0].body(st)
-                for j in range(1, len(ordered)):
-                    st = mt.modified_drift(st, ordered[j - 1], ordered[j]); st = ordered[j].body(st)
-                st = mt.modified_drift(st, ordered[-1], finish)
+                d0 = st[5]; t0 = st[4]                          # δ и t в начале оборота (для ВЧ)
+                st = one_turn(st)
                 if rf == "ideal":                              # ВЧ: вернуть энергию, потерянную за оборот на SR
                     st = (st[0], st[1], st[2], st[3], st[4], d0)
+                elif sine is not None:                         # реальный резонатор: часы ВЧ + синус-кик
+                    st = sine.apply(st, t0)
                 tt.append((st[0], st[1], st[2], st[3])); done += 1
         except mt.ParticleLost:
             pass
-        tt_all.append(np.asarray(tt, float)); surv_turns.append(done)
-    return dict(mode="long", turnbyturn=tt_all, surv_turns=surv_turns, n_turns=n_turns,
+        tt_all.append(np.asarray(tt, float)); surv_turns.append(done); finals.append(tuple(st))
+    return dict(mode="long", turnbyturn=tt_all, surv_turns=surv_turns, n_turns=n_turns, finals=finals,
+                rf_u0_mev=(sine.U0 if sine is not None else None),
+                rf_phase_rad=(sine.phase if sine is not None else None),
                 elem_names=["плоскость инжекции"] + [m.dev for m in ordered], closed=closed,
                 ring_len=ring_len, lattice=lattice, group=group, **_radiation_meta(rf))
 

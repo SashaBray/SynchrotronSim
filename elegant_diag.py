@@ -220,7 +220,7 @@ def _write_foreign(name, source, beamline, watch=None, rf=None, extra_elements="
         head.append("W0")
     if rf:
         c = rf.get("circumference") or line_length(source=source, beamline=beamline)
-        freq = rf["harmonic"] * C_LIGHT / c
+        freq = float(rf.get("freq_hz") or 0.0) or rf["harmonic"] * C_LIGHT / c   # freq_hz — расстроенный ВЧ
         defs.append(f'RF0: RFCA, L=0, VOLT={rf["volt_mv"] * 1e6:.12g}, FREQ={freq:.15g}, '
                     f'PHASE={rf["phase_deg"]:.12g}, FIDUCIAL="light"')
         tail.append("RF0")
@@ -236,7 +236,8 @@ def write_lattice(name="syla_closed.lte", config=CONFIG, watch=None, rf=None, ex
                   overrides=None, integrator=None, csbend_extra=None, source=None, beamline=None,
                   use_beamline="RING"):
     """Собрать .lte: описание + RING. watch — dict(filename, mode, interval) ⇒ WATCH в начале линии;
-    rf — dict(volt_mv, harmonic, phase_deg) ⇒ RFCA в конце линии (FREQ = h·c/C, FIDUCIAL="light");
+    rf — dict(volt_mv, harmonic, phase_deg[, freq_hz]) ⇒ RFCA в конце линии (FREQ = freq_hz или h·c/C,
+    FIDUCIAL="light");
     integrator — (N_SLICES, INTEGRATION_ORDER) для всех интегрируемых элементов; csbend_extra — добавка к
     каждому CSBEND (напр. "SYNCH_RAD=1,ISR=1"); overrides — {имя: 'строка определения'} заменяет устройства.
 
@@ -255,7 +256,7 @@ def write_lattice(name="syla_closed.lte", config=CONFIG, watch=None, rf=None, ex
                     f'INTERVAL={watch.get("interval", 1)}')
         head.append("W0")
     if rf:                                           # в КОНЦЕ линии: запись WATCH до ВЧ, выход — после (как SynchrotronSim)
-        freq = rf["harmonic"] * C_LIGHT / line_length(config)
+        freq = float(rf.get("freq_hz") or 0.0) or rf["harmonic"] * C_LIGHT / line_length(config)
         defs.append(f'RF0: RFCA, L=0, VOLT={rf["volt_mv"] * 1e6:.12g}, FREQ={freq:.15g}, '
                     f'PHASE={rf["phase_deg"]:.12g}, FIDUCIAL="light"')
         tail.append("RF0")

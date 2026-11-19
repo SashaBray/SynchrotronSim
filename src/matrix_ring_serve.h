@@ -15,8 +15,13 @@
 //   JUNCTION n           + 24 + n·6      → OK m + n·6 (стык плоскостей A→B: p, axis, u, v каждой)
 //   PIECEMETA / INFO                     → OK k + k текстовых строк
 //   KICK j theta | VKICK j theta | YAW j alpha | DK j dk | DSK j dk | DK2 j dk | DK3 j dk | RESET   → OK 0
+//   RF on volt_mv harmonic phase_deg freq_hz → OK 0 (параметры ВЧ на лету; переживает RESET)
 // Срезы (PIECES/PIECEMETA) — копии магнитов: возмущения KICK..DK3 помечают их устаревшими, и они лениво
 // пересобираются перед следующим PIECES/PIECEMETA (YAW меняет только рамки магнита — их срезы читают напрямую).
+//
+// ЧАСТОТА ВЧ. freq_hz ≤ 0 ⇒ f_RF = h·c/C (резонатор настроен на геометрический периметр — как было всегда).
+// freq_hz > 0 ⇒ «длина ВЧ-оборота» C_RF = h·c/f_RF: за оборот опорные часы уходят на C_RF (не на C), фаза
+// 2πh·t/C_RF. Расстройка Δf сдвигает равновесную энергию δ ≈ −Δf/(η·f) — ВЧ-частота становится актуатором.
 #pragma once
 #include "matrix_ring.h"
 #include <cstdio>
@@ -36,6 +41,7 @@ struct RingConfig {
     bool sr = false, isr = false;
     int nsl = SECTOR_NSLICES, order = 4;
     bool rf = false; double volt_mv = 0, harmonic = 0, phase_deg = 0;
+    double freq_hz = 0;                              // ≤ 0 ⇒ f_RF = h·c/C (C_RF = периметр); > 0 ⇒ C_RF = h·c/f_RF
     uint64_t seed = 12345;
 };
 
@@ -48,6 +54,7 @@ struct RingModel {
     Node plane;
     std::vector<double> s_in, s_out;
     double circumference = 0.0;
+    double c_rf = 0.0;                               // длина ВЧ-оборота: периметр или h·c/f_RF (setRf)
     std::vector<Piece> pieces;                       // читать через currentPieces(): после возмущения устаревают
     bool pieces_stale = false;
     uint64_t requests = 0;
@@ -67,7 +74,21 @@ struct RingModel {
             s_in.push_back(s); s += mags[j].phys.Leff; s_out.push_back(s);
         }
         circumference = s + dot(plane.fr_in.p - m1.fr_out.p, m1.fr_out.axis);
+        updateRf();
         buildPieces();
+    }
+
+    // Длина ВЧ-оборота из конфига: без частоты — ровно периметр (бит-в-бит прежнее поведение).
+    void updateRf() {
+        c_rf = (cfg.freq_hz > 0) ? cfg.harmonic * C_LIGHT / cfg.freq_hz : circumference;
+    }
+
+    // RF on V h φ f — параметры ВЧ на лету (контур ВЧ-частоты); живут в cfg ⇒ переживают RESET.
+    void setRf(bool on, double volt_mv, double harmonic, double phase_deg, double freq_hz) {
+        if (on && !(harmonic > 0)) throw std::runtime_error("RF: кратность h должна быть > 0");
+        cfg.rf = on; cfg.volt_mv = volt_mv; cfg.harmonic = harmonic; cfg.phase_deg = phase_deg;
+        cfg.freq_hz = freq_hz;
+        updateRf();
     }
 
     // Изгиб → его срезы (копии с L/N, θ/N, одним срезом и краями только на крайних) — ring_analysis._bend_slices.
@@ -109,10 +130,10 @@ struct RingModel {
         return pc / std::sqrt(pc * pc + MC2_MEV * MC2_MEV);
     }
 
-    // RFCA: ΔE = e·V·sin(φ + 2πh·t/C); канонические поперечные импульсы не меняются — Ring.rf_kick.
+    // RFCA: ΔE = e·V·sin(φ + 2πh·t/C_RF); канонические поперечные импульсы не меняются — Ring.rf_kick.
     double rfKick(double t, double d) const {
         const double PI = 3.14159265358979323846;
-        double dE = cfg.volt_mv * std::sin(cfg.phase_deg * PI / 180.0 + 2.0 * PI * cfg.harmonic * t / circumference);
+        double dE = cfg.volt_mv * std::sin(cfg.phase_deg * PI / 180.0 + 2.0 * PI * cfg.harmonic * t / c_rf);
         double pc = cfg.design_mev * (1.0 + d);
         double E = std::sqrt(pc * pc + MC2_MEV * MC2_MEV) + dE;
         return std::sqrt(E * E - MC2_MEV * MC2_MEV) / cfg.design_mev - 1.0;
@@ -134,7 +155,7 @@ struct RingModel {
                 s = mags[j].body(s, rng);
             }
             s = modified_drift(s, mags.back().fr_out, plane.fr_in, false);
-            s.t = t0 + (s.t - t0) / beta(s.delta) - circumference;
+            s.t = t0 + (s.t - t0) / beta(s.delta) - (cfg.rf ? c_rf : circumference);   // запаздывание от часов ВЧ
             if (cfg.rf) s.delta = rfKick(s.t, s.delta);
             if (!finite(s)) return false;
             st = s;
@@ -397,6 +418,10 @@ inline int serveRing(RingModel& R) {
                 int j; double dk; is >> j >> dk; R.dk2(j, dk); sendText({});
             } else if (cmd == "DK3") {                       // транзитно изменить октупольную силу (нелин. тюнер)
                 int j; double dk; is >> j >> dk; R.dk3(j, dk); sendText({});
+            } else if (cmd == "RF") {                        // параметры ВЧ на лету (частота — актуатор энергии)
+                int on; double v, h, ph, f; is >> on >> v >> h >> ph >> f;
+                if (is.fail()) throw std::runtime_error("RF: ожидается on volt_mv harmonic phase_deg freq_hz");
+                R.setRf(on != 0, v, h, ph, f); sendText({});
             } else if (cmd == "RESET") {
                 R.build(); sendText({});
             } else {

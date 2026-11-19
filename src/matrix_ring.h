@@ -335,21 +335,63 @@ inline TrackResult trackParticle(const Injection& inj, const State& st0, int n_t
 // tt[k]=после k-го оборота, ≤n_turns+1 точек). Для вывода в .npz анализатору.
 struct LongResult { std::vector<std::array<double, 4>> tt; int surv_turns = 0; State final_state; bool lost = false; };
 
-inline LongResult trackLong(const Injection& inj, const State& st0, int n_turns, bool rf_ideal) {
+// Один проход линии опыта: плоскость → все элементы → финиш (без ВЧ) — matrix_traj_export.long_trajectories.one_turn.
+inline State lineTurn(const Injection& inj, State s) {
+    const auto& O = inj.ordered;
+    s = modified_drift(s, inj.plane.fr_out, O[0].fr_in, O[0].same_plane_as_prev);
+    s = O[0].body(s);
+    for (size_t j = 1; j < O.size(); ++j) {
+        s = modified_drift(s, O[j - 1].fr_out, O[j].fr_in, O[j].same_plane_as_prev);
+        s = O[j].body(s);
+    }
+    return modified_drift(s, O.back().fr_out, inj.finish.fr_in, inj.finish.same_plane_as_prev);
+}
+
+// Резонатор опыта (radiation_params.rf): none | ideal (вернуть потерю за оборот) | sine (RFCA у финиша) —
+// дословный порт matrix_traj_export.SineRF. t частицы — запаздывание от часов ВЧ (м): за оборот
+// t ← t0 + путь/β(δ) − C_RF, ΔE = V·sin(φ + 2πh·t/C_RF), C_RF = h·c/f_RF или длина линии.
+struct RfSpec {
+    enum Type { NONE = 0, IDEAL = 1, SINE = 2 } type = NONE;
+    double volt = 0, h = 0, design = 6000.0, c_rf = 0, phase = 0, U0 = 0;
+    bool auto_phase = false;
+    const char* name() const { return type == IDEAL ? "ideal" : (type == SINE ? "sine" : "none"); }
+    double beta(double d) const { double pc = design * (1.0 + d); return pc / std::sqrt(pc * pc + MC2_MEV * MC2_MEV); }
+    // Длина ВЧ-оборота и (при auto) синхронная фаза φs = π − asin(U0/V) по потере опорной частицы (нули).
+    void prepare(const Injection& inj, double freq_hz, bool phase_auto, double phase_deg) {
+        const double PI = 3.14159265358979323846;
+        c_rf = (freq_hz > 0) ? h * C_LIGHT / freq_hz : inj.ring_len;
+        auto_phase = phase_auto;
+        if (phase_auto) {
+            State z{ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+            double d1 = lineTurn(inj, z).delta;
+            double pc0 = design, pc1 = design * (1.0 + d1);
+            U0 = std::sqrt(pc0 * pc0 + MC2_MEV * MC2_MEV) - std::sqrt(pc1 * pc1 + MC2_MEV * MC2_MEV);
+            if (!(std::fabs(U0) < volt)) throw std::runtime_error("ВЧ sine: напряжения не хватает на потерю за оборот");
+            phase = PI - std::asin(U0 / volt);
+        } else {
+            phase = phase_deg * PI / 180.0;
+        }
+    }
+    void apply(State& s, double t0, double d0) const {
+        const double PI = 3.14159265358979323846;
+        if (type == IDEAL) { s.delta = d0; return; }
+        if (type != SINE) return;
+        s.t = t0 + (s.t - t0) / beta(s.delta) - c_rf;
+        double dE = volt * std::sin(phase + 2.0 * PI * h * s.t / c_rf);
+        double pc = design * (1.0 + s.delta);
+        double E = std::sqrt(pc * pc + MC2_MEV * MC2_MEV) + dE;
+        s.delta = std::sqrt(E * E - MC2_MEV * MC2_MEV) / design - 1.0;
+    }
+};
+
+inline LongResult trackLong(const Injection& inj, const State& st0, int n_turns, const RfSpec& rf) {
     LongResult r; State s = st0;
     r.tt.push_back({ s.x, s.px, s.y, s.py });
-    const auto& O = inj.ordered;
     try {
         for (int turn = 0; turn < n_turns; ++turn) {
-            double d0 = s.delta;
-            s = modified_drift(s, inj.plane.fr_out, O[0].fr_in, O[0].same_plane_as_prev);
-            s = O[0].body(s);
-            for (size_t j = 1; j < O.size(); ++j) {
-                s = modified_drift(s, O[j - 1].fr_out, O[j].fr_in, O[j].same_plane_as_prev);
-                s = O[j].body(s);
-            }
-            s = modified_drift(s, O.back().fr_out, inj.finish.fr_in, inj.finish.same_plane_as_prev);
-            if (rf_ideal) s.delta = d0;
+            double d0 = s.delta, t0 = s.t;
+            s = lineTurn(inj, s);
+            rf.apply(s, t0, d0);
             r.tt.push_back({ s.x, s.px, s.y, s.py });
             r.surv_turns = turn + 1;
         }
