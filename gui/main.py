@@ -153,6 +153,7 @@ class MainWindow(QMainWindow):
         self.resize(1280, 860)
 
         self.log = LogPanel()
+        self._cockpits = []                         # живые окна кокпита (режим 4) — держим ссылки
         self.runner = Runner(self)
         self.log.btn_stop.clicked.connect(self._stop)
         self.runner.line.connect(self.log.append)
@@ -207,6 +208,11 @@ class MainWindow(QMainWindow):
         a_quit.triggered.connect(self.close)
         m.addAction(a_quit)
 
+        live = self.menuBar().addMenu("Живой режим")
+        a_cockpit = QAction("Кокпит режима 4 (живой)…", self)
+        a_cockpit.triggered.connect(self._open_cockpit)
+        live.addAction(a_cockpit)
+
         h = self.menuBar().addMenu("Справка")
         a_manual = QAction("Мануал (docs/MANUAL.md)", self)
         a_manual.triggered.connect(lambda: open_in_os(paths.ROOT / "docs" / "MANUAL.md"))
@@ -214,6 +220,20 @@ class MainWindow(QMainWindow):
         a_about.triggered.connect(self._about)
         h.addAction(a_manual)
         h.addAction(a_about)
+
+    def _open_cockpit(self) -> None:
+        """Открыть живой кокпит режима 4 отдельным окном (в этом же процессе). Модель — control-модель
+        СИЛА-26 (как mode5): строится в фоне, окно появляется сразу и не блокирует оболочку."""
+        try:
+            from client.cockpit import launch_cockpit
+        except Exception as e:                       # зависимости кокпита (pyvistaqt/pyqtgraph)
+            QMessageBox.warning(self, "Режим 4", f"Не удалось загрузить кокпит: {e}\n\n"
+                                "Установите зависимости:\npy -3.14 -m pip install pyvistaqt pyqtgraph")
+            return
+        exp = int(self.project.exp) if self.project else None
+        win = launch_cockpit(lattice=26, exp=exp, parent=self)   # режим 4 — control-модель СИЛА-26
+        self._cockpits.append(win)
+        self.log.append("открыт кокпит режима 4 (control-модель СИЛА-26); модель строится в фоне ~15–20 с")
 
     def _about(self) -> None:
         QMessageBox.information(

@@ -224,6 +224,23 @@ class TestRadiation(unittest.TestCase):
         self.assertIsNone(mt.load_radiation(99999))           # несуществующий опыт → None
         self.assertIsNone(mt.load_radiation(None))            # без opt_id → None
 
+    def test_rf_spec_types(self):
+        # тип резонатора из radiation_params: none → None, ideal → "ideal", sine → dict параметров
+        self.assertIsNone(mt.rf_spec(None))
+        self.assertIsNone(mt.rf_spec({"rf": "none"}))
+        self.assertEqual(mt.rf_spec({"rf": "ideal"}), "ideal")
+        s = mt.rf_spec({"rf": "sine", "rf_voltage_mv": 8.0, "rf_harmonic": 1296, "rf_phase_deg": None,
+                        "rf_freq_hz": None, "design_mev": 6000.0})
+        self.assertEqual(s["type"], "sine"); self.assertEqual(s["harmonic"], 1296.0)
+        self.assertIsNone(s["phase_deg"]); self.assertIsNone(s["freq_hz"])     # auto-фаза, f = h·c/L
+        with self.assertRaises(SystemExit):
+            mt.rf_spec({"rf": "sine"})                                         # sine без V/h — ошибка
+        with self.assertRaises(SystemExit):
+            mt.rf_spec({"rf": "klystron"})                                     # неизвестный тип
+        r26 = mt.load_radiation(26)                                            # позиция БД: СИЛА-26, sine
+        self.assertIsNotNone(r26); self.assertEqual(r26["rf"], "sine")
+        self.assertEqual(mt.rf_spec(r26)["volt_mv"], 8.0)
+
 
 class TestFieldYoshida(unittest.TestCase):
     """Строительные блоки симплектического интегратора."""
@@ -1094,6 +1111,58 @@ class TestRingCpp(unittest.TestCase):
         np.testing.assert_allclose(self.cpp.track(self.st, 2), self.py.track(self.st, 2), atol=1e-11)
         np.testing.assert_allclose(self.cpp.track_elements(self.st), self.py.track_elements(self.st), atol=1e-11)
 
+    def _rf_pair(self, rf):
+        """(C++-кольцо с ВЧ rf, Python-эталон с тем же rf) — Python-кольцо копия без пересборки."""
+        import copy
+        py = copy.copy(self.py); py.rf = dict(rf)
+        cpp = self.rc.CppRing(self.LAT, start_before_first_m=self.LEAD, design_mev=self.MEV, nsl=self.NSL,
+                              order=4, rf=dict(rf))
+        return cpp, py
+
+    def test_rf_frequency_parity(self):
+        # расстроенный резонатор (freq_hz ≠ h·c/C): C++ и Python считают одну длину ВЧ-оборота C_RF = h·c/f
+        f0 = 75 * 299792458.0 / self.py.circumference
+        for freq in (None, f0 + 300.0):
+            rf = dict(volt_mv=2.5, harmonic=75, phase_deg=170.0, **({"freq_hz": freq} if freq else {}))
+            cpp, py = self._rf_pair(rf)
+            try:
+                np.testing.assert_allclose(cpp.track(self.st, 3), py.track(self.st, 3), atol=1e-11)
+                self.assertAlmostEqual(cpp.rf_circumference(), py.rf_circumference(), places=12)
+            finally:
+                cpp.close()
+
+    def test_rf_frequency_shifts_energy(self):
+        # частота ВЧ — актуатор энергии: равновесная δ из 6D-замкнутой орбиты ≈ −Δf/(η·f), η = αc − 1/γ²
+        rf = dict(volt_mv=2.5, harmonic=75, phase_deg=180.0)          # без СИ синхронная фаза — 180°
+        cpp, _ = self._rf_pair(rf)
+        try:
+            f0 = cpp.rf_frequency()
+            self.assertAlmostEqual(f0, 75 * 299792458.0 / cpp.circumference, delta=1e-6)
+            co0 = self.ra.closed_orbit(cpp, dims=6)
+            df = 2000.0
+            cpp.set_rf(freq_hz=f0 + df)
+            co1 = self.ra.closed_orbit(cpp, dims=6)
+            alphac = self.ra.twiss(self.cpp)["alphac"]
+            gamma = self.MEV / 0.51099895069
+            expect = -df / ((alphac - 1.0 / gamma ** 2) * f0)
+            self.assertAlmostEqual((co1[5] - co0[5]) / expect, 1.0, delta=0.03)
+            # на лету = свежее кольцо с той же частотой; переживает RESET (apply_perturb)
+            fresh = self.rc.CppRing(self.LAT, start_before_first_m=self.LEAD, design_mev=self.MEV, nsl=self.NSL,
+                                    order=4, rf={**rf, "freq_hz": f0 + df})
+            try:
+                cpp.apply_perturb(kicks=[(3, 1e-5)]); cpp.apply_perturb()
+                np.testing.assert_array_equal(cpp.track(self.st, 2), fresh.track(self.st, 2))
+            finally:
+                fresh.close()
+            cpp.set_rf(freq_hz=0.0)                                   # ≤ 0 ⇒ снова h·c/C, бит-в-бит исходное
+            plain, _ = self._rf_pair(rf)
+            try:
+                np.testing.assert_array_equal(cpp.track(self.st, 2), plain.track(self.st, 2))
+            finally:
+                plain.close()
+        finally:
+            cpp.close()
+
     def test_kick_and_yaw(self):
         import copy
         j = next(i for i, k in enumerate(self.py.kinds) if k == "sext")
@@ -1763,6 +1832,93 @@ class TestMode4Config(unittest.TestCase):
         self.assertEqual(names, ["OrbitRmsRecorder"], f"подписка нарушена: {names}")
         self.assertNotIn("ScreenRecorder", names, "отключённый screen не должен считаться")
 
+    def test_rf_experiment_config(self):
+        """load(3/4) = длина кольца плывёт: возмущение circumference; 4 — + контур ВЧ-частоты rf.delta→rf.freq."""
+        from control import fb_config
+        c3, c4 = fb_config.load(3), fb_config.load(4)
+        for c in (c3, c4):
+            self.assertTrue(c.relative_orbit)
+            self.assertEqual([d["quantity"] for d in c.disturbance_spec], ["circumference"])
+            self.assertIn("rf", {r.signal for r in c.enabled_records()})
+        self.assertEqual({l.name for l in c3.enabled_loops()}, {"fofb_x", "fofb_y"})
+        rf = [l for l in c4.enabled_loops() if l.name == "rf"]
+        self.assertEqual(len(rf), 1)
+        self.assertEqual((rf[0].sensor, rf[0].actuator_key), ("rf.delta", "rf.freq"))
+        import control.mode4_run as m4
+        self.assertEqual(type(m4.make_loop(rf[0])).__name__, "RfFrequencyLoop")   # класс — по датчику
+        self.assertFalse(fb_config.load(1).relative_orbit)                        # прежние опыты — как были
+
+    def test_floor_rf_pair_config(self):
+        """load(5/6) = пол горизонтали: BPM абсолютно, но пучок на старте центрирован на CO; 6 — + контур ВЧ.
+        Прежние опыты center_bunch не задают (None → как relative_orbit, поведение не меняется)."""
+        from control import fb_config
+        c5, c6 = fb_config.load(5), fb_config.load(6)
+        for c in (c5, c6):
+            self.assertFalse(c.relative_orbit); self.assertIs(c.center_bunch, True)
+        self.assertNotIn("rf", {l.name for l in c5.enabled_loops()})
+        self.assertIn("rf", {l.name for l in c6.enabled_loops()})
+        self.assertIsNone(fb_config.load(1).center_bunch)
+        self.assertIsNone(fb_config.load(3).center_bunch)
+
+    def test_orbit_dc_recorder(self):
+        """OrbitRmsRecorder: orbit_dc — СКО орбиты, усреднённой по второй половине окон (колебание гасится)."""
+        import types
+        from control import recorders
+        rec = recorders.OrbitRmsRecorder()
+        base = np.array([1e-6, -1e-6, 2e-6, -2e-6])
+        osc = np.array([5e-6, 5e-6, -5e-6, -5e-6])
+        for w in range(8):                                     # статика + знакопеременное колебание
+            o = base + (osc if w % 2 else -osc)
+            rec.sample(types.SimpleNamespace(observables={"ebpm.x": o, "ebpm.y": 0.5 * o}), w, None)
+        rec.finalize(None, None)
+        d = {s: v for s, w, v in rec.result_rows() if s.startswith("orbit_dc")}
+        self.assertAlmostEqual(d["orbit_dc.x"], float(np.sqrt(np.mean(base ** 2))) * 1e6, places=9)
+        self.assertAlmostEqual(d["orbit_dc.y"], 0.5 * float(np.sqrt(np.mean(base ** 2))) * 1e6, places=9)
+
+
+class TestRfFrequencyLoop(unittest.TestCase):
+    """Контур ВЧ-частоты (control/controllers/rf_frequency.py) и возмущение длины кольца — без 6D-кольца."""
+
+    def test_circumference_disturbance(self):
+        import types
+        import disturbance as dist
+        m = types.SimpleNamespace(Leff=0.1, theta0=0.0, k1=0.0, k2=0.0, k3=0.0)
+        ring = types.SimpleNamespace(n_mag=3, kinds=["quad"] * 3, s_out=[1.0, 2.0, 3.0], mags=[m, m, m])
+        spec = [dict(name="tide", target="ring", plane="", form="tone", correlation="common",
+                     quantity="circumference", amplitude=2e-5, freq_hz=7.5, phase_deg=0.0)]
+        d = dist.Disturbance(spec, ring, seed=1)
+        t = 0.01
+        self.assertAlmostEqual(d.circumference(t, 1e-4), 2e-5 * np.sin(2 * np.pi * 7.5 * t), places=15)
+        dx, dy = d.offsets(t, 1e-4)
+        self.assertEqual(float(np.abs(dx).max() + np.abs(dy).max()), 0.0)        # не трогает магниты
+        self.assertEqual(d.field(t, 1e-4), {})
+        self.assertEqual(dist.Disturbance([], ring).circumference(t, 1e-4), 0.0)
+
+    def test_delta_estimate_projection(self):
+        from control.controllers.rf_frequency import delta_estimate
+        eta = np.array([0.0, 0.02, 0.01, -0.005, 0.0])
+        self.assertAlmostEqual(delta_estimate(eta * 3e-4, eta), 3e-4, places=15)  # чистая дисперсионная орбита
+        bump = np.array([1e-6, 0.0, 0.0, 0.0, -1e-6])                            # орбита ⊥ η — энергию не меняет
+        self.assertAlmostEqual(delta_estimate(eta * 1e-4 + bump, eta), 1e-4, places=15)
+
+    def test_loop_converges_on_static_plant(self):
+        """Интегратор с бокс-фильтром на статическом plant δ̂ = d + R·Δf сходится к Δf = −d/R."""
+        import types
+        from control import Schema, ResponseMatrix
+        from control.controllers.rf_frequency import RfFrequencyLoop
+        R = -5.6e-5                                                              # dδ/dΔf, 1/Гц (СИЛА-26)
+        res = types.SimpleNamespace(response=lambda a, o: ResponseMatrix([[R]], ["rf.delta.0"], a))
+        lp = RfFrequencyLoop(gain=0.5)
+        lp.setup(res, Schema(["corr.000.hkick", "rf.freq"])); lp.reset()
+        self.assertEqual(lp.act, ["rf.freq"])
+        self.assertIn("rf.delta", lp.provides().observables)
+        d = -3.5e-4                                                              # ΔC = 20 мкм ⇒ δ ≈ −3.5e-4
+        u = 0.0
+        for _ in range(80):
+            view = types.SimpleNamespace(read=lambda s: np.array([d + R * u]), ref=lambda n: None)
+            u = lp.update(0.0, view)["rf.freq"]
+        self.assertAlmostEqual(u, -d / R, delta=1e-3 * abs(d / R))               # ≈ −6.25 Гц
+
 
 class TestMode4Store(unittest.TestCase):
     """Режим 4: писатель результатов — идемпотентность по ключу (перезапись, не дублирование) во ВРЕМЕННОЙ БД."""
@@ -1993,6 +2149,46 @@ class TestImperativeLoop(unittest.TestCase):
         self.assertAlmostEqual(state.actual["corr.001.hkick"], 0.3)
 
 
+class TestCompositeLinearInline(unittest.TestCase):
+    """CompositePlant (линеаризованная оптика) БЕЗ кольца: объединённая схема, inline-модель
+    obs=nominal+drift_off+R·u, диспетчер build_response (ebpm→tbt, оптика→кэш). Логику проверяем на
+    инъекции модели (минуя дорогой __init__); сквозной прогон на реальном кольце — opt-in smoke."""
+
+    def _plant(self):
+        from control.composite_plant import CompositePlant
+        from control.state import Schema
+        from control.controller import ResponseMatrix
+        cp = object.__new__(CompositePlant)                   # минуем __init__ (без ring_cpp)
+        cp._opt_ids = ["quad.F.dk", "quad.G.dk", "sext.S.dk2", "oct.O.dk3"]
+        cp._fam = {"tune": ["quad.F.dk", "quad.G.dk"], "chroma": ["sext.S.dk2"], "adts": ["oct.O.dk3"]}
+        cp._nominal = {"tune": np.array([0.3, 0.4]), "chroma": np.array([5.0, 6.0]), "adts": np.array([1., 2., 3.])}
+        cp._drift_off = {"tune": np.array([0.01, -0.02]), "chroma": np.array([0.5, -0.3]), "adts": np.array([0.1, 0.1, 0.1])}
+        cp._R = {"tune": np.array([[2.0, 0.0], [0.0, 3.0]]), "chroma": np.array([[1.0], [1.0]]),
+                 "adts": np.array([[1.0], [1.0], [1.0]])}
+
+        class _Tbt:
+            def schema(self): return Schema(["corr.000.hkick"])
+            def history(self): return None
+            def build_response(self, act, obs): return ResponseMatrix(np.eye(len(act)), ["ebpm"], list(act))
+        cp.tbt = _Tbt()
+        return cp
+
+    def test_union_schema_and_inline_and_dispatch(self):
+        from control.state import ExperimentState
+        cp = self._plant()
+        self.assertEqual(cp.schema().ids, ["corr.000.hkick"] + cp._opt_ids)   # ОБЪЕДИНЕНИЕ актуаторов
+        state = ExperimentState(cp.schema())
+        state.actual["quad.F.dk"] = 0.1; state.actual["quad.G.dk"] = -0.05
+        cp._measure_inline(state)                              # obs = nominal + drift_off + R·u
+        exp = cp._nominal["tune"] + cp._drift_off["tune"] + cp._R["tune"] @ np.array([0.1, -0.05])
+        np.testing.assert_allclose(state.observables["tune"], exp)
+        # диспетчер build_response: оптика → кэш-матрица; орбита → tbt
+        self.assertEqual(cp.build_response(["quad.F.dk", "quad.G.dk"], ["tune"]).R.shape, (2, 2))
+        self.assertEqual(cp.build_response(["corr.000.hkick"], ["ebpm.x"]).rows, ["ebpm"])
+        with self.assertRaises(ValueError):                   # неизвестная оптическая наблюдаемая
+            cp.build_response(["x"], ["unknown"])
+
+
 class TestObserver(unittest.TestCase):
     """Слой Observer: подписка, кастомный экстрактор, общий промежуточный считается один раз (кэш ctx)."""
 
@@ -2007,8 +2203,13 @@ class TestObserver(unittest.TestCase):
         obs.update(st, ctx)
         self.assertEqual(sorted(st.observables), ["a", "b"])              # подписка соблюдена (c не считается)
         np.testing.assert_array_equal(st.observables["b"], np.array([6.0]))  # кастомный экстрактор работает
-        self.assertEqual(OBSERVABLES["tune"].needs, ("chroma_raw",))      # tune и chroma делят один промежуточный
-        self.assertEqual(OBSERVABLES["chroma"].needs, ("chroma_raw",))
+        # МОДУЛЬНОСТЬ: оптика ПЕРЕЕХАЛА из observer.py в файлы-контуры (несут вход вычисления через provides())
+        self.assertNotIn("tune", OBSERVABLES)                             # observer.py больше НЕ знает про tune
+        from control.obs_assembly import observer_for
+        from control.controllers.optics_tune import TuneLoop
+        o = observer_for([TuneLoop()], serves={"tune"})
+        self.assertIn("tune", o.registry)                                # контур принёс вычисление своей наблюдаемой
+        self.assertIn("chroma_raw", o.intermediates)                     # и свой промежуточный (chroma_raw)
 
     def test_intermediate_built_once(self):
         """Общий промежуточный строится ОДИН раз и дальше берётся из кэша ObsContext."""
@@ -2222,6 +2423,1140 @@ class TestDriveSpeeds(unittest.TestCase):
         a = lim.apply(a, np.ones(1), dt=1.0)
         self.assertAlmostEqual(a[0], 1 - np.exp(-2.0), places=6)  # ещё такт — ближе к уставке
         self.assertAlmostEqual(Limits(sch).apply(np.zeros(1), np.ones(1), dt=1.0)[0], 1.0)  # τ=0 → без лага
+
+
+class _MagMap:
+    """Мини-карта имён магнитов (name→index) для OpticsView.at_magnet в тестах клиента."""
+    def __init__(self, m): self._m = dict(m)
+    def index(self, name): return self._m[name]
+
+
+def _seed_client_state():
+    """Посеянное состояние для тестов клиента: 2 актуатора, наблюдаемые, ондулятор, оптика, приводы."""
+    from control import ExperimentState, Schema, Limits, UndulatorConfig, OpticsView
+    sch = Schema(["corr.000.hkick", "corr.000.vkick"])
+    lim = Limits(sch)
+    lim.set("corr.000.hkick", slew=1.5, lag_tau=2e-4, odz=(-1e-3, 1e-3), res=1e-6, act=True)
+    st = ExperimentState(sch, limits=lim)
+    st.observables["ebpm.x"] = np.array([1.0e-6, -2.0e-6, 3.0e-6])
+    st.observables["ebpm.y"] = np.array([0.0, 4.0e-6])
+    st.undulators["und_01"] = UndulatorConfig(7.0, name="und_01", slew_mm_s=10.0, gap_min=5.0, gap_max=20.0)
+    tw = {"s": [0.0, 1.0, 2.0], "betax": [10.0, 20.0, 30.0], "betay": [5.0, 6.0, 7.0],
+          "etax": [0.1, 0.2, 0.3], "nux": 42.125, "nuy": 15.22, "alphac": 7.0e-5}
+    st.optics = OpticsView(tw, s_out=np.array([1.0]), magnets=_MagMap({"q1": 0}))
+    return st
+
+
+class TestClientAddresses(unittest.TestCase):
+    """Этап 0: адресная схема клиента — перечисление из посеянного состояния и резолв в верные значения
+    (всё сериализуемо: float/bool/list/None, никаких numpy/живых объектов через шов Link)."""
+
+    def setUp(self):
+        from control import StateView
+        self.st = _seed_client_state()
+        self.view = StateView(self.st)
+
+    def test_enumerate_lists_expected_addresses(self):
+        from client import addresses as A
+        addrs = set(A.enumerate_addresses(self.view))
+        for expect in ("obs.ebpm.x", "obs.ebpm.x:rms", "obs.ebpm.y",
+                       "drive.corr.000.hkick.slew", "drive.corr.000.hkick.act",
+                       "undulator.und_01.gap", "undulator.und_01.K", "optics.nux"):
+            self.assertIn(expect, addrs)
+
+    def test_resolve_observable_vector_and_reductions(self):
+        from client import addresses as A
+        self.assertEqual(A.resolve(self.view, "obs.ebpm.x"), [1.0e-6, -2.0e-6, 3.0e-6])
+        self.assertAlmostEqual(A.resolve(self.view, "obs.ebpm.x:rms"),
+                               float(np.sqrt(np.mean(np.array([1e-6, -2e-6, 3e-6]) ** 2))))
+        self.assertAlmostEqual(A.resolve(self.view, "obs.ebpm.x:max"), 3.0e-6)
+        self.assertAlmostEqual(A.resolve(self.view, "obs.ebpm.x:2"), 3.0e-6)   # индекс элемента
+        self.assertIsNone(A.resolve(self.view, "obs.nope.x"))                   # нет такой наблюдаемой
+
+    def test_resolve_drive_fields(self):
+        from client import addresses as A
+        self.assertAlmostEqual(A.resolve(self.view, "drive.corr.000.hkick.slew"), 1.5)
+        self.assertAlmostEqual(A.resolve(self.view, "drive.corr.000.hkick.lag_tau"), 2e-4)
+        self.assertAlmostEqual(A.resolve(self.view, "drive.corr.000.hkick.odz_hi"), 1e-3)
+        self.assertAlmostEqual(A.resolve(self.view, "drive.corr.000.hkick.odz_lo"), -1e-3)
+        self.assertIs(A.resolve(self.view, "drive.corr.000.hkick.act"), True)
+        self.assertIsNone(A.resolve(self.view, "drive.corr.000.hkick.bogus"))  # неизвестное поле
+
+    def test_resolve_actual_corrector_kick(self):
+        """`actual.<id>` — реализованный кик корректора из state.actual (живой дипольный момент H/V)."""
+        from client import addresses as A
+        self.st.actual["corr.000.hkick"] = 1.5e-4
+        self.st.actual["corr.000.vkick"] = -2.0e-4
+        self.assertAlmostEqual(A.resolve(self.view, "actual.corr.000.hkick"), 1.5e-4)
+        self.assertAlmostEqual(A.resolve(self.view, "actual.corr.000.vkick"), -2.0e-4)
+        self.assertIsNone(A.resolve(self.view, "actual.corr.999.hkick"))        # нет такого актуатора
+        m = A.meta("actual.corr.000.hkick")
+        self.assertEqual(m.units, "рад")
+        self.assertEqual(m.widget, A.W_GRAPH)
+
+    def test_resolve_undulator_gap_and_target(self):
+        from client import addresses as A
+        self.assertAlmostEqual(A.resolve(self.view, "undulator.und_01.gap"), 7.0)
+        self.st.undulators["und_01"].command(9.0)                              # ручка: уставка
+        self.assertAlmostEqual(A.resolve(self.view, "undulator.und_01.gap_target"), 9.0)
+        self.assertAlmostEqual(A.resolve(self.view, "undulator.und_01.gap"), 7.0)  # реализованный ещё не поехал
+
+    def test_resolve_optics_scalar_and_at_magnet(self):
+        from client import addresses as A
+        self.assertAlmostEqual(A.resolve(self.view, "optics.nux"), 42.125)
+        self.assertAlmostEqual(A.resolve(self.view, "optics.alphac"), 7.0e-5)
+        self.assertAlmostEqual(A.resolve(self.view, "optics.beta_x@q1"), 20.0)  # s_out[0]=1 → срез β=20
+        self.assertIsNone(A.resolve(self.view, "optics.beta_x@nope"))           # нет магнита → None
+
+    def test_resolve_always_serializable(self):
+        from client import addresses as A
+        for a in ("obs.ebpm.x", "obs.ebpm.x:rms", "drive.corr.000.hkick.slew",
+                  "drive.corr.000.hkick.act", "undulator.und_01.gap", "optics.nux"):
+            v = A.resolve(self.view, a)
+            self.assertIsInstance(v, (float, bool, list), f"{a}→{type(v)}")
+            if isinstance(v, list):
+                self.assertTrue(all(isinstance(x, float) for x in v))
+
+    def test_meta_widget_and_units(self):
+        from client import addresses as A
+        self.assertEqual(A.meta("obs.ebpm.x").widget, A.W_VECTOR)
+        self.assertEqual(A.meta("obs.ebpm.x:rms").widget, A.W_GRAPH)
+        self.assertEqual(A.meta("undulator.und_01.gap").units, "мм")
+        self.assertEqual(A.meta("drive.corr.000.hkick.slew").kind, "drive")
+
+
+class TestClientDiagnostics(unittest.TestCase):
+    """Стандартный график «η-узор и моды FOFB» (diag.orbit_modes): чистая сводка мод, сборка данных на
+    фейках (без ring_cpp), сериализуемость через шов Link, кэш движка с инвалидацией по rcond, метаданные адреса."""
+
+    def _fakes(self, rcond=1e-2):
+        from types import SimpleNamespace as NS
+        from control.controller import ResponseMatrix
+        rng = np.random.default_rng(3)
+        U, _ = np.linalg.qr(rng.normal(size=(8, 3)))
+        V, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+        R = U @ np.diag([1.0, 0.5, 0.005]) @ V.T                    # 8 BPM × 3 корректора, одна слабая мода
+        eta = 0.6 * U[:, 0] + 0.8 * U[:, 2]                          # η: 60% в сильной моде, 80% — в слабой
+        act = ["corr.000.hkick", "corr.001.hkick", "corr.002.hkick"]
+        ctrl = NS(act=act, sensor="ebpm.x", params={"rcond": rcond})
+        loops = {"fofb_x": NS(controller=ctrl)}
+        res = NS(response=lambda a, o: ResponseMatrix(R, [f"b{i}" for i in range(8)], a))
+        mon = np.arange(2, 10)
+        etax = np.zeros(12); etax[mon] = eta
+        plant = NS(mon=mon, ring=None)
+        state = NS(optics=NS(etax=etax))
+        return R, eta, plant, state, loops, res, ctrl
+
+    def test_modes_summary_counts_and_eta_reach(self):
+        from client.diagnostics import modes_summary
+        R, eta, *_ = self._fakes()
+        d = modes_summary(R, eta, 1e-2)
+        self.assertEqual(d["n_modes"], 3)
+        self.assertEqual(d["n_kept"], 2)                             # 0.005 < 1e-2 — слабая мода отброшена
+        np.testing.assert_allclose(d["sv"], [1.0, 0.5, 0.005], rtol=1e-12)
+        self.assertAlmostEqual(d["eta_reach"], 0.6, places=12)       # в подпространстве 2 мод — только 60%
+        self.assertAlmostEqual(d["eta_reach_full"], 1.0, places=12)
+        self.assertEqual(modes_summary(R, eta, 1e-4)["n_kept"], 3)   # «без усечения» — все моды
+
+    def test_orbit_modes_serializable_and_engine_cache(self):
+        import json
+        from types import SimpleNamespace as NS
+        from client import InProcLink, addresses as A
+        from client.diagnostics import orbit_modes
+        from client.engine import EngineThread
+        R, eta, plant, state, loops, res, ctrl = self._fakes()
+        d = orbit_modes(plant, state, loops, res)
+        json.dumps(d)                                                 # шов Link: только числа/строки
+        np.testing.assert_allclose(d["eta_bpm"], eta)                 # η в BPM — как у датчика контура ВЧ
+        np.testing.assert_allclose(np.asarray(d["cols"]).T, R)        # столбцы = бетатронные волны корректоров
+        self.assertEqual(d["corr_ids"], ctrl.act)
+        self.assertIn("error", orbit_modes(plant, state, {}, res))    # нет контура — ошибка, не исключение
+        eng = EngineThread(InProcLink(), NS(state=state, plant=plant, loops=loops, resources=res))
+        v1 = eng._diag_value("diag.orbit_modes")
+        self.assertIs(eng._diag_value("diag.orbit_modes"), v1)        # статично: считается один раз
+        ctrl.params["rcond"] = 1e-4                                   # смена rcond → пересчёт
+        v2 = eng._diag_value("diag.orbit_modes")
+        self.assertIsNot(v2, v1)
+        self.assertEqual(v2["n_kept"], 3)
+        self.assertIn("error", eng._diag_value("diag.bogus"))
+        m = A.meta("diag.orbit_modes")
+        self.assertEqual((m.kind, m.widget, m.name), ("diag", A.W_INFO, "η-узор и моды FOFB"))
+        self.assertIsNone(A.resolve(None, "diag.orbit_modes"))        # считает движок, не resolve
+
+
+class TestClientLink(unittest.TestCase):
+    """Этап 0: InProcLink проходит круг subscribe→snapshot на ФЕЙКОВОМ цикле (без реального движка).
+    Проверяем транспорт: подписки ведутся, команды/контроль доходят сообщениями, снимок с числами и
+    метой возвращается последним-побеждает, poll до публикации — None, unsubscribe снимает подписку."""
+
+    def test_subscribe_command_snapshot_round_trip(self):
+        from client import InProcLink, Snapshot, Message, addresses as A
+        from client.link import COMMAND, CONTROL
+        from control import StateView
+        st = _seed_client_state()
+        link = InProcLink()
+
+        self.assertIsNone(link.poll_snapshot())                    # до публикации — пусто
+
+        # --- клиент ---
+        link.subscribe("obs.ebpm.x")
+        link.subscribe("undulator.und_01.gap_target")
+        link.command("undulator.und_01.gap_target", 9.0)
+        link.control("run")
+
+        # --- фейковый движок: осушить сообщения, применить, опубликовать снимок подписанного ---
+        msgs = link.pull()
+        kinds = [m.kind for m in msgs]
+        self.assertIn(COMMAND, kinds)
+        self.assertIn(CONTROL, kinds)
+        self.assertEqual(next(m.value for m in msgs if m.kind == CONTROL), "run")
+        for m in msgs:                                              # штатный путь ручки: команда → доска
+            if m.kind == COMMAND and m.addr == "undulator.und_01.gap_target":
+                st.undulators["und_01"].command(m.value)
+        self.assertEqual(link.subscriptions(), {"obs.ebpm.x", "undulator.und_01.gap_target"})
+        view = StateView(st)
+        values = {a: A.resolve(view, a) for a in link.subscriptions()}
+        link.publish(Snapshot(values=values, meta={"model_time": 0.0, "cycle": 1, "seq": 1, "speed": 0.0}))
+
+        # --- клиент видит кадр ---
+        snap = link.poll_snapshot()
+        self.assertIsNotNone(snap)
+        self.assertEqual(snap.values["obs.ebpm.x"], [1.0e-6, -2.0e-6, 3.0e-6])
+        self.assertAlmostEqual(snap.values["undulator.und_01.gap_target"], 9.0)  # ручка отразилась
+        self.assertEqual(snap.meta["cycle"], 1)
+
+    def test_unsubscribe_and_latest_wins(self):
+        from client import InProcLink, Snapshot
+        link = InProcLink()
+        link.subscribe("a"); link.subscribe("b")
+        link.pull()
+        self.assertEqual(link.subscriptions(), {"a", "b"})
+        link.unsubscribe("a"); link.pull()
+        self.assertEqual(link.subscriptions(), {"b"})
+        link.publish(Snapshot(values={"b": 1.0}, meta={"seq": 1}))
+        link.publish(Snapshot(values={"b": 2.0}, meta={"seq": 2}))   # последний побеждает
+        self.assertEqual(link.poll_snapshot().values["b"], 2.0)
+        self.assertEqual(link.poll_snapshot().meta["seq"], 2)
+
+
+class _FakeInfinitePlant:
+    """Лёгкий plant по контракту Plant для тестов движка БЕЗ ring_cpp: ведёт зазор штатно (plant.advance),
+    двигает «орбиту» с каждым шагом (чтобы было что публиковать). Мгновенный привод зазора (slew велик)."""
+
+    def __init__(self):
+        from control import Schema
+        self._schema = Schema(["corr.000.hkick", "corr.000.vkick"])
+        self.stride = 1
+        self.TREV = 1.0e-6
+        self.turn = 0
+        self.alive = True
+
+    def schema(self):
+        return self._schema
+
+    def history(self):
+        return None
+
+    def reset(self, state):
+        from control import UndulatorConfig
+        self.turn = 0
+        self.alive = True
+        state.observables["ebpm.x"] = np.zeros(3)
+        state.undulators.setdefault(
+            "und_01", UndulatorConfig(7.0, name="und_01", slew_mm_s=1.0e6, gap_min=5.0, gap_max=20.0))
+
+    def step(self, state, dt):
+        for u in state.undulators.values():          # ШТАТНЫЙ путь: plant реализует зазор к уставке
+            u.advance(dt)
+        self.turn += 1
+        state.observables["ebpm.x"] = np.array([1.0e-6 * self.turn, -1.0e-6, 2.0e-6])
+
+    def fingerprint(self):
+        return ("fake-inf",)
+
+
+class TestClientEngine(unittest.TestCase):
+    """Этап 1 (headless, фейк-plant — всегда): EngineThread гоняет поток, фейк-клиент подписан на obs.ebpm.x
+    и зазор, командует смену зазора и видит отражение; оценка скорости > 0; пуск/стоп управляют циклом."""
+
+    def _wait(self, link, cond, timeout=5.0):
+        import time as _t
+        end = _t.time() + timeout
+        snap = None
+        while _t.time() < end:
+            snap = link.poll_snapshot()
+            if snap is not None and cond(snap):
+                return snap
+            _t.sleep(0.005)
+        return snap
+
+    def test_thread_runs_commands_and_reflects_gap(self):
+        import time as _t
+        from client import InProcLink
+        from client.engine import EngineThread
+        from control import ExperimentState, Scheduler
+
+        plant = _FakeInfinitePlant()
+        state = ExperimentState(plant.schema())
+        sch = Scheduler(plant, state, dt=1.0e-3)
+        link = InProcLink()
+        eng = EngineThread(link, sch, steps_per_cycle=1, idle_sleep=0.002)
+
+        link.subscribe("obs.ebpm.x")
+        link.subscribe("undulator.und_01.gap")
+        link.subscribe("undulator.und_01.gap_target")
+        link.subscribe("meta.speed")
+        link.control("run")
+        link.command("undulator.und_01.gap", 9.0)      # ручка: штатный путь команда → доска → plant
+        link.command("undulator.bogus.gap", 1.0)       # нераспознанное — не должно ронять поток
+
+        eng.start()
+        try:
+            snap = self._wait(link, lambda s: s.meta.get("cycle", 0) >= 3
+                              and abs((s.values.get("undulator.und_01.gap") or 0.0) - 9.0) < 1e-6)
+            self.assertIsNotNone(snap, "движок не опубликовал ожидаемый кадр")
+            self.assertGreaterEqual(snap.meta["cycle"], 3)                 # поток реально шагал
+            self.assertAlmostEqual(snap.values["undulator.und_01.gap_target"], 9.0)
+            self.assertAlmostEqual(snap.values["undulator.und_01.gap"], 9.0)   # реализованный зазор отразил ручку
+            self.assertEqual(len(snap.values["obs.ebpm.x"]), 3)            # наблюдаемая течёт
+            self.assertGreater(snap.meta["speed"], 0.0)                    # оценка скорости > 0
+            self.assertEqual(snap.meta.get("unknown_command"), "undulator.bogus.gap")
+
+            # --- стоп замораживает цикл ---
+            link.control("stop")
+            _t.sleep(0.05)
+            c0 = link.poll_snapshot().meta["cycle"]
+            _t.sleep(0.1)
+            self.assertEqual(link.poll_snapshot().meta["cycle"], c0)       # на паузе цикл не растёт
+            self.assertFalse(link.poll_snapshot().meta["running"])
+        finally:
+            eng.stop()
+            eng.join(timeout=5)
+        self.assertFalse(eng.is_alive())                                   # поток погашен
+
+    def test_restart_resets_model_time(self):
+        import time as _t
+        from client import InProcLink
+        from client.engine import EngineThread
+        from control import ExperimentState, Scheduler
+
+        plant = _FakeInfinitePlant()
+        state = ExperimentState(plant.schema())
+        sch = Scheduler(plant, state, dt=1.0e-3)
+        link = InProcLink()
+        eng = EngineThread(link, sch, steps_per_cycle=1, idle_sleep=0.002)
+        link.subscribe("meta.model_time")
+        link.control("run")
+        eng.start()
+        try:
+            self._wait(link, lambda s: s.meta.get("model_time", 0.0) > 3e-3)
+            link.control("stop")                                           # пауза — чтобы рестарт не гнал мгновенно
+            link.control("restart")                                        # сброс (сохраняет режим паузы)
+            snap = self._wait(link, lambda s: not s.meta.get("running", True)
+                              and s.meta.get("model_time", 1.0) == 0.0)
+            self.assertIsNotNone(snap)
+            self.assertEqual(snap.meta["model_time"], 0.0)                 # время сброшено рестартом
+            self.assertFalse(snap.meta["running"])
+        finally:
+            eng.stop()
+            eng.join(timeout=5)
+
+    def test_publish_cadence_decoupled_from_steps(self):
+        """Публикация раз в publish_every тактов, развязана от шага. Фейк-plant: turn += 1/такт, stride=1;
+        в момент снимка turn == cycle·publish_every (движок трекает КАЖДЫЙ такт, а снимок — раз в K)."""
+        from client import InProcLink
+        from client.engine import EngineThread
+        from control import ExperimentState, Scheduler
+
+        K = 4
+        plant = _FakeInfinitePlant()
+        state = ExperimentState(plant.schema())
+        sch = Scheduler(plant, state, dt=1.0e-3)
+        link = InProcLink()
+        eng = EngineThread(link, sch, steps_per_cycle=1, publish_every=K, idle_sleep=0.002)
+        self.assertEqual(eng.publish_every, K)
+        link.subscribe("meta.turn")
+        link.control("run")
+        eng.start()
+        try:
+            snap = self._wait(link, lambda s: s.meta.get("cycle", 0) >= 2)
+            self.assertIsNotNone(snap, "движок не опубликовал кадр")
+            self.assertGreaterEqual(snap.meta["cycle"], 2)
+            # инвариант развязки: трекается каждый такт, публикуется раз в K → turn кратен K·cycle
+            self.assertEqual(snap.meta["turn"], snap.meta["cycle"] * K)
+        finally:
+            eng.stop()
+            eng.join(timeout=5)
+        self.assertFalse(eng.is_alive())
+
+    def test_publish_every_clamped_to_one(self):
+        """publish_every < 1 зажимается в 1 (каждый такт = снимок) — не делить на ноль / не зависнуть."""
+        from client import InProcLink
+        from client.engine import EngineThread
+        from control import ExperimentState, Scheduler
+
+        plant = _FakeInfinitePlant()
+        state = ExperimentState(plant.schema())
+        sch = Scheduler(plant, state, dt=1.0e-3)
+        eng = EngineThread(InProcLink(), sch, steps_per_cycle=1, publish_every=0)
+        self.assertEqual(eng.publish_every, 1)
+
+
+class _StubMag:
+    def __init__(self, x, y, kind="drift"):
+        self.center = np.array([float(x), float(y), 0.0])
+        self.kind = kind
+
+
+class _StubRing:
+    def __init__(self, mags):
+        self.mags = mags
+        self.circumference = 10.0
+
+
+class _StubRingPlant:
+    """Фейк-plant с минимальным кольцом (без ring_cpp) — для headless-тестов геометрии сцены."""
+    def __init__(self):
+        self.ring = _StubRing([_StubMag(0, 0), _StubMag(1, 0, "monitor"),
+                               _StubMag(2, 1), _StubMag(3, 1, "monitor")])
+        self.lattice = 26
+        self.gap_mm = 5.0
+        self._und_anchor = {"und_01": 2}
+
+
+class TestClientScene(unittest.TestCase):
+    """Этап 2 (headless): чистая геометрия сцены — узел из plant'а и модель актёров, без PyVista/Qt."""
+
+    def test_build_geometry_from_stub_ring(self):
+        from client import scene3d
+        from control import ExperimentState, Schema, UndulatorConfig
+        st = ExperimentState(Schema(["a"]))
+        st.undulators["und_01"] = UndulatorConfig(7.0, name="und_01")
+        g = scene3d.build_geometry(_StubRingPlant(), st)
+        self.assertEqual(len(g["centers"]), 4)
+        self.assertEqual(len(g["mon_xy"]), 2)                    # два монитора
+        self.assertIn("und_01", g["undulators"])
+        self.assertEqual(g["undulators"]["und_01"]["xy"], [2.0, 1.0])
+        self.assertAlmostEqual(g["undulators"]["und_01"]["gap_mm"], 7.0)  # живой зазор с доски
+
+    def test_scene_model_jaws_monotonic_in_gap(self):
+        from client import scene3d
+        model = scene3d.SceneModel({"undulators": {"u": {"xy": [1.0, 2.0]}}}, gap_scale=100.0)
+        up5, lo5 = model.undulator_jaws("u", 5.0)
+        up10, lo10 = model.undulator_jaws("u", 10.0)
+        self.assertEqual(up5[:2], [1.0, 2.0])                    # челюсть над осью пучка (x,y)
+        self.assertGreater(up10[2], up5[2])                      # шире зазор → выше верхняя челюсть
+        self.assertLess(lo10[2], lo5[2])                         # и ниже нижняя
+        self.assertAlmostEqual(up5[2], -lo5[2])                  # симметрично вокруг оси
+
+    def test_scene_model_empty_ring_is_safe(self):
+        from client import scene3d
+        from control import ExperimentState, Schema
+        g = scene3d.build_geometry(_FakeInfinitePlant(), ExperimentState(Schema(["a"])))
+        model = scene3d.SceneModel(g)
+        self.assertEqual(len(model.ring_polyline()), 0)          # нет кольца — пустой обвод
+        self.assertIsNone(model.start_plane())
+        self.assertIsNone(model.bbox())
+
+    def test_named_elements_and_picking(self):
+        from client import scene3d
+        from control import ExperimentState, Schema
+        g = scene3d.build_geometry(_StubRingPlant(), ExperimentState(Schema(["a"])))
+        self.assertEqual(len(g["named"]), 4)                     # все 4 стаб-элемента адресуемы
+        model = scene3d.SceneModel(g)
+        hit = model.nearest_named(2.9, 1.1)                      # ближе всего к (3,1) — SP01.BPM.1? имя из стаба нет
+        self.assertIsNotNone(hit)
+        idx, name, kind, dist = hit
+        self.assertEqual(model.named[idx]["xy"], [3.0, 1.0])     # верный ближайший элемент
+        self.assertLess(dist, 0.3)
+        self.assertEqual(len(model.named_points()), 4)
+
+    def test_composite_plant_delegates_to_tbt(self):
+        """CompositePlant делегирует ring-атрибуты в .tbt (фикс пустой 3D-сцены/меты при optics=True)."""
+        import types
+        from control.composite_plant import CompositePlant
+        cp = object.__new__(CompositePlant)
+        cp.tbt = types.SimpleNamespace(ring="RING", lattice=26, turn=7, alive=True, corr=[0, 5])
+        self.assertEqual(cp.ring, "RING")
+        self.assertEqual(cp.lattice, 26)
+        self.assertEqual(cp.turn, 7)
+        self.assertIs(cp.alive, True)
+        self.assertEqual(cp.corr, [0, 5])
+        with self.assertRaises(AttributeError):
+            _ = cp.no_such_attr_xyz
+
+    def test_corrector_aids_and_tbt_unwrap(self):
+        """build_geometry разворачивает CompositePlant (.tbt) и даёт корректору actuator-id (actual-адрес кика)."""
+        from client import scene3d
+        from control import ExperimentState, Schema
+
+        class _M:
+            def __init__(self, x, kind, dev=""):
+                self.center = np.array([float(x), 0.0, 0.0]); self.kind = kind; self.dev = dev
+
+        class _Ring:
+            def __init__(self, mags): self.mags = mags; self.circumference = 10.0
+
+        class _Tbt:
+            def __init__(self):
+                self.ring = _Ring([_M(0, "corrector", "und_SH1A"), _M(1, "quad", "QP"), _M(2, "monitor", "BPM")])
+                self.lattice = 26; self.gap_mm = 5.0; self._und_anchor = {}; self.corr = [0]   # корректор ring-idx 0 → актуатор 0
+
+        class _Comp:                                       # имитация CompositePlant: делегирует в .tbt
+            def __init__(self): self.tbt = _Tbt()
+            def __getattr__(self, n): return getattr(self.__dict__["tbt"], n)
+
+        g = scene3d.build_geometry(_Comp(), ExperimentState(Schema(["a"])))
+        self.assertGreaterEqual(len(g["named"]), 3)                # сцена НЕ пустая (разворот .tbt сработал)
+        corr = [n for n in g["named"] if n["kind"] == "corrector"]
+        self.assertTrue(corr and corr[0].get("aids") == ["corr.000.hkick", "corr.000.vkick"])
+        quad = [n for n in g["named"] if n["kind"] == "quad"]
+        self.assertTrue(quad and "aids" not in quad[0])            # у не-корректора aids нет (семейного id нет в схеме)
+
+    def test_family_gradient_aids_and_realized_dk(self):
+        """Квадруполь/секступоль/октуполь получают id СЕМЕЙНОЙ Δk (контур оптики) — если он есть в схеме
+        plant'а; info_fields добавляет живое поле actual.<famid>. Так магнит показывает реализованную контуром
+        коррекцию (двигается при вкл/выкл ОС), а element.k* остаётся проектным."""
+        from client import scene3d
+        from client.windows import info_fields
+        from control import ExperimentState, Schema
+
+        class _M:
+            def __init__(self, x, kind, dev):
+                self.center = np.array([float(x), 0.0, 0.0]); self.kind = kind; self.dev = dev
+
+        class _Ring:
+            def __init__(self, mags): self.mags = mags; self.circumference = 10.0
+
+        class _P:
+            def __init__(self):
+                self.ring = _Ring([_M(0, "quad", "und_QF1A"), _M(1, "sext", "und_SD1A"),
+                                   _M(2, "oct", "und_OD1B")])
+                self.lattice = 26; self.gap_mm = 5.0; self._und_anchor = {}
+                # схема содержит семейные градиентные id (как у CompositePlant при optics=True)
+                self._ids = ["quad.und_QF1A.dk", "sext.und_SD1A.dk2", "oct.und_OD1B.dk3"]
+            def schema(self): return Schema(self._ids)
+
+        g = scene3d.build_geometry(_P(), ExperimentState(Schema(["a"])))
+        byk = {n["kind"]: n for n in g["named"]}
+        self.assertEqual(byk["quad"].get("aids"), ["quad.und_QF1A.dk"])   # семейный id присвоен
+        self.assertEqual(byk["sext"].get("aids"), ["sext.und_SD1A.dk2"])
+        self.assertEqual(byk["oct"].get("aids"), ["oct.und_OD1B.dk3"])
+        # info_fields проводит его в живое поле actual.<famid> рядом с проектным element.k*
+        rows = [r[0] for r in info_fields("quad", byk["quad"]["name"], byk["quad"]["aids"])]
+        self.assertIn("actual.quad.und_QF1A.dk", rows)                    # ЖИВАЯ Δk контура
+        self.assertIn(f"element.{byk['quad']['name']}.k1", rows)          # проектный градиент остаётся
+        # нет семейного id в схеме → aids не присваивается (optics=False), поля actual нет
+        class _P0(_P):
+            def schema(self): return Schema(["corr.000.hkick"])
+        g0 = scene3d.build_geometry(_P0(), ExperimentState(Schema(["a"])))
+        self.assertNotIn("aids", [n for n in g0["named"] if n["kind"] == "quad"][0])
+
+    def test_screen_live_gap_fallback_from_id(self):
+        """ScreenRecorder._live_gap: экран БЕЗ строки source_ref в screens.csv берёт ондулятор из id экрана
+        (SCR_<gid>→<gid>). Раньше такой экран читал зашитый GAP_MM и выглядел как включённый."""
+        from control.recorders import ScreenRecorder, GAP_MM
+        from control.state import UndulatorConfig
+
+        class _St:
+            undulators = {"und_01": UndulatorConfig(gid="und_01", gap_mm=5.0),
+                          "und_07": UndulatorConfig(gid="und_07", gap_mm=50.0)}
+        st = _St()
+        self.assertAlmostEqual(ScreenRecorder(params="SCR_und_07")._live_gap(st), 50.0)   # фолбэк из id
+        self.assertNotAlmostEqual(50.0, GAP_MM)                          # и это НЕ зашитый дефолт
+        # неизвестный источник → зашитый GAP_MM (поведение по умолчанию сохранено)
+        self.assertAlmostEqual(ScreenRecorder(params="SCR_zzz")._live_gap(st), GAP_MM)
+
+    def test_magnet_boxes_oriented_and_typed(self):
+        from client import scene3d
+        g = {"centers": [[0, 0], [10, 0]],
+             "magnets": [{"name": "Q1", "c": [5.0, 0.0], "ax": [1.0, 0.0], "ux": [0.0, 1.0], "L": 0.4, "kind": "quad"},
+                         {"name": "B1", "c": [6.0, 0.0], "ax": [1.0, 0.0], "ux": [0.0, 1.0], "L": 1.0, "kind": "dipole"}]}
+        boxes = scene3d.SceneModel(g).magnet_boxes()
+        self.assertEqual(len(boxes), 2)
+        c, a, u, hl, hw, hh, kind = boxes[0]
+        self.assertEqual(kind, "quad")
+        self.assertTrue(hl > 0 and hw > 0 and hh > 0)            # невырожденный блок
+        self.assertAlmostEqual(float(a[0]), 1.0)                 # ось вдоль пучка (x)
+        self.assertGreater(boxes[1][3], boxes[0][3])             # диполь длиннее квадруполя → больше блок
+
+    def test_build_geometry_includes_magnet_bodies(self):
+        from client import scene3d
+
+        class _M:
+            def __init__(self, x, kind, L):
+                self.center = np.array([float(x), 0.0, 0.0]); self.kind = kind; self.L = float(L)
+                self.dev = ""; self.axis = np.array([1.0, 0.0, 0.0]); self.uhat = np.array([0.0, 1.0, 0.0])
+
+        class _R:
+            def __init__(self):
+                self.mags = [_M(0, "drift", 0.0), _M(1, "quad", 0.4), _M(2, "dipole", 1.0)]
+                self.circumference = 5.0
+
+        class _P:
+            def __init__(self):
+                self.ring = _R(); self.lattice = 26; self.gap_mm = 5.0; self._und_anchor = {}
+
+        g = scene3d.build_geometry(_P())
+        self.assertEqual(sorted(mg["kind"] for mg in g["magnets"]), ["dipole", "quad"])  # дрейф тела не имеет
+        self.assertEqual(g["magnets"][0]["ax"], [1.0, 0.0])
+
+    def test_pick_only_magnets_with_distance_gate(self):
+        from client import scene3d
+        g = {"centers": [[0, 0], [10, 0]],
+             "named": [{"name": "Q1", "xy": [0.0, 0.0], "kind": "quad"},
+                       {"name": "DR", "xy": [5.0, 0.0], "kind": "drift"}]}
+        m = scene3d.SceneModel(g)
+        self.assertEqual(m.nearest_named(5.0, 0.0)[1], "Q1")           # дрейф не пикаем → ближайший магнит
+        self.assertIsNone(m.nearest_named(100.0, 0.0, max_dist=2.0))   # клик далеко от магнитов → None
+        self.assertIsNotNone(m.nearest_named(0.3, 0.0, max_dist=2.0))  # у магнита → есть
+
+    def test_pick_by_body_tag_returns_that_type(self):
+        from client import scene3d
+        g = {"centers": [[0, 0], [10, 0]],
+             "named": [{"name": "QF1A", "xy": [0.0, 0.0], "kind": "quad", "dev": "und_QF1A"},
+                       {"name": "DL1E", "xy": [0.3, 0.0], "kind": "dipole", "dev": "und_DL1E"}]}
+        m = scene3d.SceneModel(g)
+        # точка ближе к центру диполя, НО кликнули по телу квадруполя (tag) → вернётся квадруполь, не сосед
+        self.assertEqual(m.nearest_named(0.25, 0.0, tag="und_QF1A")[1], "QF1A")
+        self.assertEqual(m.nearest_named(0.25, 0.0)[1], "DL1E")        # без тега — ближайший центр (сосед)
+
+    def test_build_geometry_screens_from_undulator_anchor(self):
+        from client import scene3d
+        if not os.path.exists(os.path.join(scene3d._project_root(), "workspace", "tables", "screens.csv")):
+            self.skipTest("нет screens.csv")
+        g = scene3d.build_geometry(_StubRingPlant())
+        if "und_01" not in [s["gid"] for s in g["screens"]]:
+            self.skipTest("в screens.csv нет источника und_01")
+        sc = next(s for s in g["screens"] if s["gid"] == "und_01")
+        self.assertEqual(sc["src"], [2.0, 1.0])                        # источник = живой якорь und_01 (mags[2])
+        self.assertEqual(len(sc["center"]), 2)                         # центр экрана посчитан
+
+    def test_start_plane_uses_beam_start_at_origin(self):
+        from client import scene3d
+        g = {"centers": [[5.0, 0.0], [6.0, 0.0]], "beam_start": {"pos": [0.0, 0.0], "dir": [1.0, 0.0]}}
+        (cx, cy, _), (nx, ny, _) = scene3d.SceneModel(g).start_plane()
+        self.assertEqual([cx, cy], [0.0, 0.0])                         # s=0 в начале координат, НЕ у centers[0]
+        self.assertEqual([nx, ny], [1.0, 0.0])
+        (cx2, cy2, _), _ = scene3d.SceneModel({"centers": [[5.0, 0.0], [6.0, 0.0]]}).start_plane()
+        self.assertEqual([cx2, cy2], [5.0, 0.0])                       # без beam_start — у первого элемента
+
+    def test_build_geometry_sensors_and_nearest(self):
+        from client import scene3d
+        g = scene3d.build_geometry(_StubRingPlant())
+        self.assertEqual(len(g["sensors"]), 2)                        # два монитора → два сенсора
+        self.assertEqual([s["idx"] for s in g["sensors"]], [0, 1])    # idx = порядок = индекс ebpm
+        s = scene3d.SceneModel(g).nearest_sensor(3.0, 1.0)
+        self.assertEqual(s["xy"], [3.0, 1.0])                         # ближайший сенсор к (3,1)
+
+    @unittest.skipUnless(os.environ.get("SS_GUI_SMOKE") == "1",
+                         "opt-in: НАСТОЯЩИЕ STL-тела (pyvista+visualize+STL) — SS_GUI_SMOKE=1")
+    def test_stl_bodies_real_device(self):
+        from client import scene3d
+        try:
+            import pyvista  # noqa: F401
+            import visualize  # noqa: F401
+        except Exception as e:
+            self.skipTest(f"нет pyvista/visualize: {e}")
+        hwp = os.path.join(scene3d._project_root(), "workspace", "tables", "hardware_library.csv")
+        if not os.path.exists(hwp):
+            self.skipTest("нет hardware_library.csv")
+        mags = [{"dev": "und_UFC", "t": [0.0, 0.0, 0.0, 1.0, 2.0, 0.0], "kind": "quad"}]
+        meshes = scene3d.build_magnet_stl_meshes(mags)   # STL-инстанс без построения кольца
+        if not meshes:
+            self.skipTest("STL для und_UFC недоступен в этой сборке")
+        self.assertIn("und_UFC", meshes)
+        mesh, kind = meshes["und_UFC"]
+        self.assertEqual(kind, "quad")
+        self.assertGreater(len(mesh.points), 0)          # меш реально собран из STL
+
+
+class TestClientPanelFormat(unittest.TestCase):
+    """Этап 2 (headless): чистое форматирование панели времени/скорости (без Qt-окна)."""
+
+    def test_format_meta_strings(self):
+        from client.cockpit import format_meta
+        f = format_meta({"running": True, "model_time": 0.01234, "wall_time": 2.5,
+                         "speed": 4.9e-3, "cycle": 7, "turn": 105, "alive": True})
+        self.assertEqual(f["running"], "БЕЖИТ")
+        self.assertIn("мс", f["model_time"])                     # 12.34 мс
+        self.assertIn("×реал", f["speed"])
+        self.assertEqual(f["cycle"], "7")
+        self.assertEqual(f["alive"], "жив")
+        self.assertEqual(format_meta({"running": False})["running"], "ПАУЗА")
+        self.assertEqual(format_meta({"alive": False})["alive"], "ПОТЕРЯН")
+
+
+class TestClientLayout(unittest.TestCase):
+    """Этап 6 (headless): персистентность раскладки — make_layout + save/load/list round-trip (чистый JSON)."""
+
+    def setUp(self):
+        from client import layout as L
+        self.L = L
+        self.proj = "unittest_tmp_layout"
+        import shutil
+        shutil.rmtree(L.layout_dir(self.proj), ignore_errors=True)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.L.layout_dir(self.proj), ignore_errors=True)
+
+    def test_make_save_load_list(self):
+        wins = [{"kind": "graph", "params": {"addr": "obs.ebpm.x:rms"}, "geom": [0, 0, 400, 300], "state": "normal"},
+                {"kind": "info", "params": {"element": "SP01.QF1A"}, "geom": [10, 10, 300, 200], "state": "min"}]
+        data = self.L.make_layout(wins, camera=[[1, 2, 3], [0, 0, 0], [0, 0, 1]], docks={"tree": True})
+        self.assertEqual(data["version"], self.L.VERSION)
+        p = self.L.save_layout(self.proj, "раскладка1", data)
+        self.assertTrue(os.path.exists(p))
+        got = self.L.load_layout(self.proj, "раскладка1")
+        self.assertEqual(got["windows"][0]["params"]["addr"], "obs.ebpm.x:rms")
+        self.assertEqual(got["camera"][0], [1, 2, 3])
+        self.assertIn("раскладка1", self.L.list_layouts(self.proj))
+        self.assertIsNone(self.L.load_layout(self.proj, "нет-такой"))
+        self.L.save_last(self.proj, data)
+        self.assertIsNotNone(self.L.load_last(self.proj))
+
+
+@unittest.skipUnless(os.environ.get("SS_GUI_SMOKE") == "1",
+                     "opt-in offscreen-smoke кокпита: SS_GUI_SMOKE=1 (PyVista+Qt offscreen)")
+class TestClientCockpitOffscreen(unittest.TestCase):
+    """Этапы 2–6 (opt-in): кокпит строится и обновляется offscreen без краха — панель отражает мету,
+    сцена принимает снимок (зазор) и пикинг открывает инфо, окна-подписчики подписываются/обновляются,
+    дерево строится, раскладка сериализуется. Гейт флагом; при ошибке Qt/VTK — skip."""
+
+    def _env(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        import pyvista as pv
+        pv.OFF_SCREEN = True
+        return QApplication.instance() or QApplication([])
+
+    def test_cockpit_offscreen_tick_and_gap(self):
+        try:
+            app = self._env()
+            from client import InProcLink, Snapshot
+            from client.cockpit import Cockpit
+            from client.scene3d import make_ring_scene
+        except Exception as e:
+            self.skipTest(f"нет Qt/PyVista offscreen: {e}")
+        link = InProcLink()
+        win = Cockpit(link, poll_ms=10)
+        try:
+            scene = make_ring_scene(gap_scale=100.0)
+            scene.set_geometry({"centers": [[0, 0], [1, 0], [2, 1]], "mon_xy": [[1, 0]],
+                                "named": [{"name": "SP01.QF1A", "xy": [2.0, 1.0], "kind": "quad"}],
+                                "undulators": {"u": {"xy": [1.0, 0.0], "gap_mm": 5.0}}})
+            win.bind_scene(scene)
+            win.control.set_undulators(["u"])
+            link.publish(Snapshot(values={"undulator.u.gap": 12.0},
+                                  meta={"running": True, "model_time": 3e-3, "wall_time": 1.0,
+                                        "speed": 1.2e-3, "cycle": 5, "seq": 1, "turn": 75, "alive": True}))
+            win._tick()
+            app.processEvents()
+            self.assertEqual(win.control.lbl["cycle"].text(), "5")
+            self.assertIn("мс", win.control.lbl["model_time"].text())
+        finally:
+            win.close()
+
+    def test_subscriber_windows_and_refcount(self):
+        try:
+            app = self._env()
+            from client import InProcLink, Snapshot
+            from client.cockpit import Cockpit
+        except Exception as e:
+            self.skipTest(f"нет Qt offscreen: {e}")
+        link = InProcLink()
+        win = Cockpit(link, poll_ms=10)
+        try:
+            win._open_graph("obs.ebpm.x:rms")               # окно подписалось на адрес
+            link.pull()
+            self.assertIn("obs.ebpm.x:rms", link.subscriptions())
+            link.publish(Snapshot(values={"obs.ebpm.x:rms": 1.5e-6},
+                                  meta={"seq": 1, "model_time": 1e-3}))
+            win._tick()
+            app.processEvents()
+            self.assertEqual(len(win._windows), 1)
+            win._windows[0]._toolwin.close()                # крестик окна снимает подписку
+            app.processEvents()
+            link.pull()
+            self.assertEqual(len(win._windows), 0)
+            self.assertNotIn("obs.ebpm.x:rms", link.subscriptions())
+        finally:
+            win.close()
+
+    def test_point_and_screen_windows_construct(self):
+        try:
+            app = self._env()
+            from client import Snapshot
+            from client.windows import PointWindow, ScreenWindow, make_window
+        except Exception as e:
+            self.skipTest(f"нет Qt/pyqtgraph offscreen: {e}")
+        pw = PointWindow("obs.ebpm.x:0", "obs.ebpm.y:0", trail=50)
+        self.assertEqual(set(pw.addresses()), {"obs.ebpm.x:0", "obs.ebpm.y:0"})
+        pw.on_snapshot(Snapshot(values={"obs.ebpm.x:0": 1e-6, "obs.ebpm.y:0": -2e-6}, meta={}))
+        sw = ScreenWindow("SCR1", mesh=61)
+        self.assertEqual(sw.addresses(), ["screen.SCR1"])
+        sw.on_snapshot(Snapshot(values={"screen.SCR1": {"heatmap": [[1.0, 2.0], [3.0, 4.0]],
+                                                         "e1_series": [[0, 5.0, 7.0]], "gap": 5.0, "e1": 7.0}},
+                                meta={}))
+        sw.on_snapshot(Snapshot(values={"screen.SCR1": {"error": "нет модулей"}}, meta={}))  # ошибка — не крах
+        round_trip = make_window(pw.to_dict())                 # сериализация окна → пересоздание
+        self.assertIsInstance(round_trip, PointWindow)
+        self.assertEqual(round_trip.trail, 50)
+        from client.windows import ScreenInfoWindow            # справка экрана: кнопка → request_open("screen", sid)
+        si = ScreenInfoWindow("SCR_U01")
+        self.assertEqual(si.to_dict()["kind"], "screen_info")
+        got = {}
+        si.request_open.connect(lambda k, a: got.update(kind=k, addr=a))
+        si.request_open.emit("screen", "SCR_U01")
+        self.assertEqual(got, {"kind": "screen", "addr": "SCR_U01"})
+        self.assertIsInstance(make_window(si.to_dict()), ScreenInfoWindow)
+        from client.windows import UndulatorInfoWindow                 # окно ондулятора: живой зазор + ручка
+        uw = UndulatorInfoWindow("und_01")
+        self.assertEqual(uw.addresses(), ["undulator.und_01.gap"])
+        uw.on_snapshot(Snapshot(values={"undulator.und_01.gap": 7.5}, meta={}))
+        self.assertIn("7.5", uw.val.text())
+        self.assertIsInstance(make_window(uw.to_dict()), UndulatorInfoWindow)
+        from client.windows import SensorInfoWindow                   # окно сенсора: параметры + живое x/y
+        sn = SensorInfoWindow(5, name="SP01.BPM.6", pos=[1.0, 2.0, 0.0], sid="42")
+        self.assertEqual(sn.addresses()[:2], ["obs.ebpm.x:5", "obs.ebpm.y:5"])     # живые показания x/y
+        self.assertIn("element.SP01.BPM.6.yaw", sn.addresses())                    # + углы ориентации прибора
+        sn.on_snapshot(Snapshot(values={"obs.ebpm.x:5": 1e-6, "obs.ebpm.y:5": -2e-6}, meta={}))
+        self.assertIn("мкм", sn.vx.text())
+        self.assertIsInstance(make_window(sn.to_dict()), SensorInfoWindow)
+        app.processEvents()
+
+    def test_orbit_modes_window(self):
+        """Стандартный график «η-узор и моды FOFB»: окно рисует данные diag.orbit_modes, ручки δ/корректор
+        перерисовывают, ошибка — текстом, раскладка пересоздаёт окно с параметрами."""
+        try:
+            app = self._env()
+            from client import Snapshot
+            from client.windows import OrbitModesWindow, DIAG_WINDOWS, make_window
+        except Exception as e:
+            self.skipTest(f"нет Qt/pyqtgraph offscreen: {e}")
+        self.assertIs(DIAG_WINDOWS["orbit_modes"], OrbitModesWindow)
+        w = OrbitModesWindow(delta_ppm=50.0, corr=1)
+        self.assertEqual(w.addresses(), ["diag.orbit_modes"])
+        d = {"eta_bpm": [0.01, 0.07, 0.002], "cols": [[1.0, -2.0, 0.5], [3.0, 0.0, -1.0]],
+             "corr_ids": ["corr.000.hkick", "corr.001.hkick"], "sv": [1.0, 0.004], "rcond": 1e-2,
+             "n_kept": 1, "n_modes": 2, "eta_reach": 0.19, "eta_reach_full": 0.75}
+        w.on_snapshot(Snapshot(values={"diag.orbit_modes": d}, meta={}))
+        x, y = w.c_eta.getData()
+        np.testing.assert_allclose(y, np.array(d["eta_bpm"]) * 50.0)          # η·δ, мкм
+        np.testing.assert_allclose(w.c_bet.getData()[1], d["cols"][1])       # волна корректора 1 (×1 мкрад, мкм)
+        self.assertIn("1</b> из 2", w.info.text())
+        self.assertIn("19%", w.info.text())
+        w.sp_corr.setValue(0)
+        np.testing.assert_allclose(w.c_bet.getData()[1], d["cols"][0])
+        w.sp_delta.setValue(200.0)
+        np.testing.assert_allclose(w.c_eta.getData()[1], np.array(d["eta_bpm"]) * 200.0)
+        w.on_snapshot(Snapshot(values={"diag.orbit_modes": {"error": "нет FOFB"}}, meta={}))
+        self.assertIn("нет FOFB", w.info.text())
+        rt = make_window(w.to_dict())
+        self.assertIsInstance(rt, OrbitModesWindow)
+        self.assertEqual((rt.delta_ppm, rt.corr), (200.0, 0))
+        app.processEvents()
+
+    def test_info_redesign_object_specific_links_and_undulators(self):
+        """Редизайн: объекто-специфичное InfoWindow, значения-гиперссылки, цветная карта+спектр+точка,
+        конфиг ондуляторов (один включён), перенос точки через Link.set_screen."""
+        try:
+            self._env()
+            from client import Snapshot, InProcLink
+            from client.link import SET_SCREEN
+            from client.windows import InfoWindow, ValueLink, ScreenWindow, make_window
+        except Exception as e:
+            self.skipTest(f"нет Qt/pyqtgraph offscreen: {e}")
+
+        iq = InfoWindow("Q1", kind="quad")                          # квадруполь: только k1 (не k2/k3/theta0)
+        self.assertIn("element.Q1.k1", iq.addresses())
+        self.assertNotIn("element.Q1.k2", iq.addresses())
+        self.assertNotIn("element.Q1.theta0", iq.addresses())
+        ic = InfoWindow("C1", kind="corrector", aids=["corr.000.hkick", "corr.000.vkick"])
+        self.assertIn("actual.corr.000.hkick", ic.addresses())      # корректор: живые H/V кики
+        self.assertIn("actual.corr.000.vkick", ic.addresses())
+        rt = make_window(ic.to_dict())                              # сериализация сохраняет kind/aids
+        self.assertEqual((rt.kind, rt.aids), ("corrector", ["corr.000.hkick", "corr.000.vkick"]))
+
+        got = {}                                                    # значение-ссылка эмитит request_open
+        vl = ValueLink("element.Q1.k1", emit=lambda k, a: got.update(k=k, a=a))
+        vl._on_link("graph::element.Q1.k1")
+        self.assertEqual(got, {"k": "graph", "a": "element.Q1.k1"})
+        vl._on_link("point::obs.ebpm.x:5|obs.ebpm.y:5")             # point-адрес 'ax|ay' цел (разделитель '::')
+        self.assertEqual(got, {"k": "point", "a": "obs.ebpm.x:5|obs.ebpm.y:5"})
+
+        sw = ScreenWindow("SCR1", mesh=61)                          # цветная карта + extent + настоящий спектр
+        self.assertEqual(sw._point, (0.0, 0.0))
+        sw.on_snapshot(Snapshot(values={"screen.SCR1": {
+            "heatmap": [[1.0, 2.0], [3.0, 4.0]], "extent": [-1, 1, -1, 1],
+            "spectrum": {"E_keV": [5.0, 7.0, 9.0], "flux": [1e3, 1e4, 1e2]}, "gap": 5.0, "e1": 7.0}}, meta={}))
+        self.assertEqual(sw.params()["point"], [0.0, 0.0])
+        self.assertIsInstance(make_window(sw.to_dict()), ScreenWindow)
+
+        from client.cockpit import init_undulators                  # один ондулятор сведён, остальные разведены
+        from control import UndulatorConfig, ExperimentState, Schema
+        st = ExperimentState(Schema(["a"]))
+        for i in (1, 2, 3):
+            st.undulators[f"und_{i:02d}"] = UndulatorConfig(5.0, name=f"und_{i:02d}")
+        init_undulators(st, 500.0)
+        self.assertAlmostEqual(st.undulators["und_01"].gap_mm, 5.0)
+        self.assertAlmostEqual(st.undulators["und_02"].gap_mm, 50.0)
+        self.assertAlmostEqual(st.undulators["und_03"].gap_max, 50.0)
+
+        lk = InProcLink()                                           # set_screen доносит точку спектра до движка
+        lk.set_screen("screen.S", area=None, res=121, point=(0.3, -0.2))
+        ss = [m for m in lk.pull() if m.kind == SET_SCREEN]
+        self.assertTrue(ss and ss[0].value.get("point") == (0.3, -0.2))
+
+    def test_orientation_noise_and_panel_optics(self):
+        """Доп. инфо: углы ориентации прибора (element.*.yaw/pitch/roll), закон+σ шума датчика, и живые
+        тюн/хроматизм/adts на панели управления (клик по значению → график)."""
+        try:
+            self._env()
+            from client import addresses as A
+            from client.windows import info_fields, InfoWindow, SensorInfoWindow
+            from client.cockpit import _optics_specs, ControlPanel
+            from PySide6.QtWidgets import QLabel
+        except Exception as e:
+            self.skipTest(f"нет Qt offscreen: {e}")
+
+        # углы ориентации резолвятся и у любого прибора есть в info_fields (в мрад, scale 1e3)
+        class _MV:
+            def orientation(self, dev): return {"yaw": -6.283, "pitch": 0.0, "roll": 1.5e-3}
+            def position(self, dev): return (0.0, 0.0, 0.0)
+            def field(self, dev): return {"theta0": 0, "k1": 0, "k2": 0, "k3": 0}
+        view = type("V", (), {"machine": _MV(), "actual": None})()
+        self.assertAlmostEqual(A.resolve(view, "element.Q.roll"), 1.5e-3)
+        self.assertEqual(A.meta("element.Q.yaw").units, "рад")
+        ori = [r for r in info_fields("quad", "Q1", None) if r[0].endswith(".yaw")]
+        self.assertTrue(ori and len(ori[0]) > 3 and ori[0][3] == 1e3)          # 4-кортеж со scale рад→мрад
+        self.assertIn("element.Q1.yaw", InfoWindow("Q1", kind="quad").addresses())
+        self.assertTrue(any(r[0].endswith(".yaw") for r in                      # корректор — тоже прибор
+                            info_fields("corrector", "C1", ["corr.000.hkick", "corr.000.vkick"])))
+
+        # сенсор: ориентация + шум (закон + σ в мкм)
+        sw = SensorInfoWindow(0, name="BPM1", pos=[0, 0, 0], sid="B01", meas_noise=1e-7)
+        self.assertIn("element.BPM1.yaw", sw.addresses())
+        texts = " ".join(w.text() for w in sw.findChildren(QLabel))
+        self.assertIn("гауссов белый", texts)                                   # закон шума
+        self.assertIn("0.100 мкм", texts)                                       # σ = 1e-7 м = 0.1 мкм
+        self.assertEqual(SensorInfoWindow.from_params(sw.params()).meas_noise, 1e-7)   # раскладка хранит σ
+
+        # панель: тюн/хроматизм/adts по компонентам, только если наблюдаемая есть
+        st = type("S", (), {"observables": {"ebpm.x": 0, "tune": [0.3, 0.2],
+                                            "chroma": [5., 6.], "adts": [1., 2., 3.]}})()
+        specs = _optics_specs(st)
+        self.assertEqual([s[0] for s in specs],
+                         ["obs.tune:0", "obs.tune:1", "obs.chroma:0", "obs.chroma:1",
+                          "obs.adts:0", "obs.adts:1", "obs.adts:2"])
+        self.assertEqual(_optics_specs(type("S0", (), {"observables": {"ebpm.x": 0}})()), [])   # orbit-only пусто
+        got = []
+        cp = ControlPanel(link=type("L", (), {})())
+        cp.set_optics(specs, lambda k, a: got.append((k, a)))
+        self.assertEqual(len(cp._opt_links), 7)
+        cp.update_optics({"obs.tune:0": 0.3141})
+        self.assertIn("0.3141", cp._opt_links["obs.tune:0"].text())             # живое значение
+        cp._opt_links["obs.tune:0"]._on_link("graph::obs.tune:0")
+        self.assertEqual(got, [("graph", "obs.tune:0")])                        # клик → график (мониторинг)
+
+    def test_pick_opens_info_and_tree_builds(self):
+        try:
+            app = self._env()
+            from client import InProcLink
+            from client.cockpit import Cockpit
+            from client.scene3d import make_ring_scene
+            from control import ExperimentState, Schema, UndulatorConfig
+        except Exception as e:
+            self.skipTest(f"нет Qt/PyVista offscreen: {e}")
+        link = InProcLink()
+        win = Cockpit(link, poll_ms=10)
+        try:
+            scene = make_ring_scene()
+            scene.set_geometry({"centers": [[0, 0], [1, 0], [2, 1]],
+                                "named": [{"name": "SP01.QF1A", "xy": [2.0, 1.0], "kind": "quad"}],
+                                "undulators": {}})
+            win.bind_scene(scene)
+            scene.pick_nearest(2.0, 1.0)                    # пикинг → picked → _open_info
+            app.processEvents()
+            self.assertTrue(any(w.KIND == "info" for w in win._windows))
+            # дерево
+            st = ExperimentState(Schema(["a"]))
+            st.observables["ebpm.x"] = np.zeros(3)
+            st.undulators["und_01"] = UndulatorConfig(7.0, name="und_01")
+            win.build_tree(st, {}, ["SCR1"])
+            self.assertGreaterEqual(win.tree.topLevelItemCount(), 5)
+        finally:
+            win.close()
+
+    def test_rmb_zoom_not_sticky_gates_hover(self):
+        """Регрессия на залипание ПКМ-зума: ПКМ ловится на уровне Qt (`mousePressEvent`/`mouseReleaseEvent`),
+        а НЕ через VTK-наблюдатели (их наличие на Right-Button ломало завершение dolly). Пока ПКМ зажата
+        (`_rmb_down`), hover НЕ пикает. `_rmb_down` переключается синтезированными Qt-событиями ПКМ."""
+        try:
+            self._env()
+            from client.scene3d import make_ring_scene
+        except Exception as e:
+            self.skipTest(f"нет Qt/PyVista offscreen: {e}")
+        scene = make_ring_scene()
+        try:
+            scene.set_geometry({"centers": [[0, 0], [1, 0], [2, 1]],
+                                "named": [{"name": "SP01.QF1A", "xy": [2.0, 1.0], "kind": "quad"}],
+                                "undulators": {}})
+            self.assertFalse(scene._rmb_down)                  # _enable_picking инициализировал флаг
+            # ПКМ — на уровне Qt-виджета, НЕ VTK-наблюдатель (структурная гарантия от залипания):
+            self.assertIn("mousePressEvent", type(scene).__dict__)
+            self.assertIn("mouseReleaseEvent", type(scene).__dict__)
+            # во время ПКМ-зума hover ДОЛЖЕН молчать (не пикать — иначе мешает dolly):
+            scene._rmb_down = True
+            scene._hover_name = "SENTINEL"
+            scene._on_move()
+            self.assertEqual(scene._hover_name, "SENTINEL")    # ранний выход, пик не вызван
+            scene._rmb_down = False
+            # синтезированные Qt-события ПКМ переключают флаг (super() отрабатывает зум VTK):
+            try:
+                from PySide6.QtGui import QMouseEvent
+                from PySide6.QtCore import QPointF, QEvent, Qt
+                def _mev(t):
+                    return QMouseEvent(t, QPointF(10, 10), QPointF(10, 10), Qt.MouseButton.RightButton,
+                                       Qt.MouseButton.RightButton, Qt.KeyboardModifier.NoModifier)
+                scene.mousePressEvent(_mev(QEvent.Type.MouseButtonPress))
+                self.assertTrue(scene._rmb_down)               # зажали ПКМ
+                scene.mouseReleaseEvent(_mev(QEvent.Type.MouseButtonRelease))
+                self.assertFalse(scene._rmb_down)              # отпустили — флаг снят
+            except ImportError:
+                pass                                           # синтез события недоступен — структурных проверок хватает
+        finally:
+            scene.close()
+
+    def test_loops_panel_toggles_and_master(self):
+        """Панель контуров САУ: список по именам файлов логики, переключатели вкл/выкл, мастер на все сразу,
+        синхрон с живым состоянием из снимка."""
+        try:
+            self._env()
+            from client.cockpit import ControlPanel, _loops_info
+            from PySide6.QtCore import Qt
+        except Exception as e:
+            self.skipTest(f"нет Qt offscreen: {e}")
+
+        class _RecLink:                                        # пишет команды, не трогая движок
+            def __init__(self): self.cmds = []
+            def command(self, a, v): self.cmds.append((a, v))
+            def control(self, *a): pass
+
+        # _loops_info достаёт имя файла логики контроллера из Scheduler.loops
+        from control.controllers.integral_svd import IntegralSVD
+
+        class _Spec:
+            def __init__(self, name, en): self.controller = IntegralSVD(name, sensor="ebpm.x",
+                                                                        actuator_key="hkick"); self.enabled = en; self.rate_hz = 2000.0
+        info = _loops_info({"fofb_x": _Spec("fofb_x", True), "fofb_y": _Spec("fofb_y", False)})
+        self.assertEqual({d["name"] for d in info}, {"fofb_x", "fofb_y"})
+        self.assertTrue(all(d["file"].endswith(".py") and "integral_svd" in d["file"] for d in info))
+
+        link = _RecLink()
+        cp = ControlPanel(link)
+        self.assertFalse(cp.box_loops.isVisible())             # пусто → панель скрыта
+        cp.set_loops(info)
+        self.assertEqual(set(cp._loop_chk), {"fofb_x", "fofb_y"})
+        self.assertTrue(cp._loop_chk["fofb_x"].isChecked())
+        self.assertFalse(cp._loop_chk["fofb_y"].isChecked())
+        self.assertEqual(cp.chk_all.checkState(), Qt.PartiallyChecked)   # один вкл, один выкл
+
+        cp._toggle_loop("fofb_y", True)                        # переключатель одного контура → команда
+        self.assertIn(("loop.fofb_y.enabled", True), link.cmds)
+
+        link.cmds.clear()                                      # мастер: сейчас все вкл → выключить все
+        cp._loop_chk["fofb_y"].setChecked(True); cp._refresh_all_state()
+        self.assertEqual(cp.chk_all.checkState(), Qt.Checked)
+        cp._toggle_all()
+        self.assertEqual(sorted(link.cmds), [("loop.fofb_x.enabled", False), ("loop.fofb_y.enabled", False)])
+        self.assertEqual(cp.chk_all.checkState(), Qt.Unchecked)
+        self.assertFalse(any(c.isChecked() for c in cp._loop_chk.values()))
+
+        # синхрон с движком из снимка (без обратной команды)
+        link.cmds.clear()
+        cp.update_loops({"loop.fofb_x.enabled": True, "loop.fofb_y.enabled": False})
+        self.assertTrue(cp._loop_chk["fofb_x"].isChecked())
+        self.assertFalse(cp._loop_chk["fofb_y"].isChecked())
+        self.assertEqual(link.cmds, [])                        # синхрон не шлёт команд
+
+    def test_layout_roundtrip_reopens_windows(self):
+        try:
+            app = self._env()
+            from client import InProcLink
+            from client.cockpit import Cockpit
+        except Exception as e:
+            self.skipTest(f"нет Qt offscreen: {e}")
+        link = InProcLink()
+        win = Cockpit(link, project="unittest_tmp_cockpit", poll_ms=10)
+        try:
+            win._open_graph("meta.speed")
+            win._open_graph("obs.ebpm.y:rms")
+            app.processEvents()
+            data = win.collect_layout()
+            self.assertEqual(len(data["windows"]), 2)
+            win.restore_layout(data)                        # закрывает и пересоздаёт окна
+            app.processEvents()
+            self.assertEqual(len(win._windows), 2)
+            kinds = {w.KIND for w in win._windows}
+            self.assertEqual(kinds, {"graph"})
+        finally:
+            win.close()
+            import shutil
+            from client import layout as L
+            shutil.rmtree(L.layout_dir("unittest_tmp_cockpit"), ignore_errors=True)
+
+
+@unittest.skipUnless(os.environ.get("SS_ENGINE_SMOKE") == "1",
+                     "opt-in smoke на РЕАЛЬНОМ TbtPlant: SS_ENGINE_SMOKE=1 (строит 6D-кольцо, ~20 с)")
+class TestClientEngineSmoke(unittest.TestCase):
+    """Этап 1 (opt-in): build_session + EngineThread против НАСТОЯЩЕГО TbtPlant (ring_cpp). Поток шагает,
+    модельное время/скорость идут, наблюдаемая и зазор резолвятся. Гейт флагом, чтобы не утяжелять набор."""
+
+    def test_real_plant_runs(self):
+        import time as _t
+        try:
+            import ring_cpp  # noqa: F401
+        except Exception as e:
+            self.skipTest(f"нет ring_cpp: {e}")
+        from client import InProcLink
+        from client.engine import build_session, EngineThread
+        from client.scene3d import build_geometry
+
+        plant, state, sch = build_session(settle_turns=30, fofb=True, gap_mm=6.0, steps_per_cycle=2)
+        geom = build_geometry(plant, state)                      # геометрия сцены на реальном кольце
+        self.assertGreater(len(geom["centers"]), 100)
+        self.assertTrue(geom["undulators"])                      # якоря ондуляторов найдены
+        link = InProcLink()
+        eng = EngineThread(link, sch, steps_per_cycle=2)
+        gid = next(iter(state.undulators), None)
+        link.subscribe("obs.ebpm.x:rms")
+        link.subscribe("meta.speed")
+        link.subscribe("meta.cycle")
+        if gid:
+            link.subscribe(f"undulator.{gid}.gap_target")
+            link.command(f"undulator.{gid}.gap", 8.0)
+        link.control("run")
+        eng.start()
+        snap = None
+        try:
+            end = _t.time() + 90
+            while _t.time() < end:
+                snap = link.poll_snapshot()
+                if snap is not None and snap.meta.get("cycle", 0) >= 2:
+                    break
+                _t.sleep(0.05)
+        finally:
+            eng.stop()
+            eng.join(timeout=30)
+            plant.close()
+        self.assertIsNotNone(snap)
+        self.assertGreaterEqual(snap.meta["cycle"], 2)
+        self.assertGreater(snap.meta["speed"], 0.0)
+        self.assertIsInstance(snap.values["obs.ebpm.x:rms"], float)
+        if gid:
+            self.assertAlmostEqual(snap.values[f"undulator.{gid}.gap_target"], 8.0)
 
 
 if __name__ == "__main__":
