@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ошибки схем Йошиды на QF1A</title>
+<style>
+  :root { --bg:#ffffff; --fg:#1f1f1d; --muted:#5f5e5a; --line:#d3d1c7; --head:#f1efe8; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1f1f1d; --fg:#ecebe6; --muted:#b4b2a9; --line:#444441; --head:#2c2c2a; }
+  }
+  body { background:var(--bg); color:var(--fg); font-family:"Times New Roman", Times, serif;
+         font-size:16px; line-height:1.5; margin:0; padding:24px 16px; }
+  main { max-width:760px; margin:0 auto; }
+  h1 { font-size:20px; font-weight:bold; margin:0 0 12px; }
+  p { margin:6px 0; }
+  .muted { color:var(--muted); font-size:14px; }
+  .wrap { overflow-x:auto; margin:14px 0; }
+  table { border-collapse:collapse; width:100%; min-width:460px; }
+  caption { text-align:left; font-size:14px; color:var(--muted); padding-bottom:6px; }
+  th, td { border:1px solid var(--line); padding:6px 10px; text-align:right; }
+  th { background:var(--head); font-weight:bold; }
+  td:first-child, th:first-child { text-align:left; }
+  ul { margin:6px 0; padding-left:22px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Ошибки симплектических схем на квадруполе QF1A</h1>
+
+<p>Квадруполь <b>QF1A</b> (sila2026.lte): L = 0,308 м, K1 = 2,3667 м⁻²; нормальный, k₁ = k₁ᵥ = K1.</p>
+<p>Частица на входе: x = 1 мм, pₓ = 0, y = 0,5 мм, p<sub>y</sub> = 0, t = 0, δ = 0.</p>
+<p>Точное решение (толстая линза), набег фазы φ = √K1·L = 0,4738 рад:
+x = x₀ cos φ = 0,8898 мм, pₓ = −x₀√K1 sin φ = −0,7020 мрад.</p>
+
+<div class="wrap">
+<table>
+  <caption>Ошибка на выходе относительно точного решения</caption>
+  <thead>
+    <tr><th>Схема</th><th>Киков</th><th>Δx, мкм</th><th>Δpₓ, мкрад</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>порядок 2, N = 1</td><td>1</td><td>−2,1</td><td>−27</td></tr>
+    <tr><td>порядок 2, N = 2</td><td>2</td><td>−0,51</td><td>−6,5</td></tr>
+    <tr><td>порядок 4, N = 1</td><td>3</td><td>+0,75</td><td>+3,8</td></tr>
+    <tr><td>порядок 4, N = 2</td><td>6</td><td>+0,045</td><td>+0,22</td></tr>
+    <tr><td>порядок 6, N = 1</td><td>7</td><td>−0,0093</td><td>−0,045</td></tr>
+    <tr><td>порядок 6, N = 2</td><td>14</td><td>−0,00016</td><td>−0,00068</td></tr>
+  </tbody>
+</table>
+</div>
+
+<ul>
+  <li>Удвоение N уменьшает ошибку в 4,1 раза для порядка 2 (теория 2² = 4), в 16,5 раза для порядка 4 (2⁴ = 16), в 57 раз для порядка 6 (2⁶ = 64).</li>
+  <li>При одинаковой цене порядок 6 выигрывает: порядок 4 при N = 2 (6 киков) — 0,045 мкм, порядок 6 при N = 1 (7 киков) — 0,0093 мкм.</li>
+  <li>На крупном шаге (φ = 0,47 рад на срез) порядок 4 при N = 1 по координате хуже порядка 2 при N = 2 (+0,75 против −0,51 мкм), выигрывает только по углу.</li>
+</ul>
+
+<p class="muted">Точное решение линейное, а в дрейфе схемы стоит точный pₛ = √((1+δ)² − pₓ² − p<sub>y</sub>²); его вклад ~10⁻⁵ мкм, меньше любой ошибки в таблице.
+Коэффициенты Йошиды — как в matrix_tracker.py, функция _yoshida (порядок 6 — решение A).</p>
+</main>
+</body>
+</html>
