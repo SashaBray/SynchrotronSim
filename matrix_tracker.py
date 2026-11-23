@@ -46,12 +46,14 @@ def load_radiation(exp_id):
     """Радиационный конфиг ОПЫТА из radiation_params.csv по exp_id (энергия СИ + ВЧ).
 
     ПРАВИЛО (трекер проверяет ПЕРЕД запуском): нет строки для опыта → возврат None = синхротронное
-    излучение НЕ учитывается. Строка есть → dict(design_mev, isr, rf, rf_voltage_mv, rf_harmonic,
-    rf_phase_deg, rf_freq_hz); пустые ячейки → дефолты/None. Столбцы: exp_id; design_energy_mev; isr(0/1);
-    rf(none/ideal/sine); rf_voltage_mv; rf_harmonic; rf_phase_deg; rf_freq_hz.
+    излучение НЕ учитывается. Строка есть → dict(design_mev, isr, rf, rf_ideal_energy_mev, rf_voltage_mv,
+    rf_harmonic, rf_phase_deg, rf_freq_hz); пустые ячейки → дефолты/None. Столбцы: exp_id; design_energy_mev;
+    isr(0/1); rf(none/ideal/sine); rf_ideal_energy_mev; rf_voltage_mv; rf_harmonic; rf_phase_deg; rf_freq_hz.
     Типы резонатора (rf):
       none  — ВЧ нет, δ дрейфует вниз от излучения;
-      ideal — идеальный: за оборот возвращает ровно потерянную энергию (без синхротронных колебаний);
+      ideal — идеальный: после резонатора у частицы ЗАДАННАЯ энергия rf_ideal_energy_mev (те же единицы, что
+              design_energy_mev; пусто = проектная, δ = 0) — какой бы она ни прилетела; без синхротронных
+              колебаний. δ после резонатора = E/E_design − 1;
       sine  — реальный синусоидальный (RFCA): ΔE = V·sin(φ + 2πh·t/C_RF), C_RF = h·c/f_RF. Нужны
               rf_voltage_mv и rf_harmonic; rf_phase_deg — число (°) или пусто/auto = синхронная фаза
               π − asin(U0/V) по потере U0 опорной частицы за оборот; rf_freq_hz — пусто = h·c/L (резонатор
@@ -68,6 +70,7 @@ def load_radiation(exp_id):
             return dict(design_mev=float(g("design_energy_mev")) if g("design_energy_mev") else 6000.0,
                         isr=g("isr") in ("1", "true", "yes"),
                         rf=g("rf") or "none",
+                        rf_ideal_energy_mev=float(g("rf_ideal_energy_mev")) if g("rf_ideal_energy_mev") else None,
                         rf_voltage_mv=float(g("rf_voltage_mv")) if g("rf_voltage_mv") else None,
                         rf_harmonic=int(g("rf_harmonic")) if g("rf_harmonic") else None,
                         rf_phase_deg=(None if g("rf_phase_deg").lower() in ("", "auto")
@@ -81,8 +84,10 @@ RF_TYPES = ("none", "ideal", "sine")
 
 def rf_spec(rad):
     """Спецификация резонатора для трекеров (matrix_traj_export.long_trajectories, C++ --track) из строки
-    radiation_params (load_radiation): None — ВЧ нет; "ideal" — идеальный; dict(type="sine", volt_mv,
-    harmonic, phase_deg|None(=синхронная), freq_hz|None(=h·c/L), design_mev) — синусоидальный."""
+    radiation_params (load_radiation): None — ВЧ нет; "ideal" — идеальный на проектную энергию (δ = 0);
+    dict(type="ideal", delta, energy_mev, design_mev) — идеальный на заданную энергию rf_ideal_energy_mev
+    (δ = E/E_design − 1); dict(type="sine", volt_mv, harmonic, phase_deg|None(=синхронная), freq_hz|None(=h·c/L),
+    design_mev) — синусоидальный."""
     if not rad:
         return None
     t = (rad.get("rf") or "none").strip().lower()
@@ -91,12 +96,25 @@ def rf_spec(rad):
     if t == "none":
         return None
     if t == "ideal":
-        return "ideal"
+        e = rad.get("rf_ideal_energy_mev")
+        if not e:
+            return "ideal"
+        design = float(rad.get("design_mev") or 6000.0)
+        return dict(type="ideal", delta=float(e) / design - 1.0, energy_mev=float(e), design_mev=design)
     if not rad.get("rf_voltage_mv") or not rad.get("rf_harmonic"):
         raise SystemExit("radiation_params: тип rf=sine требует rf_voltage_mv и rf_harmonic")
     return dict(type="sine", volt_mv=float(rad["rf_voltage_mv"]), harmonic=float(rad["rf_harmonic"]),
                 phase_deg=rad.get("rf_phase_deg"), freq_hz=rad.get("rf_freq_hz"),
                 design_mev=float(rad.get("design_mev") or 6000.0))
+
+
+def ideal_delta(rf):
+    """δ после идеального резонатора: None — rf не идеальный; "ideal" — 0 (проектная энергия); dict — rf['delta']."""
+    if rf == "ideal":
+        return 0.0
+    if isinstance(rf, dict) and rf.get("type") == "ideal":
+        return float(rf.get("delta") or 0.0)
+    return None
 
 
 def _read(name):
@@ -282,6 +300,8 @@ class ParticleLost(Exception):
 
 
 class Magnet:
+    is_cavity = False                                     # узел-резонатор пути опыта — beam_injection.CavityNode
+
     def __init__(self, insts, eff, phys, coup, trans, source="physical", settings=None):
         r0 = insts[0]
         self.center = np.array([float(r0["x"]), float(r0["y"]), float(r0["z"])])

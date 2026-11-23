@@ -115,26 +115,16 @@ def _exp_path() -> Path:
 
 
 def set_finish_plane(exp_id, p1, p2, p3, direction, *, max_turns=0, stride=100):
-    """Создать/обновить строку experiments.csv: финиш-плоскость (3 точки) +
-    вектор направления пересечения. lattice 107, group 1, dt verbatim."""
-    lines = [ln.rstrip("\n") for ln in _exp_path().read_text(encoding="utf-8").splitlines()
-             if ln.strip()]
-    hdr, body = lines[0], lines[1:]
-    cells = [str(exp_id), str(RING_LAT), "1", EXP_DT, str(max_turns), str(stride),
-             f"{p1[0]:.6f}", f"{p1[1]:.6f}", f"{p1[2]:.1f}",
-             f"{p2[0]:.6f}", f"{p2[1]:.6f}", f"{p2[2]:.1f}",
-             f"{p3[0]:.6f}", f"{p3[1]:.6f}", f"{p3[2]:.1f}",
-             f"{direction[0]:.6f}", f"{direction[1]:.6f}", f"{direction[2]:.6f}"]
-    row = ";".join(cells)
-    out, found = [hdr], False
-    for r in body:
-        if r.split(";")[0] == str(exp_id):
-            out.append(row); found = True
-        else:
-            out.append(r)
-    if not found:
-        out.append(row)
-    _exp_path().write_text("\n".join(out) + "\n", encoding="utf-8", newline="\n")
+    """Создать/обновить строку experiments.csv (по именам столбцов, exp_planes.write_experiment): финиш-плоскость
+    — центр ((p1+p2)/2 + p3)/2 трёх точек finish_plane_from_gid, нормаль = направление пересечения; старт —
+    плоскость пучка в шве кольца (0;0;0, нормаль +x). lattice RING_LAT, group 1, dt verbatim."""
+    import numpy as np
+    import exp_planes as ep
+    p1, p2, p3 = (np.asarray(p, float) for p in (p1, p2, p3))
+    c = 0.5 * (0.5 * (p1 + p2) + p3)
+    ep.write_experiment(exp_id, RING_LAT, 1, start=(np.zeros(3), np.array([1.0, 0.0, 0.0])),
+                        finish=(c, np.asarray(direction, float)), dt=EXP_DT, max_turns=str(max_turns),
+                        traj_stride=str(stride))
 
 
 # ----------------------------- geometry ------------------------------------

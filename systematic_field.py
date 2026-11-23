@@ -56,8 +56,9 @@ for rr in rows[1:]:
                 rr[ci[col]] = repr(float(rr[ci[col]]) * (1 + DF))
 with open(os.path.join(root, "tables", "lattice_configs.csv"), "w", newline="", encoding="utf-8") as f:
     csv.writer(f, delimiter=";").writerows(rows)
-for t in ("element_connectivity.csv", "particle_groups.csv"):
-    shutil.copyfile(os.path.join(TB, t), os.path.join(root, "tables", t))
+for t in ("element_connectivity.csv", "particle_groups.csv", "rf_cavities.csv"):
+    if os.path.exists(os.path.join(TB, t)):
+        shutil.copyfile(os.path.join(TB, t), os.path.join(root, "tables", t))
 r2 = fr._ring(inf, ws=root, nsl=8)
 co_sf = ra.closed_orbit(r2, dims=4); o_sf = r2.track_elements([co_sf])[0]
 rms_sf = float(np.sqrt(np.mean(o_sf[1:, 0] ** 2))) * 1e6

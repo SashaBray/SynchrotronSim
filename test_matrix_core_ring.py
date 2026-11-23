@@ -129,7 +129,7 @@ class TestMatrixCoreRing(unittest.TestCase):
             turns = 3
             d = mte.long_trajectories(26, 1, n_turns=turns, rf=spec)
             cpp = cpp_track(26, turns)
-            self.assertAlmostEqual(d["rf_phase_rad"], 2.8239, delta=2e-3)     # φs ≈ 161,8° (U0 ≈ 2,50 МэВ)
+            self.assertAlmostEqual(d["rf_phase_rad"], 2.8102, delta=2e-3)     # φs ≈ 161,0° (U0 ≈ 2,60 МэВ: диполи + СИ ондуляторов)
             worst = 0.0
             for i, (fin, surv) in enumerate(zip(d["finals"], d["surv_turns"])):
                 self.assertEqual(surv, turns); self.assertNotEqual(cpp[i][0], "LOST")
@@ -141,6 +141,105 @@ class TestMatrixCoreRing(unittest.TestCase):
         finally:
             if bak and os.path.exists(bak):
                 shutil.move(bak, npz26)
+
+    def _npz_guard(self, exp):
+        npz = os.path.join(ROOT, "workspace", "results", f"trajectories_local_exp{exp}.npz")
+        bak = npz + ".testbak2"
+        if os.path.exists(npz):
+            shutil.copy2(npz, bak)
+        return npz, bak
+
+    def _npz_restore(self, npz, bak):
+        if os.path.exists(bak):
+            shutil.move(bak, npz)
+
+    def test_portal_open_line_sp1(self):
+        # РАЗОМКНУТАЯ линия (exp 3, SP1): 4 пролёта старт → финиш через портал, C++ ≡ Python (СИ у опыта 3
+        # выключена — строки radiation_params нет; Python-эталон собирается без СИ).
+        npz, bak = self._npz_guard(3)
+        try:
+            os.environ["SS_SR"] = ""
+            try:
+                d = mte.long_trajectories(3, 1, n_turns=4)
+            finally:
+                os.environ["SS_SR"] = "1"
+            cpp = cpp_track(3, 4)
+            self.assertEqual(d["n_turns"], 4); self.assertFalse(d["closed"])
+            worst = 0.0
+            for i, (fin, surv) in enumerate(zip(d["finals"], d["surv_turns"])):
+                self.assertEqual(surv, 4); self.assertNotEqual(cpp[i][0], "LOST"); self.assertEqual(cpp[i][6], 4)
+                worst = max(worst, max(abs(a - b) for a, b in zip(fin, cpp[i][:6])))
+            self.assertLess(worst, 1e-9, f"портал SP1: C++ vs Python {worst:.2e}")
+            print(f"  [SP1 exp3, портал, 4 пролёта] 6D C++ vs Python: {worst:.2e}")
+        finally:
+            self._npz_restore(npz, bak)
+
+    def test_ideal_target_energy(self):
+        # Идеальный резонатор с заданной энергией (radiation_params.rf_ideal_energy_mev, временно у опыта 1):
+        # C++ ≡ Python по 6D, δ после резонатора (в конце пролёта) = E/E_design − 1 у каждой частицы.
+        import csv
+        import matrix_tracker as mt
+        path = os.path.join(mt.TB, "radiation_params.csv"); bak = path + ".testbak"
+        npz, nbak = self._npz_guard(1)
+        shutil.copy2(path, bak)
+        try:
+            with open(path, encoding="utf-8") as f:
+                rows = list(csv.DictReader(f, delimiter=";"))
+            hdr = list(rows[0].keys())
+            for r in rows:
+                if r["exp_id"] == "1":
+                    r["rf_ideal_energy_mev"] = "6006"
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=hdr, delimiter=";"); w.writeheader(); w.writerows(rows)
+            spec = mt.rf_spec(mt.load_radiation(1))
+            self.assertAlmostEqual(mt.ideal_delta(spec), 1e-3, places=15)
+            d = mte.long_trajectories(1, 1, n_turns=3, rf=spec)
+            cpp = cpp_track(1, 3)
+            worst = 0.0
+            for i, fin in enumerate(d["finals"]):
+                self.assertEqual(fin[5], 6006.0 / 6000.0 - 1.0); self.assertEqual(cpp[i][5], fin[5])
+                worst = max(worst, max(abs(a - b) for a, b in zip(fin, cpp[i][:6])))
+            self.assertLess(worst, 1e-9, f"ideal с заданной энергией: C++ vs Python {worst:.2e}")
+            print(f"  [exp 1, ideal → 6006 МэВ] δ после резонатора {d['finals'][0][5]:.6e}; C++ vs Python {worst:.2e}")
+        finally:
+            shutil.move(bak, path)
+            self._npz_restore(npz, nbak)
+
+    def test_cavity_mid_ring(self):
+        # РЕЗОНАТОР УСТАНОВКИ в середине кольца (rf_cavities.csv, временная строка): sine (exp 26) и ideal (exp 1)
+        # — C++ ≡ Python по 6D; резонатор в плоскости старта ≡ решётка без резонаторов (бит-в-бит в обоих ядрах).
+        import numpy as np
+        import matrix_tracker as mt
+        import exp_planes as ep
+        path = os.path.join(mt.TB, "rf_cavities.csv"); bak = path + ".testbak"
+        guards = [self._npz_guard(e) for e in (1, 26)]
+        shutil.copy2(path, bak)
+
+        def mid(lat, s0):
+            mags = ep._mags(lat); _ring, _lead, s_in, s_out, _C = ep._arcs(mags)
+            j = next(k for k in range(len(mags) - 1) if s_out[k] >= s0 and s_in[k + 1] - s_out[k] > 0.2)
+            return ep.plane_at_s(lat, 0.5 * (s_out[j] + s_in[j + 1]), mags)
+        try:
+            ep.write_cavity(26, mid(26, 555.0), cavity_id=901, note="тест")
+            ep.write_cavity(1, mid(1, 300.0), cavity_id=902, note="тест")
+            spec = mt.rf_spec(mt.load_radiation(26))
+            for exp, lat, rf, turns in ((26, 26, spec, 3), (1, 1, "ideal", 3)):
+                d = mte.long_trajectories(lat, 1, n_turns=turns, rf=rf)
+                self.assertEqual(len(d["cavities"]), 1)
+                cpp = cpp_track(exp, turns)
+                worst = max(max(abs(a - b) for a, b in zip(fin, cpp[i][:6])) for i, fin in enumerate(d["finals"]))
+                self.assertLess(worst, 1e-9, f"резонатор в середине, exp {exp}: C++ vs Python {worst:.2e}")
+                print(f"  [exp {exp}, резонатор s={d['cavities'][0][1]:.3f} м, {d['rf']}] 6D C++ vs Python: {worst:.2e}")
+            shutil.copy2(bak, path)
+            ref_py = mte.long_trajectories(26, 1, n_turns=2, rf=spec); ref_c = cpp_track(26, 2)
+            ep.write_cavity(26, (np.zeros(3), np.array([1.0, 0.0, 0.0])), cavity_id=903, note="тест: шов")
+            seam_py = mte.long_trajectories(26, 1, n_turns=2, rf=spec); seam_c = cpp_track(26, 2)
+            self.assertTrue(np.array_equal(np.asarray(seam_py["finals"]), np.asarray(ref_py["finals"])))
+            self.assertEqual(seam_c, ref_c)
+        finally:
+            shutil.move(bak, path)
+            for g in guards:
+                self._npz_restore(*g)
 
 
 if __name__ == "__main__":

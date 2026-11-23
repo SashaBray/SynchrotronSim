@@ -89,16 +89,22 @@ def build_scene(plotter, exp_id, hi_mag=None):
     return {"n_parts": len(parts)}
 
 
-def mag_entry(mag_idx):
+def _inject(exp_id):
+    """Путь опыта exp_id (его решётка, пучок и явные старт/финиш-плоскости)."""
     import beam_injection as bi
-    plane, ordered, states, info = bi.inject(1, 1, source="physical")
+    row = bi.experiment_row(exp_id)
+    return bi.inject(int(row["lattice_id"]), int(row["group_id"]), source="physical", exp_id=exp_id)
+
+
+def mag_entry(mag_idx, exp_id=1):
+    plane, ordered, states, info = _inject(exp_id)
     m = ordered[mag_idx]
     return np.array(m.entry, float), getattr(m, "dev", "?"), getattr(m, "kind", "?")
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--exp", type=int, default=54)
+    ap.add_argument("--exp", type=int, default=1)
     ap.add_argument("--mag", type=int, default=None, help="индекс магнита (фокус на его вход)")
     ap.add_argument("--focus", type=float, nargs=3, default=None, help="точка фокуса X Y Z")
     ap.add_argument("--view", choices=["top", "side", "persp"], default="top")
@@ -107,7 +113,7 @@ def main():
     a = ap.parse_args()
 
     if a.mag is not None:
-        f, dev, kind = mag_entry(a.mag); tag = f"m{a.mag} {dev} ({kind})"
+        f, dev, kind = mag_entry(a.mag, a.exp); tag = f"m{a.mag} {dev} ({kind})"
     elif a.focus:
         f = np.array(a.focus, float); tag = "точка"
     else:
@@ -117,8 +123,7 @@ def main():
     pl.set_background("white")
     build_scene(pl, a.exp, hi_mag=a.mag)
     # ЗЕЛЁНАЯ проектная орбита (входы магнитов) + маркеры DQ для сравнения
-    import beam_injection as bi
-    plane, ordered, states, info = bi.inject(1, 1, source="physical")
+    plane, ordered, states, info = _inject(a.exp)
     ents = np.array([m.entry for m in ordered], float)
     poly = pv.PolyData(ents[:120]); n = 120
     cc = np.full((1, n + 1), n, dtype=np.int_); cc[0, 1:] = np.arange(n); poly.lines = cc

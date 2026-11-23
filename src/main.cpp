@@ -19,6 +19,7 @@
 #include "LatticeManager.h"
 #include "Integrator.h"
 #include "FinishPlane.h"
+#include "exp_config.h"
 
 struct StepTimer {
     std::chrono::high_resolution_clock::time_point start;
@@ -130,8 +131,7 @@ int main(int argc, char* argv[]) {
     int targetExpId = std::stoi(argv[1]);
     auto total_timer = StepTimer();
 
-    // 1. Experiment loading
-    auto expData = readCSV(ws + "tables/experiments.csv");
+    // 1. Experiment loading — по ИМЕНАМ столбцов (exp_config.h): старт/финиш-плоскости, пучок в рамке старта
     int latId = -1, grpId = -1, maxTurns = 0;
     int trajStride = 1;
     double dt = 0;
@@ -140,35 +140,19 @@ int main(int argc, char* argv[]) {
     // traj_stride=1 это ~1.2 ГБ на частицу. Пусто/0 -- предел считается автоматически по геометрии.
     double maxTime = 0.0;
     double vRef = 0.0;              // скорость пучка (для автопредела), м/с
-    // Финишная плоскость задаётся тремя точками p1, p2, p3
-    FieldVector fp1 = {5.0, -1.0, -1.0};
-    FieldVector fp2 = {5.0,  1.0, -1.0};
-    FieldVector fp3 = {5.0,  0.0,  1.0};
-    FieldVector fpDir = {0.0, 0.0, 0.0};   // направление пересечения (опц., колонки 15-17)
-
-    for (auto& r : expData) {
-        if (std::stoi(r[0]) == targetExpId) {
-            latId = std::stoi(r[1]);
-            grpId = std::stoi(r[2]);
-            dt = std::stod(r[3]);
-            maxTurns = std::stoi(r[4]);
-            // Колонка 5 -- traj_stride: сохранять каждую N-ю точку траектории
-            // (проверка финишной плоскости всё равно идёт каждый шаг).
-            if (r.size() >= 15) {
-                try { trajStride = std::max(1, std::stoi(r[5])); } catch (...) {}
-                fp1 = {std::stod(r[6]),  std::stod(r[7]),  std::stod(r[8])};
-                fp2 = {std::stod(r[9]),  std::stod(r[10]), std::stod(r[11])};
-                fp3 = {std::stod(r[12]), std::stod(r[13]), std::stod(r[14])};
-            }
-            if (r.size() >= 18) {   // направление пересечения финиш-плоскости
-                fpDir = {std::stod(r[15]), std::stod(r[16]), std::stod(r[17])};
-            }
-            if (r.size() >= 23 && !r[22].empty() && r[22] != "-") {   // max_time_s
-                try { maxTime = std::stod(r[22]); } catch (...) { maxTime = 0.0; }
-            }
-            break;
-        }
+    // Финишная плоскость (FinishPlane) — три точки c±u+v, c−v финиш-плоскости опыта + направление = нормаль
+    FieldVector fp1, fp2, fp3, fpDir;
+    expcfg::Experiment E;
+    try {
+        E = expcfg::readExperiment(ws, targetExpId);
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+        return 1;
     }
+    latId = E.lattice; grpId = E.group; dt = E.dt; maxTurns = E.maxTurns;
+    trajStride = E.trajStride;          // сохранять каждую N-ю точку (проверка плоскости — каждый шаг)
+    maxTime = E.maxTime;
+    expcfg::finishPoints(E.finish, fp1, fp2, fp3, fpDir);
     std::cout << "  traj_stride=" << trajStride
               << " (save 1 of every " << trajStride << " trajectory points)" << std::endl;
     
@@ -296,18 +280,18 @@ int main(int argc, char* argv[]) {
     // 3. Beam loading
     std::vector<ParticleState> beam;
     std::vector<double> masses, charges;
-    auto partData = readCSV(ws + "tables/particle_groups.csv");
-    for (auto& r : partData) {
-        if (std::stoi(r[0]) == grpId) {
-            masses.push_back(std::stod(r[2]));
-            charges.push_back(std::stod(r[3]));
-            ParticleState s;
-            s.pos = {std::stod(r[4]), std::stod(r[5]), std::stod(r[6])};
-            FieldVector v0 = {std::stod(r[7]), std::stod(r[8]), std::stod(r[9])};
-            s.mom = Integrator::velocityToMomentum(v0, masses.back());
-            if (vRef == 0.0) vRef = std::sqrt(v0.x * v0.x + v0.y * v0.y + v0.z * v0.z);
-            beam.push_back(s);
-        }
+    std::vector<expcfg::Particle> parts;
+    try { parts = expcfg::readBeam(ws, grpId, E.start); }     // локальные (рамка старта) → глобальные
+    catch (const std::exception& e) { std::cerr << "Error: " << e.what() << std::endl; return 1; }
+    for (auto& pp : parts) {
+        masses.push_back(pp.m);
+        charges.push_back(pp.q);
+        ParticleState s;
+        s.pos = pp.pos;
+        FieldVector v0 = pp.vel;
+        s.mom = Integrator::velocityToMomentum(v0, masses.back());
+        if (vRef == 0.0) vRef = std::sqrt(v0.x * v0.x + v0.y * v0.y + v0.z * v0.z);
+        beam.push_back(s);
     }
     std::cout << "Init: " << init_timer.ms() << " ms. Particles: " << beam.size() << std::endl;
 

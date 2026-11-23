@@ -255,6 +255,9 @@ def main():
     ex = {c: "" for c in ex_hdr}
     ex.update(exp_id=EXP_ID, lattice_id=LAT_ID, group_id=GROUP, dt="6,74E-13", max_turns="1", traj_stride="1")
     upsert_by(os.path.join(TB, "experiments.csv"), "exp_id", ex_hdr, [ex])
+    import exp_planes as ep                                    # явные плоскости: кольцо — старт s = 0 (шов), финиш пуст
+    st, fin = ep.default_planes(int(LAT_ID))
+    ep.write_experiment(EXP_ID, start=st, finish=fin)
     n_mon = sum(1 for r in lc_rows if r["kind"] == "monitor")
     print(f"[OK] .lte → БД: решётка {LAT_ID} ({len(lc_rows) - n_mon} магнитов, {n_mon} датчиков), "
           f"эксперимент {EXP_ID}, группа {GROUP}")

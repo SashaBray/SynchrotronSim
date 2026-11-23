@@ -229,6 +229,11 @@ class TestRadiation(unittest.TestCase):
         self.assertIsNone(mt.rf_spec(None))
         self.assertIsNone(mt.rf_spec({"rf": "none"}))
         self.assertEqual(mt.rf_spec({"rf": "ideal"}), "ideal")
+        self.assertEqual(mt.ideal_delta("ideal"), 0.0)                         # пусто — проектная энергия
+        si = mt.rf_spec({"rf": "ideal", "rf_ideal_energy_mev": 6006.0, "design_mev": 6000.0})
+        self.assertEqual(si["type"], "ideal")
+        self.assertAlmostEqual(mt.ideal_delta(si), 1e-3, places=15)            # δ = E/E_design − 1
+        self.assertIsNone(mt.ideal_delta(None)); self.assertIsNone(mt.ideal_delta({"type": "sine"}))
         s = mt.rf_spec({"rf": "sine", "rf_voltage_mv": 8.0, "rf_harmonic": 1296, "rf_phase_deg": None,
                         "rf_freq_hz": None, "design_mev": 6000.0})
         self.assertEqual(s["type"], "sine"); self.assertEqual(s["harmonic"], 1296.0)
@@ -3947,6 +3952,208 @@ class TestScreenHeatMap(unittest.TestCase):
             os.chdir(cwd); shutil.rmtree(tmp, ignore_errors=True)
         self.assertAlmostEqual(float(np.dot(a1 - a0, v0)), -2e-4, delta=1e-8)   # железо наклонено
         self.assertLess(abs(float(np.dot(d1 - d0, v0))), 1e-6)                 # электрон — нет (< 1 мкрад)
+
+
+import contextlib as _ctx
+
+
+@_ctx.contextmanager
+def _temp_cavities(rows):
+    """Временные резонаторы установки в rf_cavities.csv: rows — [(lattice, (точка, нормаль), share|None)];
+    по выходе файл возвращается как был."""
+    import shutil
+    import exp_planes as ep
+    path = os.path.join(mt.TB, "rf_cavities.csv"); bak = path + ".testbak"
+    had = os.path.exists(path)
+    if had:
+        shutil.copy2(path, bak)
+    try:
+        for k, (lat, pl, sh) in enumerate(rows, 1):
+            ep.write_cavity(lat, pl, sh, cavity_id=900 + k, note="тест")
+        yield
+    finally:
+        if had:
+            shutil.move(bak, path)
+        elif os.path.exists(path):
+            os.remove(path)
+
+
+@_ctx.contextmanager
+def _env(**kw):
+    saved = {k: os.environ.get(k) for k in kw}
+    os.environ.update({k: str(v) for k, v in kw.items()})
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            os.environ.pop(k, None) if v is None else os.environ.update({k: v})
+
+
+def _mid_gap_plane(lattice, frac=0.5, min_gap=0.3):
+    """Плоскость в середине промежутка ≥ min_gap после доли frac кольца → ((точка, нормаль), s, индекс магнита)."""
+    import exp_planes as ep
+    mags = ep._mags(lattice); ring, lead, s_in, s_out, C = ep._arcs(mags)
+    for j in range(int(frac * len(mags)), len(mags) - 1):
+        if s_in[j + 1] - s_out[j] > min_gap:
+            s = 0.5 * (s_out[j] + s_in[j + 1])
+            return ep.plane_at_s(lattice, s, mags), s, j
+    raise RuntimeError("нет промежутка")
+
+
+@unittest.skipUnless(os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")),
+                     "нет lattice_configs.csv — пропуск явных плоскостей опыта")
+class TestExplicitPlanes(unittest.TestCase):
+    """Явные старт/финиш-плоскости опыта (experiments.csv), пучок в рамке старта, портал разомкнутой линии,
+    резонаторы установки (rf_cavities.csv) — Python-эталон beam_injection / exp_planes / elegant_diag."""
+
+    def test_local_canonical_roundtrip(self):
+        import beam_injection as bi
+        loc = (1e-3, 2e-4, -5e-4, -1e-4, 0.01, 3e-3)
+        back = bi.canonical_to_local(bi.local_to_canonical(loc))
+        for a, b in zip(loc, back):
+            self.assertAlmostEqual(a, b, places=15)
+        pl = bi.PlaneMagnet(np.array([1.0, 2.0, 0.0]), np.array([0.6, 0.8, 0.0]))
+        pos, vel = bi.local_to_global(pl, (0, 0, 0, 0, 0, 0))
+        self.assertTrue(np.allclose(pos, pl.center))
+        self.assertAlmostEqual(float(np.linalg.norm(vel)), 2.967e8, delta=1e-3)     # δ = 0 ⇒ опорная скорость
+        self.assertTrue(np.allclose(vel / np.linalg.norm(vel), pl.axis))
+        pos, vel = bi.local_to_global(pl, (1e-3, 2e-3, 0, 0, 0, 0))
+        self.assertAlmostEqual(float((pos - pl.center) @ pl.uhat), 1e-3, places=15)
+        d = vel / np.linalg.norm(vel)
+        self.assertAlmostEqual(float(d @ pl.uhat) / float(d @ pl.axis), 2e-3, places=12)   # xp = dx/ds
+
+    def test_tables_migrated(self):
+        import beam_injection as bi
+        rows = bi._rows("experiments.csv")
+        self.assertIn("start_x", rows[0]); self.assertNotIn("p1x", rows[0])
+        for r in rows:
+            bi.planes_of(r)                                       # у каждого опыта задан старт
+        self.assertIsNone(bi.planes_of(bi.experiment_row(1))[1])          # СИЛА — кольцо
+        self.assertIsNotNone(bi.planes_of(bi.experiment_row(3))[1])       # SP1 — разомкнутая линия
+        self.assertEqual([p["local"][0] for p in bi.load_group(1)][:3], [0.0, -0.00025, 0.00025])
+        self.assertTrue(os.path.exists(os.path.join(mt.TB, "rf_cavities.csv")))
+
+    def test_locate_plane_and_path(self):
+        import io, contextlib
+        import beam_injection as bi
+        eff, phys, coup, trans = mt.load_db()
+        with contextlib.redirect_stdout(io.StringIO()):
+            sp1 = mt.build_line(3, eff, phys, coup, trans)
+        st, fin = bi.planes_of(bi.experiment_row(3))
+        self.assertEqual(bi.locate_plane(sp1, *st)[0], -1)                 # до первого элемента
+        self.assertEqual(bi.locate_plane(sp1, *fin)[0], len(sp1) - 1)      # после последнего
+        self.assertFalse(bi.seam_is_drift(sp1))
+        m = next(x for x in sp1 if x.L > 0.1)
+        with self.assertRaises(ValueError):                                 # плоскость внутри элемента
+            bi.locate_plane(sp1, m.center, m.axis)
+        with self.assertRaises(ValueError):                                 # не кольцо — финиш обязателен
+            bi.build_path(sp1, st, None)
+        with self.assertRaises(ValueError):                                 # финиш раньше старта на линии
+            bi.build_path(sp1, fin, st)
+        path = bi.build_path(sp1, st, fin)
+        self.assertFalse(path["closed"]); self.assertEqual(len(path["ordered"]), len(sp1))
+
+    def test_portal_open_line(self):
+        """Портал: второй пролёт разомкнутой линии = первый пролёт, применённый к состоянию финиша."""
+        import beam_injection as bi
+        import matrix_traj_export as mte
+        d = mte.long_trajectories(3, 1, n_turns=2)
+        self.assertEqual(d["n_turns"], 2); self.assertFalse(d["closed"]); self.assertEqual(d["surv_turns"][0], 2)
+        plane, ordered, states, info = bi.inject(3, 1)
+        s1 = bi.track_turn(plane, ordered, states[:1], info["finish"])[0][0]
+        s2 = bi.track_turn(plane, ordered, [s1], info["finish"])[0][0]
+        self.assertTrue(np.array_equal(np.asarray(d["finals"][0]), np.asarray(s2)))
+
+    def test_exp_planes_authoring(self):
+        import exp_planes as ep
+        import beam_injection as bi
+        st, fin = ep.default_planes(26)
+        self.assertIsNone(fin)                                              # кольцо
+        self.assertLess(float(np.linalg.norm(st[0])), 1e-6)                 # середина шва СИЛА ≈ (0, 0, 0)
+        st3, fin3 = ep.default_planes(3)
+        self.assertIsNotNone(fin3)                                          # линия: финиш на выходе последнего
+        mags = ep._mags(26); _, _, s_in, s_out, _ = ep._arcs(mags)
+        j = next(k for k in range(len(mags)) if mags[k].L > 0.2)
+        with self.assertRaises(ValueError):
+            ep.plane_at_s(26, 0.5 * (s_in[j] + s_out[j]), mags)            # внутри элемента
+        pl = ep.plane_after(26, mags[j].dev, 1e-3, mags)
+        self.assertEqual(bi.locate_plane(mags, *pl)[0], j)
+
+    def test_ideal_target_energy(self):
+        """Идеальный резонатор знает энергию «после себя»: частица с любой начальной δ после него имеет заданную
+        δ (пусто — проектная, δ = 0); резонатор в середине — заданная δ минус потеря второй половины пути."""
+        import matrix_traj_export as mte
+        st = [(0.0, 0.0, 0.0, 0.0, 0.0, 2e-3), (1e-4, 0.0, 0.0, 0.0, 0.0, -3e-3)]
+        tgt = dict(type="ideal", delta=1e-3)
+        with _env(SS_SR="1", SS_DESIGN_MEV="3000"):
+            d0 = mte.long_trajectories(2, 1, n_turns=2, rf="ideal", states_override=st)
+            d1 = mte.long_trajectories(2, 1, n_turns=2, rf=tgt, states_override=st)
+            pl, s, j = _mid_gap_plane(2)
+            with _temp_cavities([(2, pl, None)]):
+                dm = mte.long_trajectories(2, 1, n_turns=2, rf=tgt, states_override=st)
+                dz = mte.long_trajectories(2, 1, n_turns=2, rf=tgt, states_override=[(0.0,) * 5 + (1e-3,)])
+        self.assertEqual([f[5] for f in d0["finals"]], [0.0, 0.0])          # прилетели с ±δ — ушли с проектной
+        self.assertEqual([f[5] for f in d1["finals"]], [1e-3, 1e-3])
+        loss = 1e-3 - dz["finals"][0][5]                                    # потеря от резонатора до финиша
+        self.assertGreater(loss, 0.0)
+        for f in dm["finals"]:                       # δ на финише от начальной не зависит (только орбита → СИ)
+            self.assertAlmostEqual(f[5], dz["finals"][0][5], delta=0.05 * loss)
+
+    def test_cavity_mid_ring_ideal(self):
+        """ideal-резонатор в середине кольца: на нём δ ← заданная (проектная), к финишу — потеря второй
+        половины; резонатор в плоскости старта ≡ решётка без резонаторов (бит-в-бит)."""
+        import matrix_traj_export as mte
+        pl, s, j = _mid_gap_plane(2)
+        with _env(SS_SR="1", SS_DESIGN_MEV="3000"):
+            ref = mte.long_trajectories(2, 1, n_turns=2, rf="ideal")
+            self.assertEqual(ref["finals"][0][5], 0.0)                    # ВЧ в конце: δ восстановлено
+            with _temp_cavities([(2, pl, None)]):
+                mid = mte.long_trajectories(2, 1, n_turns=2, rf="ideal")
+            with _temp_cavities([(2, (np.zeros(3), np.array([1.0, 0.0, 0.0])), None)]):
+                seam = mte.long_trajectories(2, 1, n_turns=2, rf="ideal")
+        self.assertEqual(len(mid["cavities"]), 1)
+        self.assertAlmostEqual(mid["cavities"][0][1], s, delta=0.01)
+        d_mid = mid["finals"][0][5]
+        self.assertLess(d_mid, 0.0)                                         # теряется после резонатора
+        self.assertTrue(np.array_equal(np.asarray(seam["finals"]), np.asarray(ref["finals"])))
+
+    def test_ring_serve_cavity(self):
+        """Сервер кольца с резонатором установки в середине: C++ ≡ Python (оборот и ELEM), скачок δ 6D-орбиты
+        стоит на резонаторе, отпечаток кэша откликов меняется только при наличии резонаторов."""
+        import ring_analysis as ra, ring_cpp as rc
+        from control.response import ring_fingerprint
+        if not os.path.exists(os.path.join(ROOT, "build", exe_name("MatrixTracker"))):
+            self.skipTest("C++ ядро не собрано")
+        rf = dict(volt_mv=2.5, harmonic=75, phase_deg=145.0)
+        kw = dict(start_before_first_m=1.4335, sr=True, rf=rf, design_mev=3000.0)
+        r0 = rc.CppRing(2, nsl=10, order=4, **kw)
+        fp0 = ring_fingerprint(r0); r0.close()
+        pl, s, j = _mid_gap_plane(2)
+        with _temp_cavities([(2, pl, None)]):
+            cr = rc.CppRing(2, nsl=10, order=4, **kw)
+            with _env(SS_SECTOR_NSL="10", SS_SECTOR_ORDER="4"):
+                pr = ra.Ring(2, **kw)
+            try:
+                st = [[1e-4, 0, 5e-5, 0, 0, 0], [0, 0, 0, 0, 1e-3, 1e-3]]
+                self.assertLess(float(np.max(np.abs(np.asarray(cr.track(st, 2)) - pr.track(st, 2)))), 1e-9)
+                e1 = np.asarray(cr.track_elements(st[:1]))[0]; e2 = pr.track_elements(st[:1])[0]
+                self.assertLess(float(np.nanmax(np.abs(e1 - e2))), 1e-9)
+                self.assertNotEqual(ring_fingerprint(cr), fp0)
+                co = ra.closed_orbit(cr, dims=6)
+                o = np.asarray(cr.track_elements([co]))[0]
+                k = int(np.argmax(np.diff(o[:, 5])))
+                self.assertEqual(k, j)                                       # скачок δ — между магнитами j и j+1
+            finally:
+                cr.close()
+
+    def test_elegant_splice_rf(self):
+        import elegant_diag as ed
+        par = {"D1": {"type": "EDRIFT", "L": 2.0}, "Q": {"type": "KQUAD", "L": 0.5}}
+        names, defs = ed._splice_rf(["D1", "Q", "D1"], par, dict(volt_mv=1.0, phase_deg=180.0, at_s=[0.5, 2.0]), 1e8)
+        self.assertEqual(names, ["RFD1", "RFC0", "RFD2", "RFC1", "Q", "D1"])
+        self.assertIn("RFD1: EDRIFT, L=0.5", defs); self.assertIn("RFD2: EDRIFT, L=1.5", defs)
+        with self.assertRaises(ValueError):
+            ed._splice_rf(["D1", "Q", "D1"], par, dict(volt_mv=1.0, phase_deg=180.0, at_s=[2.2]), 1e8)
 
 
 if __name__ == "__main__":

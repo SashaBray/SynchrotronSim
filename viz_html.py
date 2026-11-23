@@ -287,7 +287,8 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out, edges=None, co
     # клик↔3D работает) + метаданные точек (имя/№/СП, глоб. XYZ) и магнитов.
     dev = dlabels = dmeta = dmags = None
     try:
-        dev, dlabels, dmeta, dmags = mte.deviation_paths(int(lat), int(group), use_config_beam=config_beam)
+        dev, dlabels, dmeta, dmags = mte.deviation_paths(int(lat), int(group), use_config_beam=config_beam,
+                                                         exp_id=exp_id)
     except Exception as e:
         print(f"[!] пробный пучок не собрался: {type(e).__name__}: {e}")
 
@@ -359,7 +360,7 @@ def build(exp_id, lat, group, hw, kind, lc, decimate, glyph, out, edges=None, co
     # ПОДЗАГОЛОВОК: сколько оборотов, замкнута ли орбита, невязка (секторным телом — как график отклонения).
     sub = ""
     try:
-        c = mte.experiment_closure(int(lat), int(group), use_config_beam=config_beam)
+        c = mte.experiment_closure(int(lat), int(group), use_config_beam=config_beam, exp_id=exp_id)
         st = f"Оборотов: {c['turns']} · "
         if c["closed"]:
             st += "орбита замкнута" + (f" (невязка {c['residual_mm']:.2f} мм)" if c["residual_mm"] is not None else "")

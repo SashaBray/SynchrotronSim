@@ -169,6 +169,9 @@ def main():
         with open(egp, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f, delimiter=";"); w.writerow(eg_hdr); w.writerows(eg_rows)
 
+    import exp_planes as ep                                    # явные плоскости опыта: старт s = 0 (шов), кольцо
+    st, fin = ep.default_planes(int(a.dst))
+    ep.write_experiment(a.dst, start=st, finish=fin)
     print(f"  решётка {a.dst} = копия реш.{a.src} ({len(base)} строк) + {len(groups)} ондуляторов "
           f"({len(poles)} полюсов-«жёсткий край» каждый); всего {M} инстансов")
     print(f"  k={k:.4f}, справочно k_y={Ky:.4e}, ½(B0/Bρ)²·L={Ky*L_dev:.4e} (фокусируют грани полюсов)")

@@ -31,8 +31,9 @@ def perturbed_group_ws(lattice, group_id, dof, out_dir):
     er.apply_group_rigid(rows[1:], ci, groups[group_id], dof)
     with open(os.path.join(dst, "lattice_configs.csv"), "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=";"); w.writerow(hdr); w.writerows(rows[1:])
-    for t in ("element_connectivity.csv", "particle_groups.csv"):
-        shutil.copyfile(os.path.join(TB, t), os.path.join(dst, t))
+    for t in ("element_connectivity.csv", "particle_groups.csv", "rf_cavities.csv"):
+        if os.path.exists(os.path.join(TB, t)):
+            shutil.copyfile(os.path.join(TB, t), os.path.join(dst, t))
     return out_dir
 
 

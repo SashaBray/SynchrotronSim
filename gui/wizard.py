@@ -25,7 +25,7 @@ from .widgets import MONO, PathPicker
 
 ELECTRON_M = "9.1093837e-31"
 ELECTRON_Q = "-1.602176634e-19"
-V_SURROGATE = 2.967e8            # рабочая скорость пучка проекта (суррогатная энергия γ≈7)
+
 
 
 # --------------------------------------------------------------------------- 1. решётка
@@ -206,43 +206,38 @@ class BeamPage(QWizardPage):
         self.combo = QComboBox()
         for gid, parts in sorted(groups.items()):
             p0 = parts[0]
-            self.combo.addItem(f"группа {gid}: {len(parts)} частиц, старт "
-                               f"({p0['x']}, {p0['y']}, {p0['z']})", gid)
+            self.combo.addItem(f"группа {gid}: {len(parts)} частиц, первая x={p0.get('x')} м, "
+                               f"y={p0.get('y')} м, δ={p0.get('delta')}", gid)
         self.combo.setEnabled(bool(groups))
 
         self.n_part = QComboBox()
-        self.n_part.addItem("5 — центр + 4 спутника (±r по y и z)", 5)
+        self.n_part.addItem("5 — центр + 4 спутника (±r по x и y)", 5)
         self.n_part.addItem("13 — центр + 12 по окружности", 13)
         self.radius = QDoubleSpinBox()
         self.radius.setRange(0.0, 100.0)
         self.radius.setDecimals(3)
         self.radius.setValue(0.25)
         self.radius.setSuffix(" мм")
-        self.speed = QDoubleSpinBox()
-        self.speed.setRange(1e3, 2.998e8)
-        self.speed.setDecimals(0)
-        self.speed.setValue(V_SURROGATE)
-        self.speed.setSuffix(" м/с")
-        self.x0 = QDoubleSpinBox(); self.x0.setRange(-1e4, 1e4); self.x0.setDecimals(6); self.x0.setSuffix(" м")
-        self.y0 = QDoubleSpinBox(); self.y0.setRange(-1e4, 1e4); self.y0.setDecimals(6); self.y0.setSuffix(" м")
-        self.z0 = QDoubleSpinBox(); self.z0.setRange(-1e4, 1e4); self.z0.setDecimals(6); self.z0.setSuffix(" м")
+        self.x0 = QDoubleSpinBox(); self.x0.setRange(-1e3, 1e3); self.x0.setDecimals(3); self.x0.setSuffix(" мм")
+        self.y0 = QDoubleSpinBox(); self.y0.setRange(-1e3, 1e3); self.y0.setDecimals(3); self.y0.setSuffix(" мм")
+        self.delta = QDoubleSpinBox(); self.delta.setRange(-0.5, 0.5); self.delta.setDecimals(6)
         self.mass = QLineEdit(ELECTRON_M)
         self.charge = QLineEdit(ELECTRON_Q)
 
-        box_new = QGroupBox("Новый пучок")
+        box_new = QGroupBox("Новый пучок (в рамке старт-плоскости опыта)")
         f = QFormLayout(box_new)
         f.addRow("Состав:", self.n_part)
         f.addRow("Радиус пучка:", self.radius)
-        f.addRow("Скорость вдоль X:", self.speed)
-        f.addRow("Старт x:", self.x0)
-        f.addRow("Старт y:", self.y0)
-        f.addRow("Старт z:", self.z0)
+        f.addRow("Центр x (гориз.):", self.x0)
+        f.addRow("Центр y (верт.):", self.y0)
+        f.addRow("Отклонение импульса δ:", self.delta)
         f.addRow("Масса частицы, кг:", self.mass)
         f.addRow("Заряд частицы, Кл:", self.charge)
         self.box_new = box_new
 
-        hint = QLabel("Скорость по умолчанию — рабочая для проекта (суррогатная энергия γ≈7): "
-                      "трекинг ведётся на ней, а проектные 6 ГэВ используются для излучения.")
+        hint = QLabel("Координаты частиц — в рамке СТАРТ-плоскости опыта (по умолчанию s = 0: у кольца — середина "
+                      "шва; задаётся exp_planes.py). Все частицы летят по нормали плоскости (x' = y' = 0) с "
+                      "опорным импульсом × (1 + δ) — суррогатная энергия γ≈7, проектные 6 ГэВ — для излучения.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color:#666;")
 
@@ -271,8 +266,8 @@ class BeamPage(QWizardPage):
         if not self.rb_new.isChecked():
             return []
         r = self.radius.value() * 1e-3
-        x0, y0, z0 = self.x0.value(), self.y0.value(), self.z0.value()
-        v = self.speed.value()
+        x0, y0 = self.x0.value() * 1e-3, self.y0.value() * 1e-3
+        d = self.delta.value()
         m, q = self.mass.text().strip(), self.charge.text().strip()
         n = int(self.n_part.currentData())
         if n == 5:
@@ -280,8 +275,9 @@ class BeamPage(QWizardPage):
         else:
             offs = [(0.0, 0.0)] + [(r * math.cos(2 * math.pi * k / 12), r * math.sin(2 * math.pi * k / 12))
                                    for k in range(12)]
-        return [[str(gid), str(i + 1), m, q, repr(x0), repr(y0 + dy), repr(z0 + dz), repr(v), "0.0", "0.0"]
-                for i, (dy, dz) in enumerate(offs)]
+        # group_id;part_id;m;q;x;xp;y;yp;ct;delta — локальные координаты старт-плоскости (СИ)
+        return [[str(gid), str(i + 1), m, q, repr(x0 + dx), "0.0", repr(y0 + dy), "0.0", "0.0", repr(d)]
+                for i, (dx, dy) in enumerate(offs)]
 
 
 # --------------------------------------------------------------------------- 4. загрузка в базу

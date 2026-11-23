@@ -185,8 +185,8 @@ class SimulationTab(TabBase):
         self.group.clear()
         for gid, parts in sorted(projects.particle_groups().items()):
             p0 = parts[0]
-            self.group.addItem(f"пучок {gid} — {len(parts)} частиц, старт "
-                               f"({p0.get('x', '?')}, {p0.get('y', '?')}, {p0.get('z', '?')})", gid)
+            self.group.addItem(f"пучок {gid} — {len(parts)} частиц, первая в рамке старта "
+                               f"x={p0.get('x', '?')} м, y={p0.get('y', '?')} м, δ={p0.get('delta', '?')}", gid)
         self.group.blockSignals(False)
         if self.project is not None:
             idx = self.exp.findData(self.project.exp)

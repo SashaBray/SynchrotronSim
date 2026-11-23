@@ -101,8 +101,9 @@ def _write(name, header, rows):
 
 
 def make_beam(x0, radius=1e-3, n_circle=12, grp_id=TMP_GRP):
-    """13 частиц у стартовой плоскости x=x0: 12 по кругу Ø2·radius в поперечной (y,z) + 1 в центре.
-    Все летят вдоль +x со скоростью пучка. Возврат список строк particle_groups."""
+    """13 частиц у стартовой плоскости x=x0 (её задаёт строка опыта): 12 по кругу Ø2·radius в поперечной (y,z) +
+    1 в центре. Все летят вдоль +x со скоростью пучка (xp = yp = δ = 0). Строки particle_groups — в ЛОКАЛЬНЫХ
+    координатах старт-плоскости с нормалью +x: локальный x = глобальный y, локальный y = глобальный z."""
     parts = [(0.0, 0.0)]
     for k in range(n_circle):
         a = 2 * math.pi * k / n_circle
@@ -110,7 +111,7 @@ def make_beam(x0, radius=1e-3, n_circle=12, grp_id=TMP_GRP):
     rows = []
     for pid, (y, z) in enumerate(parts, start=1):
         rows.append([str(grp_id), str(pid), repr(ME), repr(QE),
-                     repr(x0), repr(y), repr(z), repr(V_BEAM), "0.0", "0.0"])
+                     repr(y), "0.0", repr(z), "0.0", "0.0", "0.0"])
     return rows
 
 
@@ -147,14 +148,15 @@ def build_windings(windings, yaw=0.0, lat_id=TMP_LAT, grp_id=TMP_GRP, exp_id=TMP
     con_new = [r for r in con_r if r[0] != str(lat_id)] + con_rows
     # пучок у стартовой плоскости
     grp_new = [r for r in grp_r if r[0] != str(grp_id)] + make_beam(CENTER - ENTRY, radius=radius, grp_id=grp_id)
-    # опыт: финиш-плоскость на x=CENTER+EXIT, нормаль +x (3 точки + направление)
+    # опыт: старт x=CENTER−ENTRY, финиш x=CENTER+EXIT, обе нормали +x (явные плоскости по именам столбцов)
     xf = CENTER + EXIT
-    p1 = (xf, 1.0, 1.0); p2 = (xf, -1.0, 1.0); p3 = (xf, 0.0, -1.0)
-    erow = [str(exp_id), str(lat_id), str(grp_id), "1.00E-11", "0", "1",
-            f"{p1[0]:.6f}", f"{p1[1]:.6f}", f"{p1[2]:.6f}",
-            f"{p2[0]:.6f}", f"{p2[1]:.6f}", f"{p2[2]:.6f}",
-            f"{p3[0]:.6f}", f"{p3[1]:.6f}", f"{p3[2]:.6f}", "1.0", "0.0", "0.0"]
-    erow += [""] * (len(exp_h) - len(erow))
+    cells = dict(exp_id=str(exp_id), lattice_id=str(lat_id), group_id=str(grp_id), dt="1.00E-11",
+                 max_turns="0", traj_stride="1",
+                 start_x=repr(float(CENTER - ENTRY)), start_y="0.0", start_z="0.0",
+                 start_nx="1.0", start_ny="0.0", start_nz="0.0",
+                 finish_x=repr(float(xf)), finish_y="0.0", finish_z="0.0",
+                 finish_nx="1.0", finish_ny="0.0", finish_nz="0.0")
+    erow = [cells.get(c, "") for c in exp_h]
     exp_new = [r for r in exp_r if r and r[0] != str(exp_id)] + [erow]
     _write("lattice_configs.csv", lat_h, lat_new)
     _write("element_connectivity.csv", con_h, con_new)

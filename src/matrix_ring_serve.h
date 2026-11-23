@@ -21,6 +21,12 @@
 // Срезы (PIECES/PIECEMETA) — копии магнитов: возмущения KICK..DK3 помечают их устаревшими, и они лениво
 // пересобираются перед следующим PIECES/PIECEMETA (YAW меняет только рамки магнита — их срезы читают напрямую).
 //
+// РЕЗОНАТОРЫ УСТАНОВКИ (rf_cavities.csv по lattice_id, как beam_injection.load_cavities). Нет строк ⇒ ВЧ на
+// плоскости наблюдения в конце оборота (как всегда). Есть ⇒ при включённом ВЧ кик на каждом резонаторе в своём
+// промежутке (часы: запаздывание τ = t0 + Σ Δt_raw/β − (s_c/C)·C_RF) и в конце оборота — только резонатор
+// в плоскости наблюдения. Одиночные пролёты ELEM/PIECES применяют резонаторы внутри пути (иначе 6D-орбита
+// после резонатора неверна), конец оборота — только turn().
+//
 // ЧАСТОТА ВЧ. freq_hz ≤ 0 ⇒ f_RF = h·c/C (резонатор настроен на геометрический периметр — как было всегда).
 // freq_hz > 0 ⇒ «длина ВЧ-оборота» C_RF = h·c/f_RF: за оборот опорные часы уходят на C_RF (не на C), фаза
 // 2πh·t/C_RF. Расстройка Δf сдвигает равновесную энергию δ ≈ −Δf/(η·f) — ВЧ-частота становится актуатором.
@@ -59,6 +65,10 @@ struct RingModel {
     double c_rf = 0.0;                               // длина ВЧ-оборота: периметр или h·c/f_RF (setRf)
     std::vector<Piece> pieces;                       // читать через currentPieces(): после возмущения устаревают
     bool pieces_stale = false;
+    std::vector<std::vector<Node>> cav_before;       // резонаторы в промежутке ПЕРЕД mags[j]
+    std::vector<Node> cav_tail;                      // после последнего магнита, до плоскости
+    double end_share = -1.0;                         // доля резонаторов в плоскости наблюдения (< 0 ⇒ нет)
+    bool has_cav = false;
     uint64_t requests = 0;
 
     void build() {
@@ -77,7 +87,23 @@ struct RingModel {
         }
         circumference = s + dot(plane.fr_in.p - m1.fr_out.p, m1.fr_out.axis);
         updateRf();
+        setupCavities();
         buildPieces();
+    }
+
+    // Резонаторы установки на кольце — те же правила, что beam_injection.build_path (старт = плоскость наблюдения).
+    void setupCavities() {
+        cav_before.assign(mags.size(), {}); cav_tail.clear(); end_share = -1.0; has_cav = false;
+        std::vector<CavitySpec> cav = readCavities(ws, cfg.lattice);
+        if (cav.empty()) return;
+        ExpPlanes ep; ep.start.c = plane.center; ep.start.n = plane.axis; ep.has_finish = false;
+        Injection path = buildPath(mags, ep, cav, Settings(), true);
+        size_t j = 0;
+        for (const Node& nd : path.ordered) {
+            if (nd.cavity) { if (j < mags.size()) cav_before[j].push_back(nd); else cav_tail.push_back(nd); }
+            else ++j;
+        }
+        end_share = path.end_share; has_cav = true;
     }
 
     // Длина ВЧ-оборота из конфига: без частоты — ровно периметр (бит-в-бит прежнее поведение).
@@ -132,10 +158,10 @@ struct RingModel {
         return pc / std::sqrt(pc * pc + MC2_MEV * MC2_MEV);
     }
 
-    // RFCA: ΔE = e·V·sin(φ + 2πh·t/C_RF); канонические поперечные импульсы не меняются — Ring.rf_kick.
-    double rfKick(double t, double d) const {
+    // RFCA: ΔE = e·V·share·sin(φ + 2πh·t/C_RF); канонические поперечные импульсы не меняются — Ring.rf_kick.
+    double rfKick(double t, double d, double share = 1.0) const {
         const double PI = 3.14159265358979323846;
-        double dE = cfg.volt_mv * std::sin(cfg.phase_deg * PI / 180.0 + 2.0 * PI * cfg.harmonic * t / c_rf);
+        double dE = (cfg.volt_mv * share) * std::sin(cfg.phase_deg * PI / 180.0 + 2.0 * PI * cfg.harmonic * t / c_rf);
         double pc = cfg.design_mev * (1.0 + d);
         double E = std::sqrt(pc * pc + MC2_MEV * MC2_MEV) + dE;
         return std::sqrt(E * E - MC2_MEV * MC2_MEV) / cfg.design_mev - 1.0;
@@ -146,9 +172,43 @@ struct RingModel {
             && std::isfinite(s.t) && std::isfinite(s.delta);
     }
 
+    // Резонатор внутри пролёта: отрезок до него → запаздывание τ, кик δ (t остаётся «сырым» путём) — Ring._kick_at.
+    void cavKick(State& s, const Node& c, RfClock& k) const {
+        k.acc = k.acc + (s.t - k.raw) / beta(s.delta); k.raw = s.t; k.fired = true;
+        double tau = k.t0 + k.acc - (c.s_c / circumference) * c_rf;
+        s.delta = rfKick(tau, s.delta, c.cav_share);
+    }
+    // Дрейф prev → резонаторы промежутка перед mags[j] (j = n — хвост до плоскости) с киками.
+    void passCavities(State& s, const Frame*& prev, size_t j, RfClock& k) const {
+        const std::vector<Node>& cs = (j < mags.size()) ? cav_before[j] : cav_tail;
+        for (const Node& c : cs) { s = modified_drift(s, *prev, c.fr_in, false); cavKick(s, c, k); prev = &c.fr_out; }
+    }
+    bool cavOn() const { return has_cav && cfg.rf; }
+
     // Один оборот — Ring.turn. false ⇒ частица потеряна.
     bool turn(State& st, IsrRng* rng) const {
         double t0 = st.t;
+        if (cavOn()) {
+            RfClock k; k.start(t0);
+            try {
+                State s = st; const Frame* prev = &plane.fr_out;
+                for (size_t j = 0; j < mags.size(); ++j) {
+                    passCavities(s, prev, j, k);
+                    s = modified_drift(s, *prev, mags[j].fr_in, mags[j].same_plane_as_prev);
+                    s = mags[j].body(s, rng); prev = &mags[j].fr_out;
+                }
+                passCavities(s, prev, mags.size(), k);
+                s = modified_drift(s, *prev, plane.fr_in, false);
+                s.t = k.fired ? t0 + (k.acc + (s.t - k.raw) / beta(s.delta)) - c_rf
+                              : t0 + (s.t - t0) / beta(s.delta) - c_rf;
+                if (end_share > 0) s.delta = rfKick(s.t, s.delta, end_share);
+                if (!finite(s)) return false;
+                st = s;
+                return true;
+            } catch (const ParticleLost&) {
+                return false;
+            }
+        }
         try {
             State s = modified_drift(st, plane.fr_out, mags[0].fr_in, mags[0].same_plane_as_prev);
             s = mags[0].body(s, rng);
@@ -223,6 +283,25 @@ struct RingModel {
                 double* o = &out[p * row + k * 6];
                 o[0] = q.x; o[1] = q.px; o[2] = q.y; o[3] = q.py; o[4] = q.t; o[5] = q.delta;
             };
+            if (cavOn()) {                            // с резонаторами внутри: кики по пути (конец оборота — turn)
+                try {
+                    RfClock k; k.start(in[p].t);
+                    State s = in[p]; const Frame* prev = &plane.fr_out; bool ok = true;
+                    for (size_t j = 0; j < n && ok; ++j) {
+                        passCavities(s, prev, j, k);
+                        s = modified_drift(s, *prev, mags[j].fr_in, mags[j].same_plane_as_prev);
+                        s = mags[j].body(s); prev = &mags[j].fr_out;
+                        ok = finite(s);
+                        if (ok) put(j, s);
+                    }
+                    if (ok) {
+                        passCavities(s, prev, n, k);
+                        State e = modified_drift(s, *prev, plane.fr_in, false);
+                        if (finite(e)) put(n, e);
+                    }
+                } catch (const ParticleLost&) {}
+                continue;
+            }
             try {                                     // Ring.track_elements: выход каждого магнита, затем плоскость
                 State s = modified_drift(in[p], plane.fr_out, mags[0].fr_in, mags[0].same_plane_as_prev);
                 s = mags[0].body(s);
@@ -258,10 +337,12 @@ struct RingModel {
             };
             State s = in[p]; put(0, s);
             const Frame* prev = &plane.fr_out;
+            RfClock k; k.start(s.t); bool cav = cavOn();
             try {
                 for (size_t q = 0; q < n; ++q) {
                     const Piece& pc = pcs[q];
                     if (pc.junction) {
+                        if (cav) passCavities(s, prev, (size_t)pc.mag, k);
                         s = modified_drift(s, *prev, mags[pc.mag].fr_in, mags[pc.mag].same_plane_as_prev);
                         prev = &mags[pc.mag].fr_out;
                     }

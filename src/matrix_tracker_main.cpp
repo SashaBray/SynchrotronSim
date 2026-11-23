@@ -136,7 +136,8 @@ static int runServe() {
 
 // Резонатор опыта из строки radiation_params.csv (rf: none/ideal/sine + rf_voltage_mv/rf_harmonic/rf_phase_deg/
 // rf_freq_hz) — как matrix_tracker.load_radiation + rf_spec. Пустая фаза или auto ⇒ синхронная.
-struct RfRow { std::string type = "none"; double volt = 0, h = 0, phase_deg = 0, freq = 0; bool phase_auto = true; };
+struct RfRow { std::string type = "none"; double volt = 0, h = 0, phase_deg = 0, freq = 0, ideal_energy = 0;
+               bool phase_auto = true; };
 
 static bool readRfRow(const mc::Table& rp, const std::vector<std::string>& r, RfRow& o, std::string& err) {
     auto c = [&](const char* k) { return mc::cell(r, rp.col(k)); };
@@ -145,6 +146,8 @@ static bool readRfRow(const mc::Table& rp, const std::vector<std::string>& r, Rf
     if (o.type != "none" && o.type != "ideal" && o.type != "sine") {
         err = "неизвестный тип резонатора rf=" + o.type + " (допустимо: none, ideal, sine)"; return false;
     }
+    if (o.type == "ideal" && !c("rf_ideal_energy_mev").empty())      // энергия после идеального резонатора, МэВ
+        o.ideal_energy = std::stod(c("rf_ideal_energy_mev"));
     if (o.type == "sine") {
         if (c("rf_voltage_mv").empty() || c("rf_harmonic").empty()) {
             err = "тип rf=sine требует rf_voltage_mv и rf_harmonic"; return false;
@@ -161,7 +164,11 @@ static bool readRfRow(const mc::Table& rp, const std::vector<std::string>& r, Rf
 
 static mc::RfSpec makeRf(const RfRow& rr, const mc::Injection& inj, double design) {
     mc::RfSpec rf;
-    if (rr.type == "ideal") rf.type = mc::RfSpec::IDEAL;
+    rf.L = inj.ring_len; rf.end_share = inj.end_share;
+    if (rr.type == "ideal") {                    // δ после резонатора = E/E_design − 1 (пусто — проектная, δ = 0)
+        rf.type = mc::RfSpec::IDEAL; rf.design = design;
+        rf.ideal_delta = (rr.ideal_energy > 0) ? rr.ideal_energy / design - 1.0 : 0.0;
+    }
     if (rr.type == "sine") {
         rf.type = mc::RfSpec::SINE; rf.volt = rr.volt; rf.h = rr.h; rf.design = design;
         rf.prepare(inj, rr.freq, rr.phase_auto, rr.phase_deg);
@@ -169,47 +176,74 @@ static mc::RfSpec makeRf(const RfRow& rr, const mc::Injection& inj, double desig
     return rf;
 }
 
-// --track <exp_id> <turns> [x0_mm y0_mm] — АВТОНОМНЫЙ трек кольца из БД: инжекция + N оборотов + ВЧ.
-// Пишет results/trajectories_local_exp<exp>.npz (mode=long) для traj_analyzer + печатает финальные состояния
-// (для регрессии): "<idx> x px y py t delta surv" или "<idx> LOST surv". x0/y0 (мм) ⇒ ОДНА частица (скан).
-static int runTrack(const std::string& ws, int exp, int turns, double x0_mm, double y0_mm) {
+// Конфиг опыта (решётка/группа/плоскости/Settings/радиация) — общее для --track и --full. Пусто ⇒ err.
+struct ExpCfg { int lattice = -1, group = -1; mc::Settings stg; mc::ExpPlanes planes;
+                bool sr = false; double design = 6000.0; RfRow rr; };
+static bool readExpCfg(const std::string& ws, int exp, ExpCfg& c, std::string& err) {
     mc::Table ex = mc::readTable(ws + "tables/experiments.csv");
     int ce = ex.col("exp_id"), cl = ex.col("lattice_id"), cg = ex.col("group_id");
     int clr = ex.col("loss_radius_mm"), cps = ex.col("plane_same_tol_mm"),
         cptl = ex.col("plane_parallel_tol"), cns = ex.col("n_slices");
-    int lattice = -1, group = -1; mc::Settings stg;
     for (auto& r : ex.rows) if (mc::cell(r, ce) == std::to_string(exp)) {
-        lattice = std::stoi(mc::cell(r, cl)); group = std::stoi(mc::cell(r, cg));
-        if (!mc::cell(r, clr).empty())  stg.loss_radius_m     = std::stod(mc::cell(r, clr)) * 1e-3;
-        if (!mc::cell(r, cps).empty())  stg.plane_same_tol_m  = std::stod(mc::cell(r, cps)) * 1e-3;
-        if (!mc::cell(r, cptl).empty()) stg.plane_parallel_tol = std::stod(mc::cell(r, cptl));
-        if (!mc::cell(r, cns).empty())  stg.n_slices          = std::stoi(mc::cell(r, cns));
+        c.lattice = std::stoi(mc::cell(r, cl)); c.group = std::stoi(mc::cell(r, cg));
+        if (!mc::cell(r, clr).empty())  c.stg.loss_radius_m      = std::stod(mc::cell(r, clr)) * 1e-3;
+        if (!mc::cell(r, cps).empty())  c.stg.plane_same_tol_m   = std::stod(mc::cell(r, cps)) * 1e-3;
+        if (!mc::cell(r, cptl).empty()) c.stg.plane_parallel_tol = std::stod(mc::cell(r, cptl));
+        if (!mc::cell(r, cns).empty())  c.stg.n_slices           = std::stoi(mc::cell(r, cns));
+        try { c.planes = mc::readExpPlanes(ex, r); }
+        catch (const std::exception& e) { err = e.what(); return false; }
         break;
     }
-    if (lattice < 0) { std::cerr << "Experiment " << exp << " not found\n"; return 1; }
+    if (c.lattice < 0) { err = "Experiment " + std::to_string(exp) + " not found"; return false; }
     // радиация: строка в radiation_params.csv → СИ вкл (энергия/ВЧ оттуда); нет строки → выкл.
-    bool sr = false; double design = 6000.0;
-    RfRow rr;
     mc::Table rp = mc::readTable(ws + "tables/radiation_params.csv");
     int re = rp.col("exp_id"), rd = rp.col("design_energy_mev");
     for (auto& r : rp.rows) if (mc::cell(r, re) == std::to_string(exp)) {
-        sr = true;
-        if (!mc::cell(r, rd).empty()) design = std::stod(mc::cell(r, rd));
-        std::string err;
-        if (!readRfRow(rp, r, rr, err)) { std::cerr << "radiation_params: " << err << "\n"; return 1; }
+        c.sr = true;
+        if (!mc::cell(r, rd).empty()) c.design = std::stod(mc::cell(r, rd));
+        if (!readRfRow(rp, r, c.rr, err)) { err = "radiation_params: " + err; return false; }
         break;
     }
-    mc::Injection inj = mc::inject(ws, lattice, group, design, sr, stg);
-    mc::RfSpec rf;
-    try { rf = makeRf(rr, inj, design); }
-    catch (const std::exception& e) { std::cerr << e.what() << "\n"; return 1; }
+    return true;
+}
+
+static void printPath(const mc::Injection& inj) {
+    std::printf("# start plane: p=(%.9g, %.9g, %.9g) n=(%.9g, %.9g, %.9g); %s; line_len=%.17g m\n",
+                inj.plane.center.x, inj.plane.center.y, inj.plane.center.z,
+                inj.plane.axis.x, inj.plane.axis.y, inj.plane.axis.z,
+                inj.closed ? "closed ring (finish = start)" : "open line (portal finish -> start)", inj.ring_len);
+    if (!inj.closed)
+        std::printf("# finish plane: p=(%.9g, %.9g, %.9g) n=(%.9g, %.9g, %.9g)\n",
+                    inj.finish.center.x, inj.finish.center.y, inj.finish.center.z,
+                    inj.finish.axis.x, inj.finish.axis.y, inj.finish.axis.z);
+    for (auto& nd : inj.ordered)
+        if (nd.cavity) std::printf("# rf cavity %s: s=%.9g m from start, share=%.9g\n", nd.dev.c_str(), nd.s_c, nd.cav_share);
+    if (inj.end_share > 0) std::printf("# rf cavity at the end of the pass: share=%.9g\n", inj.end_share);
+    for (auto& id : inj.skipped) std::printf("# rf cavity %s: off the start->finish path, skipped\n", id.c_str());
+}
+
+// --track <exp_id> <turns> [x0_mm y0_mm] — АВТОНОМНЫЙ трек опыта из БД: пролёты старт → финиш (у разомкнутой
+// линии — портал) + ВЧ. Пишет results/trajectories_local_exp<exp>.npz (mode=long) для traj_analyzer + печатает
+// финальные состояния (регрессия): "<idx> x px y py t delta surv" или "<idx> LOST surv". x0/y0 (мм) ⇒ ОДНА частица.
+static int runTrack(const std::string& ws, int exp, int turns, double x0_mm, double y0_mm) {
+    ExpCfg c; std::string err;
+    if (!readExpCfg(ws, exp, c, err)) { std::cerr << err << "\n"; return 1; }
+    mc::Injection inj; mc::RfSpec rf;
+    try {
+        inj = mc::inject(ws, c.lattice, c.group, c.planes, c.design, c.sr, c.stg, c.rr.type != "none");
+        rf = makeRf(c.rr, inj, c.design);
+    } catch (const std::exception& e) { std::cerr << e.what() << "\n"; return 1; }
     if (x0_mm != 0.0 || y0_mm != 0.0) {                        // ОДНА частица со смещением (скан апертуры/затухания)
         inj.states.clear();
         inj.states.push_back({ x0_mm * 1e-3, 0.0, y0_mm * 1e-3, 0.0, 0.0, 0.0 });
     }
     std::printf("# exp %d lattice %d group %d: %zu particles, %s, %zu elements, sr=%d rf=%s design=%.0f turns=%d\n",
-                exp, lattice, group, inj.states.size(), inj.closed ? "closed" : "open",
-                inj.ordered.size(), (int)sr, rf.name(), design, turns);
+                exp, c.lattice, c.group, inj.states.size(), inj.closed ? "closed" : "open",
+                inj.ordered.size() - inj.n_cav, (int)c.sr, rf.name(), c.design, turns);
+    printPath(inj);
+    if (rf.type == mc::RfSpec::IDEAL)
+        std::printf("# rf ideal: delta after cavity = %.17g (E = %.9g MeV)\n", rf.ideal_delta,
+                    c.design * (1.0 + rf.ideal_delta));
     if (rf.type == mc::RfSpec::SINE)
         std::printf("# rf sine: V=%.6g MV h=%.6g C_RF=%.17g m phase=%.17g rad%s U0=%.17g MeV\n",
                     rf.volt, rf.h, rf.c_rf, rf.phase, rf.auto_phase ? " (auto)" : "", rf.U0);
@@ -239,10 +273,10 @@ static int runTrack(const std::string& ws, int exp, int turns, double x0_mm, dou
     npz.addScalarI8("n_turns", turns);
     npz.addScalarBool("closed", inj.closed);
     npz.addScalarF8("ring_len", inj.ring_len);
-    npz.addScalarI8("lattice", lattice); npz.addScalarI8("group", group);
-    npz.addScalarI8("sr", sr ? 1 : 0); npz.addScalarI8("isr", 0);
+    npz.addScalarI8("lattice", c.lattice); npz.addScalarI8("group", c.group);
+    npz.addScalarI8("sr", c.sr ? 1 : 0); npz.addScalarI8("isr", 0);
     npz.addScalarStr("rf", rf.name());
-    npz.addScalarF8("design_mev", design);
+    npz.addScalarF8("design_mev", c.design);
     std::error_code ec; std::filesystem::create_directories(ws + "results", ec);
     std::string npzPath = ws + "results/trajectories_local_exp" + std::to_string(exp) + ".npz";
     if (npz.write(npzPath)) std::printf("# npz: %s\n", npzPath.c_str());
@@ -250,48 +284,25 @@ static int runTrack(const std::string& ws, int exp, int turns, double x0_mm, dou
     return 0;
 }
 
-// Чтение конфига опыта (лат/группа/Settings/радиация) — общее для --track и --full.
-struct ExpCfg { int lattice = -1, group = -1; mc::Settings stg; bool sr = false, rf_ideal = false; double design = 6000.0; };
-static bool readExpCfg(const std::string& ws, int exp, ExpCfg& c) {
-    mc::Table ex = mc::readTable(ws + "tables/experiments.csv");
-    int ce = ex.col("exp_id"), cl = ex.col("lattice_id"), cg = ex.col("group_id");
-    int clr = ex.col("loss_radius_mm"), cps = ex.col("plane_same_tol_mm"),
-        cptl = ex.col("plane_parallel_tol"), cns = ex.col("n_slices");
-    for (auto& r : ex.rows) if (mc::cell(r, ce) == std::to_string(exp)) {
-        c.lattice = std::stoi(mc::cell(r, cl)); c.group = std::stoi(mc::cell(r, cg));
-        if (!mc::cell(r, clr).empty())  c.stg.loss_radius_m      = std::stod(mc::cell(r, clr)) * 1e-3;
-        if (!mc::cell(r, cps).empty())  c.stg.plane_same_tol_m   = std::stod(mc::cell(r, cps)) * 1e-3;
-        if (!mc::cell(r, cptl).empty()) c.stg.plane_parallel_tol = std::stod(mc::cell(r, cptl));
-        if (!mc::cell(r, cns).empty())  c.stg.n_slices           = std::stoi(mc::cell(r, cns));
-        break;
-    }
-    if (c.lattice < 0) return false;
-    mc::Table rp = mc::readTable(ws + "tables/radiation_params.csv");   // строка → СИ вкл (энергия/ВЧ оттуда)
-    int re = rp.col("exp_id"), rd = rp.col("design_energy_mev"), rrf = rp.col("rf");
-    for (auto& r : rp.rows) if (mc::cell(r, re) == std::to_string(exp)) {
-        c.sr = true;
-        if (!mc::cell(r, rd).empty()) c.design = std::stod(mc::cell(r, rd));
-        c.rf_ideal = (mc::cell(r, rrf) == "ideal");
-        break;
-    }
-    return true;
-}
-
 // --full <exp> <turns> [x0_mm y0_mm] — ПОЛНЫЙ трек (x(S)/спектр/тюны): запись на границах элементов за все
 // обороты → results/trajectories_local_exp<exp>.npz (mode=full). БЕЗ ВЧ (как local_trajectories).
 static int runFull(const std::string& ws, int exp, int turns, double x0_mm, double y0_mm) {
-    ExpCfg c;
-    if (!readExpCfg(ws, exp, c)) { std::cerr << "Experiment " << exp << " not found\n"; return 1; }
+    ExpCfg c; std::string err;
+    if (!readExpCfg(ws, exp, c, err)) { std::cerr << err << "\n"; return 1; }
     const int TARGET = 30000;
-    mc::Injection inj = mc::inject(ws, c.lattice, c.group, c.design, c.sr, c.stg);
+    mc::Injection inj;
+    try { inj = mc::inject(ws, c.lattice, c.group, c.planes, c.design, c.sr, c.stg); }
+    catch (const std::exception& e) { std::cerr << e.what() << "\n"; return 1; }
     if (x0_mm != 0.0 || y0_mm != 0.0) {
         inj.states.clear(); inj.states.push_back({ x0_mm * 1e-3, 0.0, y0_mm * 1e-3, 0.0, 0.0, 0.0 });
     }
     std::vector<std::string> elem_names; elem_names.push_back("INJ_PLANE");
     for (auto& nd : inj.ordered) elem_names.push_back(nd.dev.empty() ? "?" : nd.dev);
+    if (!inj.closed) elem_names.push_back("FINISH_PLANE");
     std::printf("# exp %d lattice %d group %d: %zu particles, %s, %zu elements, sr=%d design=%.0f turns=%d (mode=full)\n",
                 exp, c.lattice, c.group, inj.states.size(), inj.closed ? "closed" : "open",
                 inj.ordered.size(), (int)c.sr, c.design, turns);
+    printPath(inj);
     std::vector<double> S, x, px, y, py, ct, delta, X, Y, Z;
     std::vector<int64_t> elem, counts, surv;
     for (size_t i = 0; i < inj.states.size(); ++i) {

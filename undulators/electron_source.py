@@ -27,7 +27,7 @@ os.environ.setdefault("SS_SECTOR", "1")
 import numpy as np
 import matrix_tracker as mt
 
-WS_TABLES = ("lattice_configs.csv", "element_connectivity.csv", "particle_groups.csv")
+WS_TABLES = ("lattice_configs.csv", "element_connectivity.csv", "particle_groups.csv", "rf_cavities.csv")
 # Срезы для орбиты: 12 — как ансамбли ошибок (тюн точен до 0,001, отклик коррекции кэшируется по nsl).
 # Дефолтные 5 (паритет с elegant) смещают тюн на ~0,03 и η на ~4%.
 ORBIT_NSL = 12

@@ -60,7 +60,9 @@ def ring_fingerprint(ring):
         meta = ring.piece_meta()                             # (магнит, стык, изгиб, Leff, θ0, k1, k2, k3) на кусок
     except Exception:
         meta = None                                          # не-CppRing: отпечаток по конфигу+геометрии
-    return hashlib.md5(repr((cfg, geom, meta)).encode()).hexdigest()[:16]
+    cav = tuple(getattr(ring, "rf_cavities", ()) or ())     # резонаторы установки — только если есть (кэши без них целы)
+    key = (cfg, geom, meta, cav) if cav else (cfg, geom, meta)
+    return hashlib.md5(repr(key).encode()).hexdigest()[:16]
 
 
 def cached_build(key, ring, actuators, observables, applier, reader, eps=EPS_DEFAULT, rebuild=False, dims=4):

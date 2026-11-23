@@ -143,7 +143,8 @@ def _cpp_full_dev(exp):
     return [np.column_stack([p["S"], p["x"], p["y"], p["X"], p["Y"], p["Z"]]) for p in _cpp_full(exp)["parts"]]
 
 
-def deviation_paths(lattice, group, radius=1e-3, source="physical", settings=None, use_config_beam=False):
+def deviation_paths(lattice, group, radius=1e-3, source="physical", settings=None, use_config_beam=False,
+                    exp_id=None):
     """Отклонение ПРОБНОГО пучка от ОПОРНОЙ орбиты — 3D-траектория (глоб.) + 2D-графики x(s), y(s).
 
     Пучок [опорная(0), +x, −x, +y, −y] инжектируется В ПЛОСКОСТИ ИНЖЕКЦИИ опыта (как реальный пучок,
@@ -156,8 +157,8 @@ def deviation_paths(lattice, group, radius=1e-3, source="physical", settings=Non
     Опорная = центроид пучка на плоскости (для наших опытов ≈ проектная орбита ⇒ график опорной плоский);
     смещённые ±x/±y осциллируют бетатронно от плоскости инжекции."""
     import beam_injection as bi
-    plane, ordered, _st, info = bi.inject(lattice, group, source=source, settings=settings)
-    finish = info.get("finish", plane); closed = bool(info.get("closed", True))
+    plane, ordered, _st, info = bi.inject(lattice, group, source=source, settings=settings, exp_id=exp_id)
+    finish = info["finish"]; closed = bool(info["closed"])
     r = float(radius)
     if use_config_beam:                                              # РЕАЛЬНЫЙ пучок опыта (напр. 13 частиц демо)
         beam = [tuple(float(v) for v in s) for s in _st]
@@ -172,13 +173,9 @@ def deviation_paths(lattice, group, radius=1e-3, source="physical", settings=Non
         return float(p[0]), float(p[1]), float(p[2])
 
     gap_in = float((ordered[0].fr_in[0] - plane.fr_out[0]) @ plane.fr_out[1])          # плоскость → 1-й элемент
-    if use_config_beam and not closed:                               # ДЕМО: симметричный ЗАВЕРШАЮЩИЙ дрейф (= ведущему);
-        from beam_injection import PlaneMagnet                       # inject ставит финиш на выходе элемента, отодвигаем на gap_in
-        ax = np.asarray(finish.axis, float)
-        finish = PlaneMagnet(np.asarray(finish.fr_in[0], float) + gap_in * ax, ax)
     ord_gaps = [float((ordered[j].fr_in[0] - ordered[j - 1].fr_out[0]) @ ordered[j - 1].fr_out[1])
                 for j in range(1, len(ordered))]
-    gap_out = float((finish.fr_in[0] - ordered[-1].fr_out[0]) @ ordered[-1].fr_out[1])  # ВСЕГДА (открытый: до финиш-плоскости)
+    gap_out = float((finish.fr_in[0] - ordered[-1].fr_out[0]) @ ordered[-1].fr_out[1])  # до финиш-плоскости опыта
 
     # МЕТАДАННЫЕ по точкам (общие): плоскость инжекции, затем на магнит (вход fr_in, выход fr_out), у
     # замкнутого — финиш=плоскость. СП по длинным прямым между ordered-элементами.
@@ -226,17 +223,19 @@ def deviation_paths(lattice, group, radius=1e-3, source="physical", settings=Non
     return out, labels, meta, mags_meta
 
 
-def experiment_closure(lattice, group, source="physical", settings=None, use_config_beam=False):
+def experiment_closure(lattice, group, source="physical", settings=None, use_config_beam=False, exp_id=None):
     """Сводка замыкания опыта для подписи визуализации: инжектированный пучок, 1 оборот, СЕКТОРНЫМ телом.
     Возврат dict(closed, turns, n, survived, residual_mm). Для ДЕМО (use_config_beam) выживание берётся из
-    C++ --full (кик-модель C++, открытый сегмент — residual нет); иначе Python (m.body()+modified_drift)."""
+    C++ --full (кик-модель C++, открытый сегмент — residual нет); иначе Python (m.body()+modified_drift).
+    residual_mm — |финиш − старт| в локальных координатах: у кольца — невязка замыкания, у разомкнутой линии —
+    скачок на портале (финиш → старт)."""
     if use_config_beam:                                                # ДЕМО: счётчик выживания из C++ --full
         parts = _cpp_full(lattice)["parts"]
         return dict(closed=False, turns=1, n=len(parts),
                     survived=sum(1 for p in parts if p.get("survived")), residual_mm=None)
     import beam_injection as bi
-    plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings)
-    finish = info.get("finish", plane); closed = info.get("closed", True)
+    plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings, exp_id=exp_id)
+    finish = info["finish"]; closed = info["closed"]
     res = []; surv = 0
     for st0 in states:
         st = tuple(st0); x0, y0 = st[0], st[2]
@@ -246,8 +245,7 @@ def experiment_closure(lattice, group, source="physical", settings=None, use_con
                 st = mt.modified_drift(st, ordered[j - 1], ordered[j]); st = ordered[j].body(st)
             st = mt.modified_drift(st, ordered[-1], finish)
             surv += 1
-            if closed:
-                res.append(((st[0] - x0) ** 2 + (st[2] - y0) ** 2) ** 0.5)
+            res.append(((st[0] - x0) ** 2 + (st[2] - y0) ** 2) ** 0.5)
         except mt.ParticleLost:
             pass
     return dict(closed=closed, turns=1, n=len(states), survived=surv,
@@ -275,13 +273,18 @@ MC2_MEV = 0.51099895069
 
 
 class SineRF:
-    """Синусоидальный резонатор (RFCA) у плоскости финиша — как ring_analysis.Ring.rf_kick и C++ mc::RfSpec.
-    t частицы — запаздывание от часов ВЧ (м): за оборот t ← t0 + (путь)/β(δ) − C_RF; ΔE = V·sin(φ + 2πh·t/C_RF).
-    C_RF = h·c/f_RF (freq_hz) или длина линии (резонатор на ней настроен). phase_deg=None ⇒ синхронная фаза
-    φs = π − asin(U0/V) над критической энергией; U0 — потеря энергии опорной частицы (нули) за оборот без ВЧ."""
+    """Синусоидальный ВЧ (RFCA) — как ring_analysis.Ring.rf_kick и C++ mc::RfSpec. Резонаторы — плоскости на пути
+    (beam_injection.CavityNode, s_c от старта, доля напряжения share) и/или в конце пролёта (end_share).
+    t частицы внутри пролёта — «сырой» путь; часы ВЧ: на резонаторе запаздывание τ = t0 + Σ Δt_raw/β(δ) −
+    (s_c/L)·C_RF, ΔE = V·share·sin(φ + 2πh·τ/C_RF); в конце пролёта t ← t0 + Σ Δt_raw/β(δ) − C_RF (отрезки между
+    резонаторами, β по δ в конце отрезка). Без резонаторов внутри — дословно прежнее t ← t0 + путь/β(δ) − C_RF.
+    C_RF = h·c/f_RF (freq_hz) или длина линии L. phase_deg=None ⇒ синхронная фаза φs = π − asin(U0/V);
+    U0 — потеря энергии опорной частицы (нули) за пролёт без ВЧ. φ — фаза, которую видит опорная частица."""
 
-    def __init__(self, spec, line_len, one_turn_delta=None):
+    def __init__(self, spec, line_len, one_turn_delta=None, end_share=1.0):
         self.V = float(spec["volt_mv"]); self.h = float(spec["harmonic"])
+        self.L = float(line_len); self.end_share = end_share
+        self._fired = False
         self.design = float(spec.get("design_mev") or 6000.0)
         f = float(spec.get("freq_hz") or 0.0)
         self.c_rf = self.h * C_LIGHT / f if f > 0 else float(line_len)
@@ -300,19 +303,37 @@ class SineRF:
         pc = self.design * (1.0 + d)
         return pc / math.sqrt(pc * pc + MC2_MEV * MC2_MEV)
 
-    def apply(self, st, t0):
-        """Конец оборота: время → запаздывание от часов ВЧ, затем энергетический кик. st — 6-кортеж."""
-        x, px, y, py, t, d = st
-        t = t0 + (t - t0) / self.beta(d) - self.c_rf
-        dE = self.V * math.sin(self.phase + 2.0 * math.pi * self.h * t / self.c_rf)
+    def _kick(self, d, tau, share):
+        dE = (self.V * share) * math.sin(self.phase + 2.0 * math.pi * self.h * tau / self.c_rf)
         pc = self.design * (1.0 + d)
         E = math.sqrt(pc * pc + MC2_MEV * MC2_MEV) + dE
-        d = math.sqrt(E * E - MC2_MEV * MC2_MEV) / self.design - 1.0
+        return math.sqrt(E * E - MC2_MEV * MC2_MEV) / self.design - 1.0
+
+    def start(self, t0):
+        """Начало пролёта: часы отрезков (нужно, если на пути есть резонаторы)."""
+        self._t0 = t0; self._raw = t0; self._acc = 0.0; self._fired = False
+
+    def at_cavity(self, node, st):
+        """Резонатор на пути: отрезок до него → запаздывание τ, кик δ. t остаётся «сырым» путём."""
+        x, px, y, py, t, d = st
+        self._acc = self._acc + (t - self._raw) / self.beta(d); self._raw = t; self._fired = True
+        tau = self._t0 + self._acc - (node.s_c / self.L) * self.c_rf
+        return (x, px, y, py, t, self._kick(d, tau, node.share))
+
+    def apply(self, st, t0):
+        """Конец пролёта: время → запаздывание от часов ВЧ, затем кик резонатора в плоскости финиша (если есть)."""
+        x, px, y, py, t, d = st
+        if self._fired:
+            t = t0 + (self._acc + (t - self._raw) / self.beta(d)) - self.c_rf
+        else:
+            t = t0 + (t - t0) / self.beta(d) - self.c_rf
+        if self.end_share:
+            d = self._kick(d, t, self.end_share)
         return (x, px, y, py, t, d)
 
 
 def local_trajectories(lattice, group, source="physical", settings=None, n_turns=1, target=30000,
-                       states_override=None):
+                       states_override=None, exp_id=None):
     """ЛОКАЛЬНЫЕ координаты СЕКТОРНОЙ модели (m.body при SS_SECTOR=1; x = отклонение от ОПОРНОЙ ОРБИТЫ,
     бит-в-бит elegant) вдоль трека инжектированного пучка. На точку (границы элементов, вход/выход):
     S (опорная арк-длина, м), x, x'≡px, y, y'≡py, ct, δ + индекс элемента; плюс глоб. XYZ (сверка/3D).
@@ -320,6 +341,7 @@ def local_trajectories(lattice, group, source="physical", settings=None, n_turns
     вместо пучка группы (для произвольной частицы / сканов апертуры).
 
     n_turns>1: ПОЛНАЯ траектория за все n_turns оборотов (S копится: оборот k на S=k·кольцо..(k+1)·кольцо);
+    у разомкнутой линии оборот = пролёт старт → финиш, дальше ПОРТАЛ (состояние финиша — на старт);
     равномерное прореживание шагом до ≤target точек/частицу (сохраняет бетатрон и FFT, ограничивает вес).
     surv_turns — сколько оборотов частица прошла до потери (=n_turns у выжившей).
 
@@ -327,14 +349,14 @@ def local_trajectories(lattice, group, source="physical", settings=None, n_turns
     ~сотни мм), а не бетатрон от опорной орбиты. Поэтому трекаем через m.body()+modified_drift (сектор).
     Требует SS_SECTOR=1 (иначе m.body() = боксовая модель — предупреждение в вызывающем коде)."""
     import beam_injection as bi
-    plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings)
+    plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings, exp_id=exp_id)
     if states_override is not None:
         states = [tuple(map(float, s)) for s in states_override]   # произвольные частицы вместо пучка группы
-    finish = info.get("finish", plane); closed = bool(info.get("closed", True))
+    finish = info["finish"]; closed = bool(info["closed"])
     gap_in = float((ordered[0].fr_in[0] - plane.fr_out[0]) @ plane.fr_out[1])
     ord_gaps = [float((ordered[j].fr_in[0] - ordered[j - 1].fr_out[0]) @ ordered[j - 1].fr_out[1])
                 for j in range(1, len(ordered))]
-    gap_out = float((finish.fr_in[0] - ordered[-1].fr_out[0]) @ ordered[-1].fr_out[1]) if closed else 0.0
+    gap_out = float((finish.fr_in[0] - ordered[-1].fr_out[0]) @ ordered[-1].fr_out[1])   # до финиш-плоскости
     entry_arc = [gap_in]                                          # опорная арк-длина входа каждого элемента
     for j in range(1, len(ordered)):
         entry_arc.append(entry_arc[-1] + ordered[j - 1].L + ord_gaps[j - 1])
@@ -344,10 +366,9 @@ def local_trajectories(lattice, group, source="physical", settings=None, n_turns
         p = fr[0] + x * fr[2] + y * fr[3]
         return float(p[0]), float(p[1]), float(p[2])
 
-    elem_names = ["плоскость инжекции"] + [m.dev for m in ordered]
+    elem_names = ["плоскость инжекции"] + [m.dev for m in ordered] + ([] if closed else ["финиш-плоскость"])
+    fin_idx = 0 if closed else len(ordered) + 1                  # кольцо: финиш = плоскость старта (элемент 0)
     n_turns = max(1, int(n_turns))
-    if n_turns > 1 and not closed:
-        n_turns = 1                                              # открытый сегмент не зациклить
     locals_all = []; globals_all = []; surv_turns = []
     for st0 in states:
         st = tuple(map(float, st0)); done = 0
@@ -364,9 +385,8 @@ def local_trajectories(lattice, group, source="physical", settings=None, n_turns
                     loc.append((base + entry_arc[j], st[0], st[1], st[2], st[3], st[4], st[5], j + 1)); glo.append(gp(ordered[j].fr_in, st[0], st[2]))
                     st = ordered[j].body(st)
                     loc.append((base + entry_arc[j] + ordered[j].L, st[0], st[1], st[2], st[3], st[4], st[5], j + 1)); glo.append(gp(ordered[j].fr_out, st[0], st[2]))
-                if closed:                                       # финиш = плоскость (замыкание) → следующий оборот
-                    st = mt.modified_drift(st, ordered[-1], finish)
-                    loc.append((base + ring_len, st[0], st[1], st[2], st[3], st[4], st[5], 0)); glo.append(gp(finish.fr_in, st[0], st[2]))
+                st = mt.modified_drift(st, ordered[-1], finish)   # → финиш (кольцо: = старт; иначе портал на старт)
+                loc.append((base + ring_len, st[0], st[1], st[2], st[3], st[4], st[5], fin_idx)); glo.append(gp(finish.fr_in, st[0], st[2]))
                 done = turn + 1
         except mt.ParticleLost:
             pass
@@ -379,54 +399,66 @@ def local_trajectories(lattice, group, source="physical", settings=None, n_turns
                 **_radiation_meta())
 
 
-def long_trajectories(lattice, group, source="physical", settings=None, n_turns=1000, states_override=None, rf=None):
+def long_trajectories(lattice, group, source="physical", settings=None, n_turns=1000, states_override=None, rf=None,
+                      exp_id=None):
     """ДЛИННЫЙ трек (много оборотов, 10к+): вместо полной траектории пишет состояние (x,x',y,y') у ПЛОСКОСТИ
     ИНЖЕКЦИИ РАЗ ЗА ОБОРОТ (turn-by-turn, ≤n_turns+1 точек/частицу) — для анализа огибающей/фазового портрета/
     затухания. surv_turns — сколько оборотов частица прошла (=n_turns у выжившей). Сектор m.body (SS_SECTOR=1).
 
-    rf: ВЧ-резонатор (компенсация потерь SS_SR). None — выключен (δ дрейфует вниз от излучения). 'ideal' —
-    ИДЕАЛЬНЫЙ ВЧ: восстанавливает δ до значения в начале оборота (точная компенсация потери каждой частицы,
-    без синхротронных колебаний/энергоразброса). Именно ВЧ переводит падение канонического импульса в диполях
+    rf: ВЧ-резонатор (компенсация потерь SS_SR). None — выключен (δ дрейфует вниз от излучения). 'ideal' или
+    dict(type='ideal', delta) из mt.rf_spec — ИДЕАЛЬНЫЙ ВЧ: после резонатора у частицы ЗАДАННАЯ энергия
+    (δ = delta; 'ideal' — проектная, δ = 0), какой бы она ни прилетела — без синхротронных колебаний. Именно ВЧ переводит падение канонического импульса в диполях
     (радиация) в затухание поперечного УГЛА — см. matrix_tracker._body_sector_symplectic.
     dict(type='sine', …) из mt.rf_spec — РЕАЛЬНЫЙ синусоидальный резонатор (SineRF): синхротронные колебания,
-    равновесная энергия от частоты ВЧ; t частицы — запаздывание от часов ВЧ (м), как в ring_analysis.Ring."""
+    равновесная энергия от частоты ВЧ; t частицы — запаздывание от часов ВЧ (м), как в ring_analysis.Ring.
+
+    Резонаторы — плоскости установки на пути (rf_cavities.csv, beam_injection.CavityNode); у решётки без них —
+    один резонатор в конце пролёта (как всегда). ideal на резонаторе: δ ← заданное δ (mt.ideal_delta).
+    Разомкнутая линия: оборот = пролёт старт → финиш, дальше ПОРТАЛ (состояние финиша — на старт)."""
     import beam_injection as bi
-    plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings)
+    d_ideal = mt.ideal_delta(rf)                               # δ после идеального резонатора (None — не ideal)
+    is_sine = isinstance(rf, dict) and rf.get("type", "sine") == "sine"
+    use_rf = d_ideal is not None or is_sine
+    plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings, exp_id=exp_id,
+                                             rf=use_rf)
     if states_override is not None:
         states = [tuple(map(float, s)) for s in states_override]
-    finish = info.get("finish", plane); closed = bool(info.get("closed", True))
-    gap_in = float((ordered[0].fr_in[0] - plane.fr_out[0]) @ plane.fr_out[1])
-    ord_gaps = [float((ordered[j].fr_in[0] - ordered[j - 1].fr_out[0]) @ ordered[j - 1].fr_out[1])
-                for j in range(1, len(ordered))]
-    gap_out = float((finish.fr_in[0] - ordered[-1].fr_out[0]) @ ordered[-1].fr_out[1]) if closed else 0.0
-    ring_len = gap_in + sum(ord_gaps) + sum(m.L for m in ordered) + gap_out
+    finish = info["finish"]; closed = bool(info["closed"])
+    ring_len = info["line_len"]                                # опорная длина пролёта (= C++ inj.ring_len)
+    end_share = info.get("end_share")
+    has_cav = bool(info.get("cavities"))
     n_turns = max(1, int(n_turns))
-    if not closed:
-        n_turns = 1
 
-    def one_turn(st):                                          # плоскость → кольцо → финиш, без ВЧ
-        st = mt.modified_drift(st, plane, ordered[0]); st = ordered[0].body(st)
-        for j in range(1, len(ordered)):
-            st = mt.modified_drift(st, ordered[j - 1], ordered[j]); st = ordered[j].body(st)
-        return mt.modified_drift(st, ordered[-1], finish)
+    def one_turn(st, hook=None):                               # старт → путь → финиш (hook — кик резонатора)
+        prev = plane
+        for m in ordered:
+            st = mt.modified_drift(st, prev, m); st = m.body(st)
+            if hook is not None and getattr(m, "is_cavity", False):
+                st = hook(m, st)
+            prev = m
+        return mt.modified_drift(st, prev, finish)
 
     sine = None
-    if isinstance(rf, dict):
-        line_len = gap_in                                      # длина линии — та же сумма, что C++ inj.ring_len
-        for j in range(1, len(ordered)):
-            line_len = line_len + ordered[j - 1].L + ord_gaps[j - 1]
-        line_len = line_len + ordered[-1].L + gap_out
-        sine = SineRF(rf, line_len, one_turn_delta=lambda: one_turn((0.0, 0.0, 0.0, 0.0, 0.0, 0.0))[5])
+    if is_sine:
+        sine = SineRF(rf, ring_len, one_turn_delta=lambda: one_turn((0.0, 0.0, 0.0, 0.0, 0.0, 0.0))[5],
+                      end_share=end_share)
     tt_all = []; surv_turns = []; finals = []
     for st0 in states:
         st = tuple(map(float, st0)); done = 0
         tt = [(st[0], st[1], st[2], st[3])]                     # состояние у плоскости на старте
+        if d_ideal is not None:
+            hook = (lambda m, s: (s[0], s[1], s[2], s[3], s[4], d_ideal)) if has_cav else None
+        else:
+            hook = sine.at_cavity if (sine is not None and has_cav) else None
         try:
-            for _turn in range(n_turns):                       # оборот: плоскость→кольцо→финиш(=плоскость)
-                d0 = st[5]; t0 = st[4]                          # δ и t в начале оборота (для ВЧ)
-                st = one_turn(st)
-                if rf == "ideal":                              # ВЧ: вернуть энергию, потерянную за оборот на SR
-                    st = (st[0], st[1], st[2], st[3], st[4], d0)
+            for _turn in range(n_turns):                       # оборот: старт → путь → финиш (кольцо: = старт)
+                t0 = st[4]                                     # t в начале оборота (часы ВЧ)
+                if sine is not None:
+                    sine.start(t0)
+                st = one_turn(st, hook)
+                if d_ideal is not None:                        # ВЧ в конце пролёта: заданная энергия
+                    if end_share:
+                        st = (st[0], st[1], st[2], st[3], st[4], d_ideal)
                 elif sine is not None:                         # реальный резонатор: часы ВЧ + синус-кик
                     st = sine.apply(st, t0)
                 tt.append((st[0], st[1], st[2], st[3])); done += 1
@@ -437,6 +469,7 @@ def long_trajectories(lattice, group, source="physical", settings=None, n_turns=
                 rf_u0_mev=(sine.U0 if sine is not None else None),
                 rf_phase_rad=(sine.phase if sine is not None else None),
                 elem_names=["плоскость инжекции"] + [m.dev for m in ordered], closed=closed,
+                cavities=[(c.cavity_id, c.s_c, c.share) for c in info.get("cavities", [])], end_share=end_share,
                 ring_len=ring_len, lattice=lattice, group=group, **_radiation_meta(rf))
 
 
@@ -554,8 +587,8 @@ def main_injected(exp_id, lattice, group_id):
     """Экспорт траектории ИНЖЕКТИРОВАННОГО пучка (particle_groups) из его плоскости — полный оборот."""
     import beam_injection as bi
     os.makedirs(RESULTS, exist_ok=True)
-    plane, ordered, states, info = bi.inject(lattice, group_id)
-    finish = info.get("finish", plane)
+    plane, ordered, states, info = bi.inject(lattice, group_id, exp_id=exp_id)
+    finish = info["finish"]
     trajs = []
     for st in states:
         s = tuple(st); pts = [_g(plane, 0.0, st[0], st[2])]      # старт: точка на плоскости

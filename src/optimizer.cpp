@@ -42,6 +42,7 @@
 #include "LatticeManager.h"
 #include "Integrator.h"
 #include "FinishPlane.h"
+#include "exp_config.h"
 
 namespace fs = std::filesystem;
 
@@ -1250,38 +1251,16 @@ int main(int argc, char* argv[]) {
     std::cout << "\n";
 
     // ---- 2. Load experiment ----
-    auto expCsv = readCsvTable(ws + "tables/experiments.csv");
+    // по ИМЕНАМ столбцов (exp_config.h): старт/финиш-плоскости опыта, пучок в рамке старта
     int latId = -1, grpId = -1, maxTurns = 0;
     int trajStride = 1;
     double dt = 0.0;
-    FieldVector fp1 = {5.0, -1.0, -1.0};
-    FieldVector fp2 = {5.0,  1.0, -1.0};
-    FieldVector fp3 = {5.0,  0.0,  1.0};
-    FieldVector fpDir = {0.0, 0.0, 0.0};   // направление пересечения (опц., колонки 15-17)
-    for (auto& r : expCsv.rows) {
-        if ((int)r.size() < 5) continue;
-        if (std::stoi(r[0]) == cfg.expId) {
-            latId    = std::stoi(r[1]);
-            grpId    = std::stoi(r[2]);
-            dt       = std::stod(r[3]);
-            maxTurns = std::stoi(r[4]);
-            // Колонка 5 -- traj_stride.
-            if (r.size() >= 15) {
-                try { trajStride = std::max(1, std::stoi(r[5])); } catch (...) {}
-                fp1 = {std::stod(r[6]),  std::stod(r[7]),  std::stod(r[8])};
-                fp2 = {std::stod(r[9]),  std::stod(r[10]), std::stod(r[11])};
-                fp3 = {std::stod(r[12]), std::stod(r[13]), std::stod(r[14])};
-            }
-            if (r.size() >= 18) {   // направление пересечения финиш-плоскости
-                fpDir = {std::stod(r[15]), std::stod(r[16]), std::stod(r[17])};
-            }
-            break;
-        }
-    }
-    if (latId < 0) {
-        std::cerr << "ERROR: experiment " << cfg.expId << " not found\n";
-        return 1;
-    }
+    FieldVector fp1, fp2, fp3, fpDir;      // финиш-плоскость: c±u+v, c−v + направление = нормаль
+    expcfg::Experiment E;
+    try { E = expcfg::readExperiment(ws, cfg.expId); }
+    catch (const std::exception& e) { std::cerr << "ERROR: " << e.what() << "\n"; return 1; }
+    latId = E.lattice; grpId = E.group; dt = E.dt; maxTurns = E.maxTurns; trajStride = E.trajStride;
+    expcfg::finishPoints(E.finish, fp1, fp2, fp3, fpDir);
     std::cout << "  experiment: lat=" << latId << " grp=" << grpId
               << " dt=" << dt << " skipSteps=" << maxTurns << "\n";
 
@@ -1514,17 +1493,17 @@ int main(int argc, char* argv[]) {
     }
 
     // ---- 5. Beam ----
-    auto pgCsv = readCsvTable(ws + "tables/particle_groups.csv");
     std::vector<ParticleState> beam, beam0;
     std::vector<double> masses, charges;
-    for (auto& r : pgCsv.rows) {
-        if ((int)r.size() < 10) continue;
-        if (std::stoi(r[0]) != grpId) continue;
-        masses.push_back(std::stod(r[2]));
-        charges.push_back(std::stod(r[3]));
+    std::vector<expcfg::Particle> parts;
+    try { parts = expcfg::readBeam(ws, grpId, E.start); }     // локальные (рамка старта) → глобальные
+    catch (const std::exception& e) { std::cerr << "ERROR: " << e.what() << "\n"; return 1; }
+    for (auto& pp : parts) {
+        masses.push_back(pp.m);
+        charges.push_back(pp.q);
         ParticleState s;
-        s.pos = {std::stod(r[4]), std::stod(r[5]), std::stod(r[6])};
-        FieldVector v0 = {std::stod(r[7]), std::stod(r[8]), std::stod(r[9])};
+        s.pos = pp.pos;
+        FieldVector v0 = pp.vel;
         s.mom = Integrator::velocityToMomentum(v0, masses.back());
         beam.push_back(s);
         beam0.push_back(s);

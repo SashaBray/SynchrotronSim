@@ -74,7 +74,20 @@ class CppRing:
         self._perturb = []                      # базовые [(cmd, j, value)] — with_*/perturbed: переживают RESET
         self._transient = []                    # транзитные — от последнего apply_perturb
         self._py = None
+        self.rf_cavities = self._read_cavities() if rf else ()   # резонаторы установки (сервер читает тот же файл)
         self._start()
+
+    def _read_cavities(self):
+        """Строки rf_cavities.csv этой решётки (из ws, если задан) — для отпечатка кэша откликов; () — нет."""
+        import csv
+        tb = os.path.join(self.ws, "tables") if self.ws else os.path.join(ROOT, "workspace", "tables")
+        path = os.path.join(tb, "rf_cavities.csv")
+        if not os.path.exists(path):
+            return ()
+        with open(path, encoding="utf-8") as f:
+            rows = [r for r in csv.DictReader(f, delimiter=";") if r.get("lattice_id") == str(self.lattice)]
+        cols = ("cavity_id", "x", "y", "z", "nx", "ny", "nz", "volt_share")
+        return tuple(tuple(r.get(c, "") for c in cols) for r in rows)
 
     # ---- процесс сервера --------------------------------------------------------------------------
     def _start(self):

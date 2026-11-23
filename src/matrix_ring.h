@@ -2,7 +2,7 @@
 // инжекция пучка, стыковочные дрейфы, цикл оборотов + ВЧ. Поверх физдвижка matrix_core.h.
 //
 // Дословный порт геометрии Python-эталона (matrix_tracker.frame/_rot/build_line/check_junctions/
-// modified_drift + beam_injection.inject). xref/ref_bow НЕ нужны — их использует только box-тело,
+// modified_drift + beam_injection: явные старт/финиш-плоскости опыта, пучок в рамке старта, резонаторы). xref/ref_bow НЕ нужны — их использует только box-тело,
 // которого в секторном режиме нет. Валидация — test_matrix_core_ring.py (бит-в-бит с Python).
 #pragma once
 #include "matrix_core.h"
@@ -64,6 +64,8 @@ struct Node {
     Vec3   center, axis, uhat, vhat, entry, exit;   // «ящик» (для стыков)
     Frame  fr_in, fr_out;                            // рамки стыковки (у сектора — криволинейные)
     double theta0_0 = 0, edge1_0 = 0, edge2_0 = 0;   // исходные угол/грани изгиба (база BSCALE — живой зазор ИД)
+    bool   cavity = false;                           // узел-резонатор пути (плоскость, кик делает трекер ВЧ)
+    double cav_share = 0, s_c = 0;                   // доля напряжения, опорная дуга от старт-плоскости
     // Плоскость инжекции — тело=тождество; иначе физдвижок (Element::body сам даёт дрейф для не-sector/не-kick).
     State  body(const State& s, IsrRng* rng = nullptr) const { return is_plane ? s : phys.body(s, rng); }
 };
@@ -254,109 +256,315 @@ inline State modified_drift(const State& st, const Frame& A, const Frame& B, boo
     return { dot(rel, bU), (1.0 + d) * dot(dir, bU), dot(rel, bV), (1.0 + d) * dot(dir, bV), st.t + tt, d };
 }
 
-// ---- ПУЧОК: загрузка группы, плоскость, место инжекции, канонические координаты ----------------
-struct Particle { Vec3 pos, vel; double m, q; };
+// ---- ОПЫТ: пучок в рамке старт-плоскости, явные плоскости, резонаторы установки ----------------
+// Порт beam_injection (Python-эталон): particle_groups — локальные (x, xp, y, yp, ct, delta) в рамке старта,
+// experiments — start_x..start_nz / finish_x..finish_nz (пустой финиш ⇒ кольцо), rf_cavities — плоскости ВЧ.
+struct LocalPart { double x = 0, xp = 0, y = 0, yp = 0, ct = 0, delta = 0, m = 0, q = 0; };
 
-inline std::vector<Particle> loadGroup(const std::string& ws, int group) {
+inline std::vector<LocalPart> loadGroup(const std::string& ws, int group) {
     Table pg = readTable(ws + "tables/particle_groups.csv");
-    int g = pg.col("group_id"), cx = pg.col("x"), cy = pg.col("y"), cz = pg.col("z"),
-        vx = pg.col("vx"), vy = pg.col("vy"), vz = pg.col("vz"), cm = pg.col("m"), cq = pg.col("q");
-    std::vector<Particle> out;
+    if (pg.col("xp") < 0)
+        throw std::runtime_error("particle_groups.csv в старом формате — запустите migrate_explicit_planes.py");
+    int g = pg.col("group_id"), cx = pg.col("x"), cxp = pg.col("xp"), cy = pg.col("y"), cyp = pg.col("yp"),
+        cct = pg.col("ct"), cd = pg.col("delta"), cm = pg.col("m"), cq = pg.col("q");
+    std::vector<LocalPart> out;
     for (auto& r : pg.rows) if (cell(r, g) == std::to_string(group)) {
-        out.push_back({ { cellD(r, cx), cellD(r, cy), cellD(r, cz) },
-                        { cellD(r, vx), cellD(r, vy), cellD(r, vz) }, cellD(r, cm), cellD(r, cq) });
+        LocalPart p;
+        p.x = cellD(r, cx); p.xp = cellD(r, cxp); p.y = cellD(r, cy); p.yp = cellD(r, cyp);
+        p.ct = cellD(r, cct); p.delta = cellD(r, cd); p.m = cellD(r, cm); p.q = cellD(r, cq);
+        out.push_back(p);
     }
     return out;
+}
+
+// (x, xp, y, yp, ct, δ) → канонические (x, px, y, py, t, δ): px = (1+δ)·xp/√(1+xp²+yp²) — local_to_canonical.
+inline State localToCanonical(const LocalPart& p) {
+    double k = (1.0 + p.delta) / std::sqrt(1.0 + p.xp * p.xp + p.yp * p.yp);
+    return { p.x, k * p.xp, p.y, k * p.yp, p.ct, p.delta };
 }
 
 inline double gamma_of(double v) { return 1.0 / std::sqrt(1.0 - (v / C_LIGHT) * (v / C_LIGHT)); }
 // опорный импульс P0 = bm.P_MOM = γ₀·m_e·v₀ (сурогат) — как bip_matrix.
 inline double p0_ref() { return gamma_of(V_BEAM) * ME * V_BEAM; }
 
-inline State toCanonical(const Particle& p, const Node& plane) {
-    Vec3 rel = p.pos - plane.center;
-    double x = dot(rel, plane.uhat), y = dot(rel, plane.vhat);
-    double v = norm(p.vel); Vec3 dir = p.vel * (1.0 / v);
-    double delta = (gamma_of(v) * p.m * v - p0_ref()) / p0_ref();
-    double px = (1.0 + delta) * dot(dir, plane.uhat), py = (1.0 + delta) * dot(dir, plane.vhat);
-    return { x, px, y, py, 0.0, delta };
+struct PlaneSpec { Vec3 c, n; };
+
+// Плоскость из 6 ячеек (точка, нормаль): все пусты ⇒ false; заполнены частично / нулевая нормаль ⇒ ошибка.
+inline bool readPlane(const Table& t, const std::vector<std::string>& r, const std::string& pre,
+                      const char* const cols[6], PlaneSpec& out) {
+    double v[6]; int filled = 0;
+    for (int k = 0; k < 6; ++k) {
+        std::string s = cell(r, t.col(pre + cols[k]));
+        if (!s.empty() && s != "-") { v[k] = std::stod(s); ++filled; } else v[k] = 0.0;
+    }
+    if (filled == 0) return false;
+    if (filled != 6) throw std::runtime_error("плоскость " + pre + ": заполнены не все 6 столбцов");
+    out.c = { v[0], v[1], v[2] }; out.n = { v[3], v[4], v[5] };
+    if (!(norm(out.n) > 0)) throw std::runtime_error("плоскость " + pre + ": нулевая нормаль");
+    return true;
 }
 
-// Результат инжекции: плоскость-старт, упорядоченное кольцо, финиш, канон. состояния, замкнутость, периметр.
-struct Injection { Node plane; std::vector<Node> ordered; Node finish; std::vector<State> states;
-                   bool closed; double ring_len = 0.0; std::vector<double> entry_arc; };
+struct ExpPlanes { PlaneSpec start, finish; bool has_finish = false; };
 
-inline Injection inject(const std::string& ws, int lattice, int group, double design_mev, bool sr,
-                        const Settings& stg) {
-    std::vector<Node> mags = buildLine(ws, lattice, design_mev, sr, stg);
-    std::vector<Particle> parts = loadGroup(ws, group);
-    if (parts.empty()) throw std::runtime_error("beam group not found");
-    // плоскость пучка: центроид позиций + средняя нормированная скорость
-    Vec3 csum, vsum, vdir;
-    for (auto& p : parts) { csum = csum + p.pos; vsum = vsum + p.vel; vdir = vdir + normalize(p.vel); }
-    Vec3 centroid = csum * (1.0 / parts.size());
-    Vec3 normal = normalize(vsum * (1.0 / parts.size()));
-    vdir = normalize(vdir * (1.0 / parts.size()));
-    // поиск дрейфа, где орбита пересекает плоскость пучка по направлению скорости
-    int N = (int)mags.size(); int bi = -1; Vec3 bcenter, baxis; double bdist = 0;
-    for (int k = 0; k < N; ++k) {
-        Vec3 A = mags[k].exit, B = mags[(k + 1) % N].entry, AB = B - A;
+inline ExpPlanes readExpPlanes(const Table& ex, const std::vector<std::string>& r) {
+    static const char* const C6[6] = { "x", "y", "z", "nx", "ny", "nz" };
+    if (ex.col("start_x") < 0)
+        throw std::runtime_error("experiments.csv в старом формате (p1..p3/dir) — запустите migrate_explicit_planes.py");
+    ExpPlanes p;
+    if (!readPlane(ex, r, "start_", C6, p.start))
+        throw std::runtime_error("опыт: не задана старт-плоскость (start_x..start_nz) — exp_planes.py --start-s 0");
+    p.has_finish = readPlane(ex, r, "finish_", C6, p.finish);
+    return p;
+}
+
+struct CavitySpec { std::string id; PlaneSpec pl; double share = 1.0; };
+
+// Резонаторы установки (rf_cavities.csv; нет файла ⇒ нет резонаторов). Пустой volt_share ⇒ 1/N.
+inline std::vector<CavitySpec> readCavities(const std::string& ws, int lattice) {
+    std::vector<CavitySpec> out;
+    std::ifstream probe(ws + "tables/rf_cavities.csv");
+    if (!probe) return out;
+    probe.close();
+    static const char* const C6[6] = { "x", "y", "z", "nx", "ny", "nz" };
+    Table t = readTable(ws + "tables/rf_cavities.csv");
+    int ci = t.col("cavity_id"), cl = t.col("lattice_id"), cs = t.col("volt_share");
+    std::vector<const std::vector<std::string>*> mine;
+    for (auto& r : t.rows) if (cell(r, cl) == std::to_string(lattice)) mine.push_back(&r);
+    for (auto* r : mine) {
+        CavitySpec c; c.id = cell(*r, ci);
+        if (!readPlane(t, *r, "", C6, c.pl)) throw std::runtime_error("rf_cavities: у резонатора " + c.id + " нет плоскости");
+        std::string s = cell(*r, cs);
+        c.share = (s.empty() || s == "-") ? 1.0 / (double)mine.size() : std::stod(s);
+        out.push_back(c);
+    }
+    return out;
+}
+
+// Положение плоскости в линии — beam_injection.locate_plane: slot k — промежуток ПОСЛЕ mags[k] (N−1 — шов
+// или луч после последнего), −1 — луч ДО первого; along — путь от выхода mags[k] (у −1 — от входа mags[0]).
+inline void locatePlane(const std::vector<Node>& mags, const PlaneSpec& pl, int& slot, double& along) {
+    Vec3 n = normalize(pl.n), c = pl.c;
+    int N = (int)mags.size(); bool found = false; double bdist = 0;
+    for (int i = 0; i < N; ++i) {
+        Vec3 A = mags[i].exit, B = mags[(i + 1) % N].entry, AB = B - A;
         double L = norm(AB);
         if (L < 1e-9) continue;
         Vec3 axis = AB * (1.0 / L);
-        double denom = dot(normal, AB);
-        if (std::fabs(denom) < 1e-12) continue;
-        double t = dot(normal, centroid - A) / denom;
-        if (t >= -0.02 && t <= 1.02) {
-            Vec3 center = A + AB * t;
-            if (dot(vdir, axis) <= 0) continue;
-            double dist = norm(center - centroid);
-            if (bi < 0 || dist < bdist) { bi = k; bcenter = center; baxis = axis; bdist = dist; }
+        double denom = dot(n, AB);
+        if (std::fabs(denom) < 1e-12 || dot(n, axis) <= 0) continue;
+        double t = dot(n, c - A) / denom;
+        if (t >= -1e-9 && t <= 1.0 + 1e-9) {
+            double dist = norm(A + AB * t - c);
+            if (!found || dist < bdist) { found = true; bdist = dist; slot = i; along = t * L; }
         }
     }
-    Injection inj;
-    if (bi >= 0) {                                             // ЗАМКНУТОЕ кольцо
-        inj.plane = makePlane(bcenter, baxis);
-        for (int k = bi + 1; k < N; ++k) inj.ordered.push_back(mags[k]);
-        for (int k = 0; k <= bi; ++k) inj.ordered.push_back(mags[k]);
-        inj.finish = inj.plane; inj.closed = true;
-    } else {                                                   // ОТКРЫТЫЙ сегмент
-        inj.plane = makePlane(centroid, vdir);
-        inj.ordered = mags;
-        inj.finish = makePlane(mags.back().exit, mags.back().axis);
-        inj.closed = false;
+    if (!found) {                                                  // открытая линия: лучи
+        struct Ray { int slot; Vec3 P, ax; int sign; };
+        Ray rays[2] = { { -1, mags[0].entry, mags[0].axis, -1 }, { N - 1, mags[N - 1].exit, mags[N - 1].axis, +1 } };
+        for (auto& ry : rays) {
+            double d = dot(n, ry.ax);
+            if (d <= 1e-12) continue;
+            double s = dot(n, c - ry.P) / d;
+            if (ry.sign * s >= 0) {
+                double dist = norm(ry.P + ry.ax * s - c);
+                if (!found || dist < bdist) { found = true; bdist = dist; slot = ry.slot; along = s; }
+            }
+        }
     }
-    for (auto& p : parts) inj.states.push_back(toCanonical(p, inj.plane));
-    // опорная арк-длина входа каждого элемента (entry_arc) + периметр (ring_len) — как local_trajectories.
-    const auto& O = inj.ordered;
+    if (!found) throw std::runtime_error("плоскость не пересекает опорную орбиту по направлению нормали "
+                                         "ни в одном промежутке (внутри элемента или против хода?)");
+}
+
+// Линия — кольцо: шов (выход последнего → вход первого) — прямой промежуток вдоль их осей (beam_injection.SEAM_TOL).
+inline bool seamIsDrift(const std::vector<Node>& mags) {
+    const double TOL = 1e-3;
+    Vec3 A = mags.back().exit, B = mags.front().entry, AB = B - A;
+    double L = norm(AB);
+    if (L < 1e-9) return true;
+    Vec3 ax = AB * (1.0 / L);
+    return dot(ax, mags.back().axis) > 0 && norm(cross(ax, mags.back().axis)) < TOL
+        && norm(cross(ax, mags.front().axis)) < TOL;
+}
+
+// Совпадение плоскостей — matrix_tracker._plane_relation(...) == 'same' и нормали сонаправлены.
+inline bool samePlane(const PlaneSpec& p, const PlaneSpec& q, const Settings& stg) {
+    Vec3 nA = normalize(p.n), nB = normalize(q.n);
+    double gap = std::fabs(dot(nB, p.c - q.c));
+    return norm(cross(nA, nB)) < stg.plane_parallel_tol && gap < stg.plane_same_tol_m && dot(nA, nB) > 0;
+}
+
+// Результат сборки опыта: старт, путь (элементы + узлы-резонаторы), финиш, канон. состояния, кольцо/линия,
+// опорная длина пролёта, дуги входов. end_share — доля резонаторов в плоскости финиша (< 0 ⇒ нет).
+struct Injection { Node plane; std::vector<Node> ordered; Node finish; std::vector<State> states;
+                   bool closed; double ring_len = 0.0; std::vector<double> entry_arc;
+                   double end_share = -1.0; int n_cav = 0; std::vector<std::string> skipped; };
+
+// Путь опыта без пучка — beam_injection.build_path: старт/финиш, элементы (с переходом через шов кольца),
+// резонаторы cav в своих промежутках или в плоскости финиша. rf ⇒ при пустом cav ВЧ в конце пролёта.
+inline Injection buildPath(const std::vector<Node>& mags, const ExpPlanes& ep, const std::vector<CavitySpec>& cav,
+                           const Settings& stg, bool rf) {
+    if (mags.empty()) throw std::runtime_error("решётка пуста");
+    int N = (int)mags.size();
+    Injection inj;
+    inj.plane = makePlane(ep.start.c, ep.start.n);
+    int ks = 0; double as = 0; locatePlane(mags, ep.start, ks, as);
+    inj.closed = !ep.has_finish || samePlane(ep.start, ep.finish, stg);
+    std::vector<int> order; int kf = ks; double af = as;
+    if (inj.closed) {
+        if (!seamIsDrift(mags)) throw std::runtime_error("финиш не задан (кольцо), но линия решётки не замкнута");
+        inj.finish = inj.plane;
+        for (int i = 0; i < N; ++i) order.push_back(((ks + 1 + i) % N + N) % N);
+    } else {
+        inj.finish = makePlane(ep.finish.c, ep.finish.n);
+        locatePlane(mags, ep.finish, kf, af);
+        if (kf > ks || (kf == ks && af > as)) {
+            for (int i = ks + 1; i <= kf; ++i) order.push_back(i);
+        } else {
+            if (!seamIsDrift(mags)) throw std::runtime_error("финиш раньше старта, а линия не замкнута");
+            for (int i = ks + 1; i < N; ++i) order.push_back(i);
+            for (int i = 0; i <= kf; ++i) order.push_back(i);
+        }
+    }
+    if (order.empty()) throw std::runtime_error("на пути старт → финиш нет ни одного элемента");
+    // резонаторы установки (только с ВЧ): в своих промежутках пути или в плоскости финиша (конец пролёта)
+    std::vector<int> slot_of_gap; slot_of_gap.push_back(ks);
+    for (int i : order) slot_of_gap.push_back(i);
+    size_t G = order.size();
+    std::vector<std::vector<std::pair<double, Node>>> ins(G + 1);
+    if (rf && cav.empty()) inj.end_share = 1.0;                        // прежнее правило: ВЧ в конце пролёта
+    for (auto& cv : cav) {
+        if (samePlane(cv.pl, inj.closed ? ep.start : ep.finish, stg)) {
+            inj.end_share = (inj.end_share < 0 ? 0.0 : inj.end_share) + cv.share; continue;
+        }
+        if (!inj.closed && samePlane(cv.pl, ep.start, stg)) { inj.skipped.push_back(cv.id); continue; }
+        int kc = 0; double ac = 0; locatePlane(mags, cv.pl, kc, ac);
+        long hit = -1;
+        for (size_t g = 0; g <= G; ++g) {
+            if (slot_of_gap[g] != kc) continue;
+            double lo = (g == 0) ? as : -INFINITY, hi = (g == G) ? af : INFINITY;
+            if (lo < ac && ac < hi) { hit = (long)g; break; }
+        }
+        if (hit < 0) { inj.skipped.push_back(cv.id); continue; }
+        Node nd = makePlane(cv.pl.c, cv.pl.n);
+        nd.cavity = true; nd.cav_share = cv.share; nd.dev = "RF_CAVITY_" + cv.id;
+        ins[hit].push_back({ ac, nd });
+    }
+    if (rf && !cav.empty() && inj.end_share < 0) {
+        bool any = false; for (auto& v : ins) if (!v.empty()) any = true;
+        if (!any) throw std::runtime_error("ни один резонатор установки (rf_cavities.csv) не стоит на пути старт → финиш");
+    }
+    for (size_t g = 0; g <= G; ++g) {
+        std::stable_sort(ins[g].begin(), ins[g].end(),
+                         [](const std::pair<double, Node>& a, const std::pair<double, Node>& b) { return a.first < b.first; });
+        for (auto& pr : ins[g]) { inj.ordered.push_back(pr.second); ++inj.n_cav; }
+        if (g < G) inj.ordered.push_back(mags[order[g]]);
+    }
+    // опорная арк-длина входа каждого узла (entry_arc) + длина пролёта (ring_len) — как beam_injection.build_path.
+    auto& O = inj.ordered;
     inj.entry_arc.resize(O.size());
     inj.entry_arc[0] = dot(O[0].fr_in.p - inj.plane.fr_out.p, inj.plane.fr_out.axis);   // gap_in
+    if (O[0].cavity) O[0].s_c = inj.entry_arc[0];
     for (size_t j = 1; j < O.size(); ++j) {
         double ord_gap = dot(O[j].fr_in.p - O[j - 1].fr_out.p, O[j - 1].fr_out.axis);
         inj.entry_arc[j] = inj.entry_arc[j - 1] + O[j - 1].phys.Leff + ord_gap;
+        if (O[j].cavity) O[j].s_c = inj.entry_arc[j];
     }
-    double gap_out = inj.closed ? dot(inj.finish.fr_in.p - O.back().fr_out.p, O.back().fr_out.axis) : 0.0;
+    double gap_out = dot(inj.finish.fr_in.p - O.back().fr_out.p, O.back().fr_out.axis);
     inj.ring_len = inj.entry_arc.back() + O.back().phys.Leff + gap_out;
     return inj;
 }
 
-// ---- ТРЕК: N оборотов (плоскость → кольцо → финиш) + ВЧ (ideal: восстановить δ за оборот) -------
+// Опыт → путь + канонические состояния пучка (rf ⇒ резонаторы установки встают в путь).
+inline Injection inject(const std::string& ws, int lattice, int group, const ExpPlanes& ep, double design_mev,
+                        bool sr, const Settings& stg, bool rf = false) {
+    std::vector<Node> mags = buildLine(ws, lattice, design_mev, sr, stg);
+    std::vector<LocalPart> parts = loadGroup(ws, group);
+    if (parts.empty()) throw std::runtime_error("beam group not found");
+    Injection inj = buildPath(mags, ep, rf ? readCavities(ws, lattice) : std::vector<CavitySpec>(), stg, rf);
+    for (auto& p : parts) inj.states.push_back(localToCanonical(p));
+    return inj;
+}
+
+// ---- ВЧ опыта: none | ideal | sine; резонаторы — узлы пути (cavity, s_c, cav_share) и/или конец пролёта ----
+// Часы (дословный порт matrix_traj_export.SineRF): внутри пролёта t — «сырой» путь; на резонаторе запаздывание
+// τ = t0 + Σ Δt_raw/β(δ) − (s_c/L)·C_RF, ΔE = V·share·sin(φ + 2πh·τ/C_RF); в конце пролёта
+// t ← t0 + Σ Δt_raw/β(δ) − C_RF. Без резонаторов внутри — прежнее t ← t0 + путь/β(δ) − C_RF.
+// ideal: δ ← ideal_delta — заданная энергия после резонатора (radiation_params.rf_ideal_energy_mev; пусто — проектная,
+// δ = 0), какой бы частица ни прилетела (на каждом резонаторе и в конце, если там резонатор).
+struct RfClock { double t0 = 0, raw = 0, acc = 0; bool fired = false;
+                 void start(double t) { t0 = t; raw = t; acc = 0.0; fired = false; } };
+
+struct RfSpec {
+    enum Type { NONE = 0, IDEAL = 1, SINE = 2 } type = NONE;
+    double volt = 0, h = 0, design = 6000.0, c_rf = 0, phase = 0, U0 = 0, L = 0, end_share = -1.0;
+    double ideal_delta = 0.0;                        // ideal: δ после резонатора = E_ideal/E_design − 1
+    bool auto_phase = false;
+    const char* name() const { return type == IDEAL ? "ideal" : (type == SINE ? "sine" : "none"); }
+    double beta(double d) const { double pc = design * (1.0 + d); return pc / std::sqrt(pc * pc + MC2_MEV * MC2_MEV); }
+    void prepare(const Injection& inj, double freq_hz, bool phase_auto, double phase_deg);
+    double kick(double d, double tau, double share) const {
+        const double PI = 3.14159265358979323846;
+        double dE = (volt * share) * std::sin(phase + 2.0 * PI * h * tau / c_rf);
+        double pc = design * (1.0 + d);
+        double E = std::sqrt(pc * pc + MC2_MEV * MC2_MEV) + dE;
+        return std::sqrt(E * E - MC2_MEV * MC2_MEV) / design - 1.0;
+    }
+    void atCavity(State& s, const Node& c, RfClock& k) const {
+        if (type == IDEAL) { s.delta = ideal_delta; return; }
+        if (type != SINE) return;
+        k.acc = k.acc + (s.t - k.raw) / beta(s.delta); k.raw = s.t; k.fired = true;
+        double tau = k.t0 + k.acc - (c.s_c / L) * c_rf;
+        s.delta = kick(s.delta, tau, c.cav_share);
+    }
+    void endPass(State& s, RfClock& k) const {
+        if (type == IDEAL) { if (end_share > 0) s.delta = ideal_delta; return; }
+        if (type != SINE) return;
+        if (k.fired) s.t = k.t0 + (k.acc + (s.t - k.raw) / beta(s.delta)) - c_rf;
+        else s.t = k.t0 + (s.t - k.t0) / beta(s.delta) - c_rf;
+        if (end_share > 0) s.delta = kick(s.delta, s.t, end_share);
+    }
+};
+
+// Один пролёт старт → путь → финиш; rf != nullptr ⇒ кики резонаторов на пути (конец пролёта — RfSpec::endPass).
+inline State lineTurn(const Injection& inj, State s, const RfSpec* rf = nullptr, RfClock* k = nullptr) {
+    const Frame* prev = &inj.plane.fr_out;
+    for (const Node& nd : inj.ordered) {
+        s = modified_drift(s, *prev, nd.fr_in, nd.same_plane_as_prev);
+        s = nd.body(s);
+        if (nd.cavity && rf) rf->atCavity(s, nd, *k);
+        prev = &nd.fr_out;
+    }
+    return modified_drift(s, *prev, inj.finish.fr_in, inj.finish.same_plane_as_prev);
+}
+
+// Длина ВЧ-оборота и (при auto) синхронная фаза φs = π − asin(U0/V) по потере опорной частицы (нули).
+inline void RfSpec::prepare(const Injection& inj, double freq_hz, bool phase_auto, double phase_deg) {
+    const double PI = 3.14159265358979323846;
+    L = inj.ring_len; end_share = inj.end_share;
+    c_rf = (freq_hz > 0) ? h * C_LIGHT / freq_hz : inj.ring_len;
+    auto_phase = phase_auto;
+    if (phase_auto) {
+        State z{ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
+        double d1 = lineTurn(inj, z).delta;
+        double pc0 = design, pc1 = design * (1.0 + d1);
+        U0 = std::sqrt(pc0 * pc0 + MC2_MEV * MC2_MEV) - std::sqrt(pc1 * pc1 + MC2_MEV * MC2_MEV);
+        if (!(std::fabs(U0) < volt)) throw std::runtime_error("ВЧ sine: напряжения не хватает на потерю за оборот");
+        phase = PI - std::asin(U0 / volt);
+    } else {
+        phase = phase_deg * PI / 180.0;
+    }
+}
+
+// ---- ТРЕК: N пролётов (старт → путь → финиш; у разомкнутой линии — ПОРТАЛ: финиш → старт) + ВЧ -------
 struct TrackResult { State final_state; int surv_turns; bool lost; };
 
-inline TrackResult trackParticle(const Injection& inj, const State& st0, int n_turns, bool rf_ideal) {
-    State s = st0; int done = 0;
-    const auto& O = inj.ordered;
+inline TrackResult trackParticle(const Injection& inj, const State& st0, int n_turns, const RfSpec& rf) {
+    State s = st0; int done = 0; RfClock k;
     try {
         for (int turn = 0; turn < n_turns; ++turn) {
-            double d0 = s.delta;
-            s = modified_drift(s, inj.plane.fr_out, O[0].fr_in, O[0].same_plane_as_prev);
-            s = O[0].body(s);
-            for (size_t j = 1; j < O.size(); ++j) {
-                s = modified_drift(s, O[j - 1].fr_out, O[j].fr_in, O[j].same_plane_as_prev);
-                s = O[j].body(s);
-            }
-            s = modified_drift(s, O.back().fr_out, inj.finish.fr_in, inj.finish.same_plane_as_prev);
-            if (rf_ideal) s.delta = d0;
+            k.start(s.t);
+            s = lineTurn(inj, s, &rf, &k);
+            rf.endPass(s, k);
             done = turn + 1;
         }
     } catch (const ParticleLost&) {
@@ -369,63 +577,14 @@ inline TrackResult trackParticle(const Injection& inj, const State& st0, int n_t
 // tt[k]=после k-го оборота, ≤n_turns+1 точек). Для вывода в .npz анализатору.
 struct LongResult { std::vector<std::array<double, 4>> tt; int surv_turns = 0; State final_state; bool lost = false; };
 
-// Один проход линии опыта: плоскость → все элементы → финиш (без ВЧ) — matrix_traj_export.long_trajectories.one_turn.
-inline State lineTurn(const Injection& inj, State s) {
-    const auto& O = inj.ordered;
-    s = modified_drift(s, inj.plane.fr_out, O[0].fr_in, O[0].same_plane_as_prev);
-    s = O[0].body(s);
-    for (size_t j = 1; j < O.size(); ++j) {
-        s = modified_drift(s, O[j - 1].fr_out, O[j].fr_in, O[j].same_plane_as_prev);
-        s = O[j].body(s);
-    }
-    return modified_drift(s, O.back().fr_out, inj.finish.fr_in, inj.finish.same_plane_as_prev);
-}
-
-// Резонатор опыта (radiation_params.rf): none | ideal (вернуть потерю за оборот) | sine (RFCA у финиша) —
-// дословный порт matrix_traj_export.SineRF. t частицы — запаздывание от часов ВЧ (м): за оборот
-// t ← t0 + путь/β(δ) − C_RF, ΔE = V·sin(φ + 2πh·t/C_RF), C_RF = h·c/f_RF или длина линии.
-struct RfSpec {
-    enum Type { NONE = 0, IDEAL = 1, SINE = 2 } type = NONE;
-    double volt = 0, h = 0, design = 6000.0, c_rf = 0, phase = 0, U0 = 0;
-    bool auto_phase = false;
-    const char* name() const { return type == IDEAL ? "ideal" : (type == SINE ? "sine" : "none"); }
-    double beta(double d) const { double pc = design * (1.0 + d); return pc / std::sqrt(pc * pc + MC2_MEV * MC2_MEV); }
-    // Длина ВЧ-оборота и (при auto) синхронная фаза φs = π − asin(U0/V) по потере опорной частицы (нули).
-    void prepare(const Injection& inj, double freq_hz, bool phase_auto, double phase_deg) {
-        const double PI = 3.14159265358979323846;
-        c_rf = (freq_hz > 0) ? h * C_LIGHT / freq_hz : inj.ring_len;
-        auto_phase = phase_auto;
-        if (phase_auto) {
-            State z{ 0.0, 0.0, 0.0, 0.0, 0.0, 0.0 };
-            double d1 = lineTurn(inj, z).delta;
-            double pc0 = design, pc1 = design * (1.0 + d1);
-            U0 = std::sqrt(pc0 * pc0 + MC2_MEV * MC2_MEV) - std::sqrt(pc1 * pc1 + MC2_MEV * MC2_MEV);
-            if (!(std::fabs(U0) < volt)) throw std::runtime_error("ВЧ sine: напряжения не хватает на потерю за оборот");
-            phase = PI - std::asin(U0 / volt);
-        } else {
-            phase = phase_deg * PI / 180.0;
-        }
-    }
-    void apply(State& s, double t0, double d0) const {
-        const double PI = 3.14159265358979323846;
-        if (type == IDEAL) { s.delta = d0; return; }
-        if (type != SINE) return;
-        s.t = t0 + (s.t - t0) / beta(s.delta) - c_rf;
-        double dE = volt * std::sin(phase + 2.0 * PI * h * s.t / c_rf);
-        double pc = design * (1.0 + s.delta);
-        double E = std::sqrt(pc * pc + MC2_MEV * MC2_MEV) + dE;
-        s.delta = std::sqrt(E * E - MC2_MEV * MC2_MEV) / design - 1.0;
-    }
-};
-
 inline LongResult trackLong(const Injection& inj, const State& st0, int n_turns, const RfSpec& rf) {
-    LongResult r; State s = st0;
+    LongResult r; State s = st0; RfClock k;
     r.tt.push_back({ s.x, s.px, s.y, s.py });
     try {
         for (int turn = 0; turn < n_turns; ++turn) {
-            double d0 = s.delta, t0 = s.t;
-            s = lineTurn(inj, s);
-            rf.apply(s, t0, d0);
+            k.start(s.t);
+            s = lineTurn(inj, s, &rf, &k);
+            rf.endPass(s, k);
             r.tt.push_back({ s.x, s.px, s.y, s.py });
             r.surv_turns = turn + 1;
         }
@@ -470,16 +629,9 @@ inline FullResult trackFull(const Injection& inj, const State& st0, int n_turns,
                 st = O[j].body(st);
                 rec(base + ea[j] + O[j].phys.Leff, st, (int64_t)(j + 1), O[j].fr_out);
             }
-            if (inj.closed) {                                           // финиш = плоскость (замыкание)
-                st = modified_drift(st, O.back().fr_out, inj.finish.fr_in, inj.finish.same_plane_as_prev);
-                rec(base + inj.ring_len, st, 0, inj.finish.fr_in);
-            } else {                                                    // ОТКРЫТЫЙ (демо): симметричный ЗАВЕРШАЮЩИЙ дрейф = ведущему ea[0]
-                double trail = ea[0];                                   // inject ставит финиш на выходе элемента; отодвигаем на ea[0] (=gap_out при ENTRY=EXIT)
-                Frame ftr = inj.finish.fr_in;                           // финиш-плоскость по BOX-оси (как Python bi.inject), НЕ tilted fr_out
-                ftr.p = ftr.p + ftr.axis * trail;
-                st = modified_drift(st, O.back().fr_out, ftr, false);
-                rec(base + inj.ring_len + trail, st, (int64_t)(O.size() + 1), ftr);
-            }
+            // финиш — явная плоскость опыта (кольцо: = старт, элемент 0; линия: элемент N+1, дальше портал)
+            st = modified_drift(st, O.back().fr_out, inj.finish.fr_in, inj.finish.same_plane_as_prev);
+            rec(base + inj.ring_len, st, inj.closed ? 0 : (int64_t)(O.size() + 1), inj.finish.fr_in);
             r.surv_turns = turn + 1;
         }
     } catch (const ParticleLost&) {}

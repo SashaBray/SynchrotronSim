@@ -34,8 +34,9 @@ def zeroed_ws(lat, prefix, out_dir):
             r[ci["mat_B"]] = "0"; r[ci["edge1"]] = "0"; r[ci["edge2"]] = "0"
     with open(os.path.join(dst, "lattice_configs.csv"), "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=";"); w.writerow(hdr); w.writerows(rows[1:])
-    for t in ("element_connectivity.csv", "particle_groups.csv"):
-        shutil.copyfile(os.path.join(TB, t), os.path.join(dst, t))
+    for t in ("element_connectivity.csv", "particle_groups.csv", "rf_cavities.csv"):
+        if os.path.exists(os.path.join(TB, t)):
+            shutil.copyfile(os.path.join(TB, t), os.path.join(dst, t))
     return out_dir
 
 

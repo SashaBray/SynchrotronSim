@@ -10,7 +10,8 @@
 Режим 2 гоняет пучок глобальным треком от плоскости инжекции и обратно в неё (полный круг), режим 1
 — C++ бинарником с финиш-плоскостью, поставленной в плоскость инжекции.
 
-Установка+пучок+финиш-плоскость берутся из experiments.csv[exp] (ЕДИНЫЙ конфиг эксперимента для обоих ядер).
+Установка+пучок+старт/финиш-плоскости берутся из experiments.csv[exp] (ЕДИНЫЙ конфиг опыта для обоих ядер;
+плоскости — exp_planes.py). Оборот = пролёт старт → финиш; у разомкнутой линии дальше ПОРТАЛ (финиш → старт).
 
 Запуск:  python track3.py --mode kick-phys --exp 44        (установка/пучок — из experiments.csv[44])
          python track3.py --mode diff --exp 44
@@ -35,7 +36,8 @@ RESULTS = os.path.join("workspace", "results")
 
 def run_kick(lattice, group, source, exp_id=None, n_turns=1, thin_eps=0.0, settings=None, save_local=False):
     """Режим 2: глобальный трек инжектированного пучка старт→финиш, n_turns оборотов. Возврат сводки.
-    Замкнут (финиш=старт) ⇒ оборот(ы) + невязка; открыт (финиш≠старт) ⇒ путь до конца сегмента (n_turns=1).
+    Замкнут (финиш=старт) ⇒ оборот(ы) + невязка; разомкнут ⇒ пролёты старт → финиш через ПОРТАЛ (состояние
+    финиша — на старт), «невязка» = скачок на портале.
     thin_eps>0 (м) ⇒ потоковое прореживание траектории по кривизне (лёгкие длинные многооборотные треки).
     save_local ⇒ доп. писать trajectories_local_exp{id}.npz — ЛОКАЛЬНЫЕ координаты (СЕКТОРНАЯ модель m.body,
     x=отклонение от опорной орбиты) для анализатора; глоб. .bin остаётся боксовым (body_global)."""
@@ -45,12 +47,10 @@ def run_kick(lattice, group, source, exp_id=None, n_turns=1, thin_eps=0.0, setti
     _sector = mt.SECTOR
     try:
         mt.SECTOR = False
-        plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings)
+        plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings, exp_id=exp_id)
     finally:
         mt.SECTOR = _sector
-    finish = info.get("finish", plane); closed = info.get("closed", True)
-    if n_turns > 1 and not closed:
-        n_turns = 1                                        # открытый сегмент не зациклить
+    finish = info["finish"]; closed = info["closed"]
     survived = 0; residuals = []; trajs = []; lost_turns = []
     for st in states:
         s = tuple(st); x0, y0 = st[0], st[2]; lost_turn = None; turn = 0
@@ -64,7 +64,7 @@ def run_kick(lattice, group, source, exp_id=None, n_turns=1, thin_eps=0.0, setti
                     s, pp = mte.body_global(ordered[j], s);                  [th.add(p) for p in pp]
                 s, pp = mte.drift_global(s, ordered[-1], finish);          [th.add(p) for p in pp]   # → финиш (замкнут: =старт)
             survived += 1
-            residuals.append(np.hypot(s[0] - x0, s[2] - y0) if closed else np.nan)  # невязка только для замкнутого
+            residuals.append(np.hypot(s[0] - x0, s[2] - y0))      # кольцо — невязка, линия — скачок на портале
         except mt.ParticleLost:
             lost_turn = turn + 1
         trajs.append(th.result()); lost_turns.append(lost_turn)
@@ -72,7 +72,8 @@ def run_kick(lattice, group, source, exp_id=None, n_turns=1, thin_eps=0.0, setti
         os.makedirs(RESULTS, exist_ok=True)
         mte.write_bin(trajs, os.path.join(RESULTS, f"trajectories_exp{exp_id}.bin"))
         if save_local:                                     # ЛОКАЛЬНЫЕ координаты — отдельным секторным треком (см. mte)
-            r = mte.local_trajectories(lattice, group, source=source, settings=settings, n_turns=n_turns)
+            r = mte.local_trajectories(lattice, group, source=source, settings=settings, n_turns=n_turns,
+                                       exp_id=exp_id)
             mte.write_local_npz(os.path.join(RESULTS, f"trajectories_local_exp{exp_id}.npz"), r)
         mte.ensure_experiment(exp_id, lattice)
     return dict(n=len(states), survived=survived, residuals=residuals, info=info, closed=closed,
@@ -87,7 +88,7 @@ def run_long(lattice, group, exp_id, n_turns, rf=None, x0=0.0, y0=0.0, settings=
     rf='ideal' — компенсация потерь. x0/y0 (м) ⇒ ОДНА частица со смещением (сканы апертуры) вместо пучка группы."""
     states_override = [(x0, 0.0, y0, 0.0, 0.0, 0.0)] if (x0 or y0) else None
     r = mte.long_trajectories(lattice, group, source="physical", settings=settings,
-                              n_turns=n_turns, states_override=states_override, rf=rf)
+                              n_turns=n_turns, states_override=states_override, rf=rf, exp_id=exp_id)
     os.makedirs(RESULTS, exist_ok=True)
     mte.write_local_npz(os.path.join(RESULTS, f"trajectories_local_exp{exp_id}.npz"), r)
     mte.ensure_experiment(exp_id, lattice)
@@ -95,35 +96,27 @@ def run_long(lattice, group, exp_id, n_turns, rf=None, x0=0.0, y0=0.0, settings=
 
 
 def author_experiment(lattice, group, exp_id, dt=1e-11, skip_steps=300000, loss_mm=12.0):
-    """АВТОРИНГ конфига эксперимента в experiments.csv (установка+пучок+финиш-плоскость) — ЕДИНЫЙ
-    источник, который читают ОБА ядра. Финиш-плоскость = плоскость инжекции пучка (полный оборот).
-    skip_steps (max_turns, перепрофилир. в C++ как «пропустить N шагов до проверки плоскости») —
-    пропускает старт и противоположное пересечение, ловит ВОЗВРАТ (≈3.7e5 шагов при dt=1e-11)."""
-    plane, ordered, states, info = bi.inject(lattice, group)     # source не важен для геометрии плоскости
-    fin = info.get("finish", plane)                              # в БД пишем ФИНИШ-плоскость (её ловит диффур)
-    closed = info.get("closed", True)
-    c = fin.center; u = fin.uhat; v = fin.vhat; ax = fin.axis
-    p1 = c + 1.0 * u + 1.0 * v; p2 = c - 1.0 * u + 1.0 * v; p3 = c + 0.0 * u - 1.0 * v  # 3 точки плоскости
-    skip = skip_steps if closed else 0                           # открыт: финиш≠старт, пересекается 1 раз — без пропуска
-    row = [str(exp_id), str(lattice), str(group), f"{dt:.2e}".replace("e", "E"), str(skip), "50"]
-    row += [f"{p1[0]:.6f}", f"{p1[1]:.6f}", f"{p1[2]:.6f}",
-            f"{p2[0]:.6f}", f"{p2[1]:.6f}", f"{p2[2]:.6f}",
-            f"{p3[0]:.6f}", f"{p3[1]:.6f}", f"{p3[2]:.6f}"]
-    row += [f"{ax[0]:.6f}", f"{ax[1]:.6f}", f"{ax[2]:.6f}"]        # направление пересечения = ось пучка
-    row += [f"{loss_mm:.1f}"]                                      # ПОРОГ ПОТЕРИ ПУЧКА (мм) — параметр опыта
-    import csv
-    path = os.path.join(TB, "experiments.csv")
-    rows = list(csv.reader(open(path, encoding="utf-8"), delimiter=";")); head = rows[0]
-    rows = [r for r in rows if not (r and r[0] == str(exp_id))]    # заменить, если был
-    rows.append(row)
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        csv.writer(f, delimiter=";").writerows(rows)
+    """АВТОРИНГ строки опыта в experiments.csv — ЕДИНЫЙ конфиг, который читают ОБА ядра. Плоскости опыта
+    (старт/финиш) задаются явно (exp_planes.py) и здесь НЕ перезаписываются; у новой строки старт — s = 0
+    (кольцо: середина шва), финиш пуст (кольцо). Пишутся установка, пучок, порог потери и max_turns для Boris
+    (= «пропустить N шагов до проверки плоскости»: кольцо — skip_steps, иначе 0). Возврат — info инжекции."""
+    import exp_planes as ep
+    try:
+        row = bi.experiment_row(exp_id)
+    except ValueError:
+        row = None
+    if row is None:
+        ep.write_experiment(exp_id, lattice, group, dt=f"{dt:.2e}".replace("e", "E"), traj_stride="50")
+    else:
+        ep.write_experiment(exp_id, lattice, group)
+    plane, ordered, states, info = bi.inject(lattice, group, exp_id=exp_id)
+    ep.write_experiment(exp_id, max_turns=str(skip_steps if info["closed"] else 0), loss_radius_mm=f"{loss_mm:.1f}")
     return info
 
 
 def load_experiment(exp_id):
     """experiments.csv[exp_id] → (lattice_id, group_id) или (None, None).
-    ЕДИНЫЙ конфиг эксперимента (установка+пучок+финиш-плоскость), который читают ОБА ядра.
+    ЕДИНЫЙ конфиг эксперимента (установка+пучок+старт/финиш-плоскости), который читают ОБА ядра.
     ПАРАМЕТРЫ ЯДРА того же опыта читает matrix_tracker.Settings.from_experiment(exp_id)."""
     path = os.path.join(TB, "experiments.csv")
     if not os.path.exists(path):
@@ -180,14 +173,14 @@ def main():
     ap.add_argument("--exp", type=int, required=True, help="id эксперимента в experiments.csv (установка+пучок+финиш-плоскость)")
     ap.add_argument("--lattice", type=int, default=None, help="переопределить установку (иначе — из experiments.csv[exp])")
     ap.add_argument("--group", type=int, default=None, help="переопределить пучок (иначе — из experiments.csv[exp])")
-    ap.add_argument("--turns", type=int, default=1, help="число оборотов (kick-phys, только замкнутый; >1 ⇒ авто-прореживание)")
+    ap.add_argument("--turns", type=int, default=1, help="число оборотов = пролётов старт → финиш (у разомкнутой линии — через портал; >1 ⇒ авто-прореживание)")
     ap.add_argument("--thin", type=float, default=0.0, help="прореживание траектории по кривизне, ε в мм (0=авто: выкл для 1 об., 0.5мм для многих)")
     ap.add_argument("--local", action="store_true", help="доп. писать локальные координаты матядра (S,x,x',y,y',ct,δ) в trajectories_local_exp{id}.npz — для traj_analyzer.py")
     # ДЛИННЫЙ турн-by-turn режим + РАДИАЦИЯ (синхротронное излучение и затухание)
     ap.add_argument("--long", action="store_true", help="длинный турн-by-turn трек (сектор m.body, много оборотов) → trajectories_local_exp{id}.npz (mode=long) для traj_analyzer; минует боксовый глоб. путь")
     ap.add_argument("--sr", action="store_true", help="распределённое синхротронное излучение (потери энергии в изгибах, ∝γ⁴ по ПРОЕКТНОЙ энергии --design-mev)")
     ap.add_argument("--isr", action="store_true", help="+ квантовое возбуждение ISR (гауссов шум фотонов; равновесный эмиттанс/энергоразброс). Требует --sr")
-    ap.add_argument("--rf", choices=["none", "ideal", "sine"], default="none", help="ВЧ-резонатор (компенсация потерь SR): ideal — восстановление δ за оборот ⇒ поперечное затухание; sine — реальный синусоидальный (V/h/фаза/частота из radiation_params.csv) ⇒ синхротронные колебания. Требует --long")
+    ap.add_argument("--rf", choices=["none", "ideal", "sine"], default="none", help="ВЧ-резонатор (компенсация потерь SR): ideal — после резонатора заданная энергия (radiation_params.rf_ideal_energy_mev, пусто — проектная) ⇒ поперечное затухание; sine — реальный синусоидальный (V/h/фаза/частота из radiation_params.csv) ⇒ синхротронные колебания. Требует --long")
     ap.add_argument("--design-mev", type=float, default=None, help="ПРОЕКТНАЯ энергия пучка для SR, МэВ (СИЛА 6000; трекер гоняет сурогатный γ≈7, а SR ∝ γ⁴ берётся по проектной)")
     ap.add_argument("--x0-mm", type=float, default=0.0, help="(--long) ОДНА частица со смещением по x, мм (скан апертуры/затухания) вместо пучка группы")
     ap.add_argument("--y0-mm", type=float, default=0.0, help="(--long) смещение одной частицы по y, мм")
@@ -238,8 +231,8 @@ def main():
 
     if a.author_only:                                      # только конфиг опыта, без трекинга
         author_experiment(lattice, group, a.exp, loss_mm=settings.loss_radius_m * 1e3)
-        print(f"опыт {a.exp} в experiments.csv: установка {lattice}, пучок {group}, "
-              f"финиш-плоскость = плоскость инжекции пучка")
+        print(f"опыт {a.exp} в experiments.csv: установка {lattice}, пучок {group}; плоскости — "
+              f"py -3.14 exp_planes.py --show --exp {a.exp}")
         return
     if a.mode is None:
         ap.error("укажите --mode diff|kick-phys (или --author-only, если нужен только конфиг опыта)")
@@ -254,10 +247,10 @@ def main():
         turns = max(1, a.turns)
         author_experiment(lattice, group, a.exp, loss_mm=settings.loss_radius_m * 1e3)
         print(f"  параметры ядра: {settings}")
-        if rf_mode == "sine":                              # реальный резонатор: параметры — из строки опыта
-            rf = mt.rf_spec({**(rad or {}), "rf": "sine", "design_mev": design_mev or 6000.0})
+        if rf_mode in ("sine", "ideal"):                  # параметры резонатора — из строки опыта (ideal: энергия)
+            rf = mt.rf_spec({**(rad or {}), "rf": rf_mode, "design_mev": design_mev or 6000.0})
         else:
-            rf = None if rf_mode == "none" else rf_mode
+            rf = None
         sr_txt = (f"СИ{' +ISR' if isr_on else ''} [проект {design_mev or 6000:.0f} МэВ], " if sr_on else "СИ выкл, ")
         who = f"1 частица x0={a.x0_mm}мм y0={a.y0_mm}мм" if (a.x0_mm or a.y0_mm) else "пучок группы"
         print(f"  радиация: источник {rad_src}; ДЛИННЫЙ режим {turns} об., {sr_txt}ВЧ={rf_mode}, {who}")
@@ -280,15 +273,16 @@ def main():
                                                     if sr_on else " → синхротронное излучение не учитывается"))
         res = run_kick(lattice, group, "physical", exp_id=a.exp, n_turns=turns, thin_eps=thin_eps,
                        settings=settings, save_local=a.local)
-        kind = "замкнут" if res["closed"] else "ОТКРЫТ (старт→финиш сегмента)"
+        kind = "замкнут" if res["closed"] else "РАЗОМКНУТ (старт → финиш, портал на старт)"
         print(f"\nРежим 2 ({a.mode}): {res['turns']} об., выжило {res['survived']}/{res['n']} частиц — путь {kind}.")
         print(f"  плоскость старта: '{res['after']}' → '{res['before']}'")
         if res["turns"] > 1:
             lost = [f"частица {i} на об.{t}" for i, t in enumerate(res["lost_turns"]) if t]
             print(f"  потери по оборотам: {'; '.join(lost) if lost else 'нет, все дошли'}")
         rr = [r for r in res["residuals"] if not np.isnan(r)]
-        if res["closed"] and rr:
-            print(f"  невязка замыкания за оборот (поперечн.): макс {max(rr)*1e3:.3f} мм, средн {np.mean(rr)*1e3:.3f} мм")
+        if rr:
+            what = "невязка замыкания за оборот" if res["closed"] else "скачок на портале (финиш − старт)"
+            print(f"  {what} (поперечн.): макс {max(rr)*1e3:.3f} мм, средн {np.mean(rr)*1e3:.3f} мм")
         if thin_eps > 0:
             print(f"  траектория прорежена по кривизне (ε={thin_eps*1e3:.2f}мм) — лёгкий bin для визуализации")
         if a.local:

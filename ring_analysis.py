@@ -42,11 +42,24 @@ from beam_injection import PlaneMagnet
 
 
 # ============================================================================ трекер SynchrotronSim
+class _Clock:
+    """Часы ВЧ одного пролёта: t0 — t на старте, raw — «сырой» путь на последнем резонаторе, acc — Σ Δt_raw/β."""
+    __slots__ = ("t0", "raw", "acc", "fired")
+
+    def __init__(self, t0):
+        self.t0 = t0; self.raw = t0; self.acc = 0.0; self.fired = False
+
+
 class Ring:
     """Замкнутое кольцо решётки БД с плоскостью наблюдения перед первым магнитом линии.
 
     start_before_first_m — путь от плоскости до входа первого магнита по опорной орбите (None ⇒ половина
-    замыкающего промежутка; у СИЛА промежуток симметричен, и это совпадает с s=0 elegant)."""
+    замыкающего промежутка; у СИЛА промежуток симметричен, и это совпадает с s=0 elegant).
+
+    ВЧ (rf): резонаторы УСТАНОВКИ — rf_cavities.csv (beam_injection.load_cavities). Нет строк ⇒ ВЧ на плоскости
+    наблюдения в конце оборота (как всегда). Есть ⇒ кик на каждом резонаторе в своём промежутке (часы: τ = t0 +
+    Σ Δt_raw/β − (s_c/C)·C_RF), в конце оборота — только резонатор в плоскости наблюдения. Одиночный пролёт
+    (track_elements, срезы ISR) применяет резонаторы внутри пути. Как C++ RingModel (matrix_ring_serve.h)."""
 
     label = "SynchrotronSim"
     MC2_MEV = 0.51099895069
@@ -82,6 +95,39 @@ class Ring:
         self.circumference = s + float((self.plane.fr_in[0] - m1.fr_out[0]) @ m1.fr_out[1])
         self.names = [m.dev for m in self.mags]
         self.kinds = [m.kind for m in self.mags]
+        self._cav_before = {}; self._cav_tail = []; self._end_share = None; self.rf_cavities = ()
+        if rf is not None:
+            self._setup_cavities()
+
+    def _setup_cavities(self):
+        """Резонаторы установки на кольце — те же правила, что beam_injection.build_path (старт = плоскость)."""
+        import beam_injection as bi
+        cav = bi.load_cavities(self.lattice)
+        if not cav:
+            return
+        path = bi.build_path(self.mags, (self.plane.center, self.plane.axis), None, cav)
+        j = 0
+        for node in path["ordered"]:
+            if node.is_cavity:
+                (self._cav_before.setdefault(j, []) if j < len(self.mags) else self._cav_tail).append(node)
+            else:
+                j += 1
+        self._end_share = path["end_share"]
+        self.rf_cavities = tuple((c["cavity_id"], tuple(map(float, c["center"])), tuple(map(float, c["normal"])),
+                                  float(c["share"])) for c in cav)
+
+    def _kick_at(self, c, st, clk):
+        """Резонатор внутри пролёта: отрезок до него → запаздывание τ, кик δ (t остаётся «сырым» путём)."""
+        x, px, y, py, t, d = st
+        clk.acc = clk.acc + (t - clk.raw) / self.beta(d); clk.raw = t; clk.fired = True
+        tau = clk.t0 + clk.acc - (c.s_c / self.circumference) * self.rf_circumference()
+        return (x, px, y, py, t, self.rf_kick(tau, d, c.share))
+
+    def _pass_cavities(self, st, prev, j, clk):
+        """Дрейф prev → резонаторы промежутка перед mags[j] (j = N — хвост до плоскости) с киками."""
+        for c in (self._cav_before.get(j, ()) if j < len(self.mags) else self._cav_tail):
+            st = mt.modified_drift(st, prev, c); st = self._kick_at(c, st, clk); prev = c
+        return st, prev
 
     def beta(self, delta):
         """Скорость частицы (v/c) при импульсе (1+δ)·p0 проектной энергии."""
@@ -92,6 +138,20 @@ class Ring:
         """Один оборот одной частицы: плоскость → все магниты → плоскость (+ ВЧ). Бросает mt.ParticleLost."""
         mags = self.mags
         t0 = float(st[4])
+        if self.rf and self.rf_cavities:                     # резонаторы установки по пути
+            clk = _Clock(t0); cur = tuple(st); prev = self.plane
+            for j, m in enumerate(mags):
+                cur, prev = self._pass_cavities(cur, prev, j, clk)
+                cur = mt.modified_drift(cur, prev, m); cur = m.body(cur); prev = m
+            cur, prev = self._pass_cavities(cur, prev, len(mags), clk)
+            x, px, y, py, t, d = mt.modified_drift(cur, prev, self.plane)
+            if clk.fired:
+                t = t0 + (clk.acc + (t - clk.raw) / self.beta(d)) - self.rf_circumference()
+            else:
+                t = t0 + (t - t0) / self.beta(d) - self.rf_circumference()
+            if self._end_share:
+                d = self.rf_kick(t, d, self._end_share)
+            return (x, px, y, py, t, d)
         st = mt.modified_drift(tuple(st), self.plane, mags[0]); st = mags[0].body(st)
         for j in range(1, len(mags)):
             st = mt.modified_drift(st, mags[j - 1], mags[j]); st = mags[j].body(st)
@@ -113,11 +173,11 @@ class Ring:
         self.rf = {**(self.rf or {}), **kw}
         return self
 
-    def rf_kick(self, t, d):
-        """RFCA: ΔE = e·V·sin(φ + 2πh·t/C_RF); канонические поперечные импульсы не меняются."""
+    def rf_kick(self, t, d, share=1.0):
+        """RFCA: ΔE = e·V·share·sin(φ + 2πh·t/C_RF); канонические поперечные импульсы не меняются."""
         rf = self.rf
-        dE = rf["volt_mv"] * math.sin(math.radians(rf["phase_deg"]) + 2 * math.pi * rf["harmonic"] * t
-                                      / self.rf_circumference())
+        dE = (rf["volt_mv"] * share) * math.sin(math.radians(rf["phase_deg"]) + 2 * math.pi * rf["harmonic"] * t
+                                                / self.rf_circumference())
         pc = self.design_mev * (1.0 + d)
         E = math.sqrt(pc * pc + self.MC2_MEV ** 2) + dE
         return math.sqrt(E * E - self.MC2_MEV ** 2) / self.design_mev - 1.0
@@ -137,7 +197,19 @@ class Ring:
     def track_elements(self, states):
         mags = self.mags; n = len(mags)
         out = np.full((len(states), n + 1, 6), np.nan)
+        cav = bool(self.rf and self.rf_cavities)
         for p, st in enumerate(states):
+            if cav:                                          # резонаторы внутри пути (конец оборота — turn)
+                try:
+                    cur = tuple(map(float, st)); clk = _Clock(cur[4]); prev = self.plane
+                    for j, m in enumerate(mags):
+                        cur, prev = self._pass_cavities(cur, prev, j, clk)
+                        cur = mt.modified_drift(cur, prev, m); cur = m.body(cur); prev = m; out[p, j] = cur
+                    cur, prev = self._pass_cavities(cur, prev, n, clk)
+                    out[p, n] = mt.modified_drift(cur, prev, self.plane)
+                except (mt.ParticleLost, ValueError, OverflowError):
+                    pass
+                continue
             try:
                 st = mt.modified_drift(tuple(map(float, st)), self.plane, mags[0]); st = mags[0].body(st)
                 out[p, 0] = st
@@ -388,11 +460,14 @@ def isr_diffusion_matrix(ring, orbit, eps=FD_EPS):
     pts = _fd_columns(orbit, cols, epsv)
     n = len(pieces)
     rec = np.full((len(pts), n + 1, 6), np.nan)
+    cav = bool(getattr(ring, "rf", None) and getattr(ring, "rf_cavities", ()))
     for p, st in enumerate(pts):
         cur = tuple(map(float, st)); rec[p, 0] = cur
-        prev_mag = ring.plane
+        prev_mag = ring.plane; clk = _Clock(cur[4])
         for q, (piece, junction, _, j) in enumerate(pieces):
             if junction:
+                if cav:
+                    cur, prev_mag = ring._pass_cavities(cur, prev_mag, j, clk)
                 cur = mt.modified_drift(cur, prev_mag, ring.mags[j])
                 prev_mag = ring.mags[j]
             cur = piece.body(cur); rec[p, q + 1] = cur
