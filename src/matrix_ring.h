@@ -9,6 +9,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <cstdlib>
 #include <array>
 #include <fstream>
 #include <sstream>
@@ -113,11 +114,34 @@ inline Node makePlane(const Vec3& center, const Vec3& axisIn) {
     return n;
 }
 
+// Срезы сектор/кик-тела ПО ТИПУ УСТРОЙСТВА: env SS_NSL_DEV="dev=n,dev=n" перекрывает nsl_sector для
+// перечисленных device_type_id (например, короткие слабые полюса ондуляторов — 1 срез). Нет переменной —
+// всё как было. Python-эталон читает ту же переменную (matrix_tracker._nsl_by_dev) — паритет бит-в-бит.
+inline std::map<std::string, int> nslByDev() {
+    std::map<std::string, int> m;
+    const char* env = std::getenv("SS_NSL_DEV");
+    if (!env) return m;
+    std::string s(env);
+    size_t i = 0;
+    while (i <= s.size()) {
+        size_t j = s.find(',', i); if (j == std::string::npos) j = s.size();
+        std::string tok = s.substr(i, j - i);
+        size_t e = tok.find('=');
+        if (e != std::string::npos) {
+            int n = std::atoi(tok.c_str() + e + 1);
+            if (n > 0) m[tok.substr(0, e)] = n;
+        }
+        i = j + 1;
+    }
+    return m;
+}
+
 // ---- СБОРКА КОЛЬЦА из БД (build_line + check_junctions) ----------------------------------------
 // nsl/order — срезы и порядок сектор/кик-тела (по умолчанию как elegant: 5 и 4); isr — квантовое возбуждение.
 inline std::vector<Node> buildLine(const std::string& ws, int lattice, double design_mev, bool sr,
                                    const Settings& stg, int nsl_sector = SECTOR_NSLICES, int yoshida_order = 4,
                                    bool isr = false) {
+    const std::map<std::string, int> nsl_dev = nslByDev();
     Table lc = readTable(ws + "tables/lattice_configs.csv");
     Table cn = readTable(ws + "tables/element_connectivity.csv");
     int cLat = lc.col("lattice_id"), cInst = lc.col("instance_id");
@@ -159,6 +183,7 @@ inline std::vector<Node> buildLine(const std::string& ws, int lattice, double de
         nd.dev = cell(*r0, cdev); nd.kind = cell(*r0, cKind);
         double Leff = cellD(*r0, cLeff);
         int nsl = nsl_sector;       // сектор/кик-тело (_nsl_sector); n_slices из БД — для box-тела (кик корректора)
+        { auto it = nsl_dev.find(nd.dev); if (it != nsl_dev.end()) nsl = it->second; }   // SS_NSL_DEV по типу
         double e1 = cellD(*r0, cE1), e2 = cellD(*r0, cE2);
         double lf1 = cellD(*r0, cLf1), lf2 = cellD(*r0, cLf2);
         int nsl_box = (int)cellD(*r0, cNsl, 40.0);

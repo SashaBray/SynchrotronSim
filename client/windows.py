@@ -435,6 +435,8 @@ class ScreenWindow(SubscriberWindow):
             bits.append(f"E₁ {float(e1):.2f} кэВ")
         bits.append(f"точка ({self._point[0]:.2f}, {self._point[1]:.2f}) мм")
         bits.append(f"mesh {self.mesh}")
+        if d.get("computing"):                                     # движок пересчитывает картину в фоне
+            bits.append("пересчёт…")
         self.info.setText(" · ".join(bits))
 
     def params(self) -> dict:

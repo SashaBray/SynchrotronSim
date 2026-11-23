@@ -132,6 +132,82 @@ def critical_energy_keV(B0, p=P):
     return 0.665 * p.E ** 2 * B0           # вигглерный предел (ε_c)
 
 
+# ───── точное угловое распределение МОЩНОСТИ (тепловая карта) ─────
+# Мощность по углам — формула Льенара, усреднённая по периоду синусоидальной траектории. Интерференции в ней
+# нет и быть не должно: интерференция перераспределяет энергию по ЧАСТОТАМ, а не по углам (Парсеваль:
+# ∫|E(ω)|²dω = ∫|E(t)|²dt), поэтому сумма интерференционных картин по всем энергиям = эта гладкая карта.
+# Форма вытянута по горизонтали (размах скорости электрона ±K/γ) и уже по вертикали (~1/γ) — не круглый гаусс.
+_E_CH = 1.602176634e-19; _EPS0 = 8.8541878128e-12; _C = 299792458.0
+
+
+def _lienard_avg(tx, ty, K, g, nphi):
+    """⟨|β̇|²/q³ − (n·β̇)²/(γ²q⁵)⟩ по периоду, q = 1 − n·β; n = (tx, ty, √(1−tx²−ty²)). Векторно по tx.
+    Малые величины (1−n_z, 1−β_z ~ 1/γ²) считаются без вычитания единиц — без потери точности."""
+    ph = np.linspace(0.0, 2 * np.pi, nphi, endpoint=False)
+    bx = (K / g) * np.sin(ph)
+    bz = np.sqrt(1 - 1 / g ** 2 - bx ** 2)
+    omz = (1 / g ** 2 + bx ** 2) / (1 + bz)                    # 1 − βz
+    w_u = 2 * np.pi * _C * bz.mean()                           # ω_u·λ_u (λ_u домножается снаружи)
+    dbx = (K / g) * np.cos(ph) * w_u
+    dbz = -bx * dbx / bz
+    bd2 = dbx ** 2 + dbz ** 2
+    tx = np.asarray(tx, float)[:, None]
+    nz = np.sqrt(1 - tx ** 2 - ty ** 2)
+    omn = (tx ** 2 + ty ** 2) / (1 + nz)                       # 1 − n_z
+    q = omn + nz * omz[None, :] - tx * bx[None, :]
+    s = tx * dbx[None, :] + nz * dbz[None, :]
+    return (bd2[None, :] / q ** 3 - s ** 2 / (g ** 2 * q ** 5)).mean(axis=1), bz.mean()
+
+
+def angular_power_table(K, p=P, step=0.04, span=8.0):
+    """Таблица dP/dΩ [Вт/рад²] одного ондулятора на сетке углов (θx — плоскость колебаний, θy — поперёк).
+
+    Абсолютная нормировка без подгонки: dP/dΩ = (I/e)·T·e²/(16π²ε₀c)·⟨…⟩, T = N·λ_u/(c·β̄z) — время пролёта
+    N периодов. Пик на оси совпадает с формулой Кима (power_density_onaxis), интеграл — с 0.633·E²B0²·(Nλ_u)·I
+    (в total_power_kW стоит длина структуры L, она на ~2% больше N·λ_u). Сетка ±(K+span)/γ × ±span/γ,
+    шаг step/γ; за краем мощность < 1e-4 полной. Возврат dict(tx, ty, F, K, total_W, peak)."""
+    g = gamma(p)
+    nphi = max(256, int(96 * K))
+    X = (K + span) / g; Y = span / g; h = step / g
+    tx = np.arange(0.0, X + 0.5 * h, h); ty = np.arange(0.0, Y + 0.5 * h, h)
+    F = np.empty((tx.size, ty.size))
+    for j, y in enumerate(ty):
+        F[:, j], bzm = _lienard_avg(tx, y, K, g, nphi)
+    F *= 1.0 / p.lam_u ** 2                                    # β̇ ∝ ω_u = 2πcβ̄z/λ_u → |β̇|² ∝ 1/λ_u²
+    T = p.N * p.lam_u / (_C * bzm)
+    F *= (p.I / _E_CH) * T * _E_CH ** 2 / (16 * np.pi ** 2 * _EPS0 * _C)
+    # симметрия θx→−θx (сдвиг фазы на π), θy→−θy (движение в плоскости x–z): достраиваем квадранты
+    txf = np.concatenate([-tx[:0:-1], tx]); tyf = np.concatenate([-ty[:0:-1], ty])
+    Ff = np.concatenate([F[:0:-1, :], F], axis=0)
+    Ff = np.concatenate([Ff[:, :0:-1], Ff], axis=1)
+    dA = h * h
+    return dict(tx=txf, ty=tyf, F=Ff, K=K, gamma=g, total_W=float(Ff.sum() * dA), peak=float(F[0, 0]))
+
+
+_TAB_CACHE = {}
+
+
+def angular_power_cached(K, p=P):
+    """angular_power_table с кэшем по (K, E, I, N, λ_u) — таблица одна на зазор."""
+    key = (round(float(K), 9), p.E, p.I, p.N, p.lam_u)
+    if key not in _TAB_CACHE:
+        _TAB_CACHE[key] = angular_power_table(K, p)
+    return _TAB_CACHE[key]
+
+
+def angular_power(tab, thx, thy):
+    """dP/dΩ [Вт/рад²] в направлениях (thx, thy) — билинейная интерполяция таблицы; вне таблицы 0."""
+    from scipy.interpolate import RegularGridInterpolator
+    f = tab.get("_interp")
+    if f is None:
+        f = RegularGridInterpolator((tab["tx"], tab["ty"]), tab["F"], method="linear",
+                                    bounds_error=False, fill_value=0.0)
+        tab["_interp"] = f
+    thx = np.asarray(thx, float); thy = np.asarray(thy, float)
+    pts = np.stack([thx.ravel(), thy.ravel()], axis=1)
+    return f(pts).reshape(thx.shape)
+
+
 def passport(gap_mm, p=P, nmax=9):
     B0 = B0_of_gap(gap_mm, p); K = K_of_B0(B0, p)
     harm = []

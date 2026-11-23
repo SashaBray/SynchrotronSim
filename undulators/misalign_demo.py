@@ -52,11 +52,11 @@ def main():
     a = ap.parse_args()
     dof = dict(dx=a.dx, dy=a.dy, dz=a.dz, dyaw=a.dyaw, dpitch=a.dpitch, droll=a.droll)
 
-    r0 = rc.CppRing(lattice=a.lattice); nx0, ny0, xr0, yr0 = state(r0); r0.close()
+    r0 = rc.CppRing(lattice=a.lattice, nsl=rc.OPTICS_NSL); nx0, ny0, xr0, yr0 = state(r0); r0.close()
     tmp = tempfile.mkdtemp(prefix="und_mis_")
     try:
         perturbed_group_ws(a.lattice, a.group, dof, tmp)
-        r1 = rc.CppRing(lattice=a.lattice, ws=tmp); nx1, ny1, xr1, yr1 = state(r1); r1.close()
+        r1 = rc.CppRing(lattice=a.lattice, ws=tmp, nsl=rc.OPTICS_NSL); nx1, ny1, xr1, yr1 = state(r1); r1.close()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

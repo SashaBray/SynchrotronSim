@@ -38,7 +38,7 @@ class EngineThread(threading.Thread):
     stop() (или control('shutdown')) гасит поток. Публикует снимок ТОЛЬКО подписанных адресов + мету."""
 
     def __init__(self, link: Link, scheduler, steps_per_cycle: int = 9, publish_every: int = 3,
-                 idle_sleep: float = 0.003, screen_period: float = 5.0, name: str = "engine"):
+                 idle_sleep: float = 0.003, screen_period: float = 1.0, name: str = "engine"):
         super().__init__(name=name, daemon=True)
         self.link = link
         self.sch = scheduler
@@ -56,6 +56,9 @@ class EngineThread(threading.Thread):
         self._screens: Dict[str, dict] = {}  # addr → {"area","res"} — настройки экрана (set_screen)
         self._screen_val: Dict[str, dict] = {}   # addr → последний посчитанный результат экрана
         self._screen_last: Dict[str, float] = {}  # addr → стенное время последнего пересчёта
+        self._screen_key: Dict[str, tuple] = {}   # addr → (настройки окна, зазор источника) последнего пересчёта
+        self._screen_job: Dict[str, object] = {}  # addr → Future расчёта в фоновом потоке (≤1 на экран)
+        self._screen_pool = None                  # ThreadPoolExecutor(1) — лениво, при первом экране
         self.screen_period = float(screen_period)  # период пересчёта экрана, с (медленный такт)
         self._unknown: Optional[str] = None  # последняя нераспознанная команда (диагностика)
         self._err: Optional[str] = None      # последнее исключение тела потока
@@ -63,6 +66,9 @@ class EngineThread(threading.Thread):
     # ---- управление из главного потока ----
     def stop(self) -> None:
         self._stop.set()
+        pool, self._screen_pool = self._screen_pool, None
+        if pool is not None:                              # фоновый расчёт экрана: не ждать, новых не брать
+            pool.shutdown(wait=False, cancel_futures=True)
 
     @property
     def running(self) -> bool:
@@ -214,27 +220,66 @@ class EngineThread(threading.Thread):
         except Exception as e:                      # noqa: BLE001 — диагностика опциональна
             return {"error": f"{type(e).__name__}: {e}"}
 
-    # ---- экран: тяжёлый пересчёт картины на медленном такте (ScreenRecorder) ----
+    # ---- экран: тяжёлый пересчёт картины в ФОНОВОМ потоке (ScreenRecorder) ----
     def _screen_value(self, addr: str) -> Optional[dict]:
-        """Вернуть последний результат экрана; пересчитать ИНЛАЙН, если подошёл медленный такт. Расчёт
-        тяжёлый (интерференция) → на время пересчёта шаг модели приостанавливается; период ~секунды."""
+        """Последний результат экрана; пересчёт — в ФОНОВОМ потоке, модель не ждёт. Картина зависит лишь от
+        зазора ондулятора-источника и настроек окна (точка спектра, разрешение): новые настройки — пересчёт сразу;
+        движение зазора — не чаще screen_period; ничего не менялось — без пересчёта. Пока считается — отдаём
+        прежнюю картину с флагом computing (первый раз — только флаг). Вход расчёта — СНИМОК доски на момент
+        запуска (зазоры, photon.x/y), поэтому поток модели и поток экрана не делят изменяемое состояние."""
+        job = self._screen_job.get(addr)
+        if job is not None and job.done():                 # фоновый расчёт закончился — забрать результат
+            try:
+                self._screen_val[addr] = job.result()
+            except Exception as e:                         # noqa: BLE001 — экран опционален
+                self._screen_val[addr] = {"error": f"{type(e).__name__}: {e}"}
+            del self._screen_job[addr]; job = None
+        cfg = self._screens.get(addr, {}) or {}
+        ckey = (int(cfg.get("res") or 121), tuple(float(v) for v in (cfg.get("point") or (0.0, 0.0))))
+        try:
+            from control.recorders import ScreenRecorder
+            sid = addr.split(".", 1)[1] if "." in addr else addr
+            gap = round(float(ScreenRecorder(params=sid)._live_gap(self.state)), 6)
+        except Exception:                                  # noqa: BLE001 — экран опционален
+            gap = None
+        last = self._screen_key.get(addr)                  # ключ последнего ЗАПУЩЕННОГО расчёта
         now = perf_counter()
         due = (now - self._screen_last.get(addr, -1e9)) >= self.screen_period
-        if due:
+        need = last is None or last[0] != ckey or (last[1] != gap and due)
+        if need and job is None and not self._stop.is_set():
+            if self._screen_pool is None:
+                from concurrent.futures import ThreadPoolExecutor
+                self._screen_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="screen")
             self._screen_last[addr] = now
-            self._screen_val[addr] = self._compute_screen(addr)
-        return self._screen_val.get(addr)
+            self._screen_key[addr] = (ckey, gap)
+            self._screen_job[addr] = job = self._screen_pool.submit(
+                self._compute_screen, addr, dict(cfg), self._screen_inputs())
+        val = self._screen_val.get(addr)
+        if job is None:
+            return val
+        return dict(val, computing=True) if isinstance(val, dict) else {"computing": True}
 
-    def _compute_screen(self, addr: str) -> dict:
+    def _screen_inputs(self):
+        """Снимок доски для расчёта экрана в фоне: только то, что читает ScreenRecorder (живые зазоры
+        ондуляторов, положение фотонного пятна) — копии, без ссылок на изменяемое состояние модели."""
+        from types import SimpleNamespace
+        obs = {k: np.array(self.state.observables[k], float, copy=True)
+               for k in ("photon.x", "photon.y") if self.state.observables.get(k) is not None}
+        und = {gid: SimpleNamespace(gap_mm=float(u.gap_mm))
+               for gid, u in (getattr(self.state, "undulators", None) or {}).items()}
+        return SimpleNamespace(observables=obs, undulators=und)
+
+    def _compute_screen(self, addr: str, cfg: Optional[dict] = None, st=None) -> dict:
         sid = addr.split(".", 1)[1] if "." in addr else addr
-        cfg = self._screens.get(addr, {}) or {}
+        cfg = (self._screens.get(addr, {}) or {}) if cfg is None else cfg
+        st = self.state if st is None else st
         mesh = int(cfg.get("res") or 121)
         pt = cfg.get("point") or (0.0, 0.0)                 # точка на экране (мм) для спектра; (0,0)=на оси
         try:
             from control.recorders import ScreenRecorder
             rec = ScreenRecorder(params=sid, mesh=mesh, point=pt)
-            rec.sample(self.state, 0, self.plant)
-            rec.finalize(self.state, self.plant)
+            rec.sample(st, 0, None)                         # ScreenRecorder читает только доску (снимок)
+            rec.finalize(st, None)
             art = rec.artifact()
             if not art:
                 return {"error": "экран не дал артефакта"}
@@ -263,14 +308,16 @@ def build_session(lattice: int = 26, nsl: int = 8, settle_turns: int = 250, fofb
                   disturbance_spec=None, gap_mm: float = 5.0, steps_per_cycle: int = 9,
                   meas_noise: float = 1e-7, n_photon: int = 1, optics: bool = False,
                   optics_drift=(1e-3, 1e-2, 3e-2), optics_order: int = 4, optics_period_ticks: int = 90,
-                  optics_nsl: int = 2, rf: bool = False, **plant_kw):
+                  optics_nsl: int = 2, rf: bool = False, id_pole_nsl: int = 1, **plant_kw):
     """Собрать (plant, state, scheduler) режима 4. Контуры добавлены ВЫКЛ (оператор включает ручкой/панелью).
     `optics=False` — только орбита на TbtPlant (fofb_x/y). `optics=True` — CompositePlant (орбита + линеариз.
     оптика) и ПЯТЬ контуров: fofb_x/y (≈2 кГц) + tune/chroma/adts (медленный темп `optics_period_ticks`).
     Оптические контуры — самодостаточные плагины (control/controllers/optics_*.py), их схему вычисления
     собираем из `provides()`. Импорт ленивый, чтобы лёгкие тесты шва работали без ring_cpp.
     `rf=True` — + контур ВЧ-частоты `rf` (control/controllers/rf_frequency.py: энергия по дисперсионной орбите →
-    частота ВЧ; актуатор `rf.freq` в схеме), темп — как у FOFB (раз в цикл; внутри усреднение ≈ T_s)."""
+    частота ВЧ; актуатор `rf.freq` в схеме), темп — как у FOFB (раз в цикл; внутри усреднение ≈ T_s).
+    `id_pole_nsl` — срезов у полюсов ондуляторов в трекинге (1: вдвое быстрее, физика та же до 1e-8 по тюну;
+    None — как у остальных элементов, nsl)."""
     from control import ExperimentState, Limits, Scheduler
     from control.controllers.integral_svd import IntegralSVD
 
@@ -296,7 +343,8 @@ def build_session(lattice: int = 26, nsl: int = 8, settle_turns: int = 250, fofb
         plant = CompositePlant(lattice=lattice, nsl=nsl, settle_turns=settle_turns, meas_noise=meas_noise,
                                n_photon=n_photon, gap_mm=gap_mm, disturbance_spec=disturbance_spec,
                                drift=optics_drift, order=optics_order, optics_nsl=optics_nsl,
-                               tbt_observer=tbt_obs, optics_observer=optics_obs, rf_actuator=rf, **plant_kw)
+                               tbt_observer=tbt_obs, optics_observer=optics_obs, rf_actuator=rf,
+                               id_pole_nsl=id_pole_nsl, **plant_kw)
     else:
         from control.tbt_plant import TbtPlant
         obs = None
@@ -305,7 +353,7 @@ def build_session(lattice: int = 26, nsl: int = 8, settle_turns: int = 250, fofb
             obs = observer_for(loops, serves=tbt_serves)
         plant = TbtPlant(lattice=lattice, nsl=nsl, settle_turns=settle_turns, meas_noise=meas_noise,
                          n_photon=n_photon, gap_mm=gap_mm, disturbance_spec=disturbance_spec,
-                         rf_actuator=rf, observer=obs, **plant_kw)
+                         rf_actuator=rf, observer=obs, id_pole_nsl=id_pole_nsl, **plant_kw)
 
     dt = plant.stride * plant.TREV
     schema = plant.schema()

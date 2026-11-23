@@ -17,7 +17,7 @@ import errors as er
 
 @functools.lru_cache(maxsize=8)
 def _twiss(lattice):
-    r = rc.CppRing(lattice=lattice)
+    r = rc.CppRing(lattice=lattice, nsl=rc.OPTICS_NSL)         # дефолтные 5 срезов дают ηx на ~4% хуже
     tw = ra.twiss(r)
     cen = np.array([m.center for m in r.mags])                 # глобальные центры в порядке трекинга
     sout = np.asarray(r.s_out)

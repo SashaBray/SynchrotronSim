@@ -14,7 +14,8 @@
 //   PIECES n             + n·6           → OK m + n·(n_pieces+1)·6 (старт + после каждого куска)
 //   JUNCTION n           + 24 + n·6      → OK m + n·6 (стык плоскостей A→B: p, axis, u, v каждой)
 //   PIECEMETA / INFO                     → OK k + k текстовых строк
-//   KICK j theta | VKICK j theta | YAW j alpha | DK j dk | DSK j dk | DK2 j dk | DK3 j dk | RESET   → OK 0
+//   KICK j theta | VKICK j theta | YAW j alpha | DK j dk | DKV j dk | DSK j dk | DK2 j dk | DK3 j dk | RESET → OK 0
+//     (DK — k1 и k1v вместе, как возбуждение квадруполя; DKV — только вертикальный k1v: фокус ондулятора)
 //   RF on volt_mv harmonic phase_deg freq_hz → OK 0 (параметры ВЧ на лету; переживает RESET)
 // Срезы (PIECES/PIECEMETA) — копии магнитов: возмущения KICK..DK3 помечают их устаревшими, и они лениво
 // пересобираются перед следующим PIECES/PIECEMETA (YAW меняет только рамки магнита — их срезы читают напрямую).
@@ -118,7 +119,7 @@ struct RingModel {
         pieces_stale = false;
     }
 
-    // Срезы по ТЕКУЩИМ магнитам: после KICK/VKICK/DK/DSK/DK2/DK3 копии в pieces устарели — пересобрать.
+    // Срезы по ТЕКУЩИМ магнитам: после KICK/VKICK/DK/DKV/DSK/DK2/DK3 копии в pieces устарели — пересобрать.
     // Число кусков от возмущений не меняется (изгиб определяет θ0, его они не трогают) ⇒ READY n_pieces верен.
     const std::vector<Piece>& currentPieces() {
         if (pieces_stale) buildPieces();
@@ -290,6 +291,12 @@ struct RingModel {
         mags[j].phys.precache();                      // у секторного обновит b1=k1·ρ (body_sector читает прекэш)
         pieces_stale = true;
     }
+    void dkv(int j, double dq) {                      // фокус ондулятора от зазора: ТОЛЬКО вертикальный градиент k1v
+        if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("DKV: нет магнита");
+        mags[j].phys.k1v += dq;                       // киковое тело читает k1v напрямую (секторное k1v не берёт)
+        mags[j].phys.precache();                      // флаг кикового тела — по полю
+        pieces_stale = true;
+    }
     void dsk(int j, double dq) {                       // коррекция связи: транзитно изменить скью-градиент ks
         if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("DSK: нет магнита");
         mags[j].phys.ks += dq;                         // киковый путь читает ks напрямую, прекэш не нужен
@@ -412,6 +419,8 @@ inline int serveRing(RingModel& R) {
                 int j; double a; is >> j >> a; R.yaw(j, a); sendText({});
             } else if (cmd == "DK") {                        // транзитно изменить градиент квадруполя (для BBA)
                 int j; double dk; is >> j >> dk; R.dk(j, dk); sendText({});
+            } else if (cmd == "DKV") {                       // только вертикальный градиент (фокус ИД от зазора)
+                int j; double dk; is >> j >> dk; R.dkv(j, dk); sendText({});
             } else if (cmd == "DSK") {                       // транзитно изменить скью-градиент (коррекция связи)
                 int j; double dk; is >> j >> dk; R.dsk(j, dk); sendText({});
             } else if (cmd == "DK2") {                       // транзитно изменить секступольную силу (нелин. тюнер)

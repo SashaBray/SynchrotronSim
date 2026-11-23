@@ -23,6 +23,15 @@ import orbit_infer as oi
 from . import response as resp
 from . import bpm_map
 
+ID_FOCUS_SUFFIX = "UFC"
+
+
+def is_id_focus(dev):
+    """Фокус-элемент ондулятора (`<prefix>UFC`, kind=quad). Не ручка: его силу задаёт зазор устройства
+    (OpticsPlant ведёт вертикальный k1v ∝ K² по state.undulators), отдельного источника питания у него нет."""
+    return str(dev or "").endswith(ID_FOCUS_SUFFIX)
+
+
 
 class RingModel:
     def __init__(self, lattice=26, nsl=8, n_photon=0, photon_d=15.0):
@@ -51,7 +60,10 @@ class RingModel:
             self._act[self.qx_ids[i]] = ("hkick", q, float(self.K1L[i]))   # сдвиг dx → гор. feed-down кик K1L·dx
             self._act[self.qy_ids[i]] = ("vkick", q, -float(self.K1L[i]))  # сдвиг dy → верт. feed-down (знак как в regulator)
         # --- градиентные актуаторы ПО СЕМЕЙСТВАМ (контуры оптики): Δk1 квадруполя, Δk2 секступоля, Δk3 октуполя ---
-        self.quad_fams = self._families(oi.quad_indices(self.ring, kinds=("quad",)))
+        # фокус ондуляторов (UFC) — не градиентная ручка: иначе контур тюна «крутит» зазор-зависимую фокусировку
+        # как квадруполь (самая большая относительная добавка — 0,11% силы UFC — при рычаге ×20 слабее QF1/QD3)
+        self.quad_fams = self._families([i for i in oi.quad_indices(self.ring, kinds=("quad",))
+                                         if not is_id_focus(self.ring.mags[i].dev)])
         self.sext_fams = self._families([i for i, k in enumerate(self.ring.kinds) if k == "sext"])
         self.oct_fams = self._families([i for i, k in enumerate(self.ring.kinds) if k == "oct"])
         self.dk_ids = [f"quad.{f}.dk" for f in self.quad_fams]

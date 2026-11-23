@@ -20,7 +20,8 @@ from plotly.offline import get_plotlyjs
 
 import undulator_sr as sr
 import bend_sr as bsr
-from screen_analysis import load_screens, load_groups, emitter, power_params, footprint as power_footprint, _unit, RESDIR
+from screen_analysis import (load_screens, load_groups, power_params, make_emitters, find_illuminators,
+                             find_bends, footprint as power_footprint, _unit, RESDIR)
 from screen_spectrum import trajectory, calibrate, center_spectrum, find_harmonics, beam_params, energy_smear
 from undulator_field import apply_phase_errors
 from bend_screen import load_lattice, dipole_arc, illuminates
@@ -100,30 +101,23 @@ def undulator_report(scr, lattice, gap, args):
     sr.P.beta_x, sr.P.beta_y = o["betax"], o["betay"]
     beam = beam_params(sr.P, o["betax"], o["betay"], args.kappa, args.sigE, o["etaxp"])
 
-    # ── тепловой след (A) ──
-    emits = {}
-    for gid, insts in groups.items():
-        P, axis = emitter(insts, ci, byid)
-        if P is not None:
-            emits[gid] = (P, axis, Pd0, sig)
-    found = []
-    for gid, (P, axis, pd0, sg) in emits.items():
-        vec = scr["C"] - P; D = float(np.linalg.norm(vec)); dh = vec / D
-        if float(np.dot(dh, axis)) <= 0:
-            continue
-        th = math.acos(max(-1.0, min(1.0, float(np.dot(dh, axis)))))
-        half = 0.5 * math.hypot(scr["w"], scr["h"]) / 1e3 / D
-        if th <= 6 * sg + half:
-            found.append(gid)
-    emitters = [emits[gid] for gid in found]
-    fp = power_footprint(scr, emitters, 301)                    # мельче сетка → зум в конус остаётся чётким
+    # ── тепловой след (A): точная угловая мощность ИД (Льенар) + веера соседних диполей; свет — по орбите ──
+    et = None
+    if args.source == "orbit":
+        import electron_source as es
+        et = es.electron_track(lattice)
+    emits = make_emitters(groups, ci, byid, gap, et=et)
+    found = find_illuminators(scr, emits)
+    pole_insts = set().union(*groups.values()) if groups else set()
+    bends = find_bends(scr, ci, byid, pole_insts, args.E, et)
+    fp = power_footprint(scr, [emits[gid] for gid in found], 301, bends, args.E, args.I)  # мелкая сетка → зум чёткий
     heat_div = fig_div(heatmap(fp["S"], fp["extent"], "Вт/мм²"))
 
     # ── спектр на оси (B) с качеством ИД (#1) ──
     tr = trajectory(K, sr.P.lam_u, sr.P.N, g, args.ppp); scale, E1 = calibrate(tr)
     if args.phase_error_deg:
         tr = apply_phase_errors(tr, args.phase_error_deg)
-    P0, axis0 = emits[scr["src"]][0], emits[scr["src"]][1]
+    P0, axis0 = emits[scr["src"]]["P"], emits[scr["src"]]["axis"]
     uhat = _unit(np.cross([0, 0, 1.0], axis0)); vhat = _unit(np.cross(axis0, uhat))
     dc = _unit(scr["C"] - P0); thx0 = float(np.dot(dc, uhat)); thy0 = float(np.dot(dc, vhat))
     Es = np.linspace(0.5 * E1, sr.harmonic_energy_keV(9, K, 0.0) * 1.05, 3200)
@@ -133,7 +127,6 @@ def undulator_report(scr, lattice, gap, args):
                                  (Es, Ibeam, "пучок", "#185fa5", 1.6)]))
 
     # ── мультиисточник (#2) ──
-    pole_insts = set().union(*groups.values()) if groups else set()
     unds = find_undulators(scr, groups, ci, byid, sig)
     dips = find_dipoles(scr, ci, byid, g, args.E, pole_insts)
     total = np.zeros_like(Es); parts = []
@@ -165,9 +158,14 @@ def undulator_report(scr, lattice, gap, args):
 
     body = (f'<div class="kpis">{kpis}</div>'
             + section("Тепловая нагрузка (веер мощности)", heat_div,
-                      f"Плотность мощности на экране; пик {fp['peak']:.1f} Вт/мм², перехвачено {fp['total']:.0f} Вт. "
-                      f"Конус ~0.9 мм на 50-мм экране — зумом (колесо/рамка) рассмотрите центр.",
-                      "Некогерентная проекция угловой мощности устройства на плоскость экрана.")
+                      f"Плотность мощности на экране; пик {fp['peak']:.1f} Вт/мм², перехвачено {fp['total']:.0f} Вт "
+                      f"(ондулятор {fp['und_W']:.0f} Вт + веера {fp['n_bend']} диполей {fp['bend_W']:.0f} Вт). "
+                      f"Пятно ондулятора — несколько мм на экране; зумом (колесо/рамка) рассмотрите центр.",
+                      "Угловая мощность ондулятора — точная (формула Льенара по периоду): пятно вытянуто в плоскости "
+                      "колебаний (±K/γ), уже поперёк (~1/γ). Интерференции в мощности нет — она перераспределяет "
+                      "энергию по частотам, не по углам. Полосы — поворотное СИ соседних диполей (сумма мощностей). "
+                      + ("Ось конуса и веера — по замкнутой орбите электрона." if et is not None
+                         else "Ось конуса и веера — по рамке железа."))
             + UNIT_NOTE
             + section("Спектр на оси", spec_div,
                       "Гармоники (острые — один электрон; размытые — пучок с реальными β, σ_E и качеством ИД).",
@@ -230,6 +228,8 @@ def main():
     ap.add_argument("--kappa", type=float, default=sr.P.kappa); ap.add_argument("--sigE", type=float, default=sr.P.sig_E)
     ap.add_argument("--phase-error-deg", type=float, default=0.0)
     ap.add_argument("--ppp", type=int, default=64)
+    ap.add_argument("--source", choices=["orbit", "magnet"], default="orbit",
+                    help="направление света в тепловой карте: по орбите электрона или по рамке железа")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
 

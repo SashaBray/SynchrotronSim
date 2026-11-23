@@ -34,8 +34,15 @@ MC2_MEV = 0.51099895069
 _LIVE = weakref.WeakSet()
 
 
+# Срезы для ЛИНЕЙНОЙ ОПТИКИ (тюны, β, η) — как паспорт facility_report. Дефолт 5 (ниже) — конвенция паритета
+# с elegant (N_SLICES=5 в .lte); он смещает тюн СИЛА-26 на ~0,03 (νy 33,367 вместо 33,398, ошибка ∝ 1/N⁴,
+# в основном DQ1B/D с √|K1|·L = 1,43) и ηx у ондуляторов на ~4%. Кто считает оптику — передаёт nsl явно.
+OPTICS_NSL = 40
+
+
 def _default_slices():
-    """Срезы и порядок по умолчанию — как у Python-ядра: env SS_SECTOR_NSL/SS_SECTOR_ORDER или 5 и 4."""
+    """Срезы и порядок по умолчанию — как у Python-ядра: env SS_SECTOR_NSL/SS_SECTOR_ORDER или 5 и 4.
+    5 — ради побитной сверки с elegant; для тюнов/оптики передавайте nsl=OPTICS_NSL."""
     return (int(os.environ.get("SS_SECTOR_NSL", "") or 5), int(os.environ.get("SS_SECTOR_ORDER", "") or 4))
 
 
@@ -43,12 +50,24 @@ class CppRing:
     label = "SynchrotronSim"
 
     def __init__(self, lattice=1, start_before_first_m=None, settings=None, sr=False, isr=False, rf=None,
-                 design_mev=6000.0, nsl=None, order=None, seed=12345, ws=None, timeout=None):
+                 design_mev=6000.0, nsl=None, order=None, seed=12345, ws=None, timeout=None, nsl_dev=None):
         dn, do = _default_slices()
         self.lattice = int(lattice)
         self.lead = start_before_first_m
         self.sr, self.isr, self.rf, self.design_mev = bool(sr or isr), bool(isr), rf, float(design_mev)
         self.nsl = int(nsl or dn); self.order = int(order or do); self.seed = int(seed)
+        # срезы сектор/кик-тела по типу устройства {device_type_id: n} (env SS_NSL_DEV у C++ и Python-описания);
+        # не задано — как у Python-эталона: из окружения SS_NSL_DEV (по умолчанию пусто — всё как было)
+        if nsl_dev is None:
+            nsl_dev = dict(t.split("=", 1) for t in (os.environ.get("SS_NSL_DEV") or "").split(",") if "=" in t)
+        self.nsl_dev = {}
+        for k, v in nsl_dev.items():
+            try:
+                n = int(v)
+            except (TypeError, ValueError):
+                continue
+            if k and n > 0:
+                self.nsl_dev[str(k)] = n
         self.ws = ws                            # путь к workspace с ВОЗМУЩЁННОЙ решёткой (ансамбли ошибок); None — обычная БД
         self.timeout = timeout                  # сторож: команда дольше timeout с → убить процесс (защита от зависаний)
         self.settings = settings
@@ -69,8 +88,12 @@ class CppRing:
                 repr(float(rf.get("phase_deg", 0.0))), str(self.seed)]
         if self.ws:                             # возмущённая рабочая папка (ансамбли ошибок) — 13-й аргумент
             args.append(self.ws)
+        env = dict(os.environ)
+        env.pop("SS_NSL_DEV", None)
+        if self.nsl_dev:
+            env["SS_NSL_DEV"] = self._nsl_dev_env()
         self._proc = subprocess.Popen(args, cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                      stderr=subprocess.DEVNULL, bufsize=0)
+                                      stderr=subprocess.DEVNULL, bufsize=0, env=env)
         head = self._proc.stdout.readline().decode("utf-8", "replace").split()
         if not head or head[0] != "READY":
             raise RuntimeError(f"сервер кольца не поднялся: {' '.join(head)}")
@@ -208,13 +231,17 @@ class CppRing:
         pc = self.design_mev * (1.0 + delta)
         return pc / math.sqrt(pc * pc + MC2_MEV ** 2)
 
+    def _nsl_dev_env(self):
+        return ",".join(f"{k}={v}" for k, v in sorted(self.nsl_dev.items()))
+
     # ---- описание магнитов для аналитического механизма (без трекинга) ----------------------------
     def _python_ring(self):
         if self._py is None:
             import ring_analysis as ra
-            keys = ("SS_SECTOR_NSL", "SS_SECTOR_ORDER")
+            keys = ("SS_SECTOR_NSL", "SS_SECTOR_ORDER", "SS_NSL_DEV")
             saved = {k: os.environ.get(k) for k in keys}
-            os.environ.update({"SS_SECTOR_NSL": str(self.nsl), "SS_SECTOR_ORDER": str(self.order)})
+            os.environ.update({"SS_SECTOR_NSL": str(self.nsl), "SS_SECTOR_ORDER": str(self.order),
+                               "SS_NSL_DEV": self._nsl_dev_env()})
             try:
                 r = ra.Ring(self.lattice, start_before_first_m=self.lead, settings=self.settings,
                             design_mev=self.design_mev)
@@ -227,7 +254,7 @@ class CppRing:
             self._py = r
         return self._py
 
-    _FIELD = {"DK": ("k1", "k1v"), "DSK": ("ks",), "DK2": ("k2",), "DK3": ("k3",)}
+    _FIELD = {"DK": ("k1", "k1v"), "DKV": ("k1v",), "DSK": ("ks",), "DK2": ("k2",), "DK3": ("k3",)}
 
     def _describe(self, base, perturb):
         """Магниты Python-описания с возмущениями сервера (копии; base не трогается) — та же физика, что у
@@ -256,7 +283,8 @@ class CppRing:
                 m.kick_sector = (mt.SECTOR and m.Leff > 0
                                  and any(abs(float(getattr(m, a, 0.0) or 0.0)) > 0 for a in ("k1", "k1v", "k2", "k3")))
                 if m.kick_sector and not hasattr(m, "_nsl_sector"):      # нулевой элемент получил поле
-                    m._nsl_sector = self.nsl; m._yoshida_dk = mt._yoshida(self.order)
+                    m._nsl_sector = self.nsl_dev.get(getattr(m, "dev", ""), self.nsl)
+                    m._yoshida_dk = mt._yoshida(self.order)
                 hk = float(getattr(m, "hkick", 0.0) or 0.0)
                 if hk and not m.kick_sector:                             # «ящик» корректора — как ra.kicked
                     m.theta0 = base[j].theta0 + hk; m.xref = None
@@ -298,15 +326,17 @@ class CppRing:
         """Кольцо с магнитом j, повёрнутым на α вокруг вертикали входа (ring_analysis.yaw_element)."""
         return self._copy_with("YAW", j, alpha)
 
-    def apply_perturb(self, kicks=(), vkicks=(), dks=(), dsks=(), dk2s=(), dk3s=()):
+    def apply_perturb(self, kicks=(), vkicks=(), dks=(), dsks=(), dk2s=(), dk3s=(), dkvs=()):
         """Применить возмущения НА ТОМ ЖЕ сервере (RESET + KICK/VKICK/DK/DSK/DK2/DK3), без нового процесса. Для
         матрицы отклика, коррекции орбиты, BBA, коррекции связи и нелинейного тюнера. RESET пересобирает кольцо
         из ws (ошибки рассогласования СОХРАНЯЮТСЯ), затем возвращаются базовые возмущения кольца (with_*/
         perturbed) — сбрасываются только транзитные от прежнего apply_perturb. dks=[(j,dk)] — k1 квадруполя
         (BBA); dsks=[(j,ks)] — скью (связь); dk2s=[(j,dk2)]/dk3s=[(j,dk3)] — секступ./октуп. силы (нелинейный
-        тюнер ν(δ)). Описание mags/plane следует за ними. apply_perturb() — вернуть кольцо в исходное. Возврат self."""
+        тюнер ν(δ)); dkvs=[(j,dk1v)] — ТОЛЬКО вертикальный градиент (фокус ондулятора от живого зазора).
+        Описание mags/plane следует за ними. apply_perturb() — вернуть кольцо в исходное. Возврат self."""
         new = [(cmd, int(j), float(v)) for cmd, pairs in (("KICK", kicks), ("VKICK", vkicks), ("DK", dks),
-                                                          ("DSK", dsks), ("DK2", dk2s), ("DK3", dk3s))
+                                                          ("DSK", dsks), ("DK2", dk2s), ("DK3", dk3s),
+                                                          ("DKV", dkvs))
                for j, v in pairs]
         self._py = None
         self._transient = []                    # до RESET: при сбое описание не припишет кольцу чужих возмущений
@@ -315,6 +345,48 @@ class CppRing:
         self._replay(new)
         self._transient = new
         return self
+
+    _ADDITIVE = {"dks": "DK", "dkvs": "DKV", "dsks": "DSK", "dk2s": "DK2", "dk3s": "DK3"}
+
+    def add_perturb(self, **channels):
+        """Доложить АДДИТИВНЫЕ транзитные возмущения поверх текущих БЕЗ RESET: dks/dkvs/dsks/dk2s/dk3s=[(j, Δ)].
+        Дёшево (одна команда на элемент, без пересборки кольца, против ~0,1 с у apply_perturb) — для живых
+        медленных каналов, меняющихся каждый такт (фокус ИД от движущегося зазора). Кики (KICK/VKICK — «задать»,
+        а не «прибавить») сюда не входят. Следующий apply_perturb, как обычно, сбрасывает все транзитные. Возврат self."""
+        new = []
+        for name, pairs in channels.items():
+            cmd = self._ADDITIVE.get(name)
+            if cmd is None:
+                raise ValueError(f"add_perturb: канал {name} не аддитивный (допустимы {sorted(self._ADDITIVE)})")
+            new += [(cmd, int(j), float(v)) for j, v in pairs]
+        self._push_transient(new)
+        return self
+
+    def set_kicks(self, kicks=(), vkicks=()):
+        """Задать доп. кики KICK/VKICK (гор./верт.) поверх текущих БЕЗ RESET: команда «задаёт», а не прибавляет,
+        поэтому для смены корректоров (FOFB) пересборка кольца не нужна — только новые значения изменившихся
+        (миллисекунды против ~0,3 с RESET у apply_perturb). Снять кик — задать 0. Возврат self."""
+        self._push_transient([("KICK", int(j), float(v)) for j, v in kicks]
+                             + [("VKICK", int(j), float(v)) for j, v in vkicks])
+        return self
+
+    def _push_transient(self, new):
+        """Отправить команды серверу и дописать их в транзитные (описание mags следует за ними). Длинный хвост
+        сворачивается: аддитивные (DK/DKV/…) — суммой на (команда, j), «задающие» (KICK/VKICK) — последним."""
+        if not new:
+            return
+        self._py = None
+        self._replay(new)
+        tr = list(self._transient) + list(new)
+        if len(tr) > 4096:
+            add, last = {}, {}
+            for cmd, j, v in tr:
+                if cmd in self._ADDITIVE.values():
+                    add[(cmd, j)] = add.get((cmd, j), 0.0) + v
+                else:
+                    last[(cmd, j)] = v
+            tr = [(c, j, v) for (c, j), v in last.items()] + [(c, j, v) for (c, j), v in add.items()]
+        self._transient = tr
 
     def perturbed(self, kicks=(), yaws=(), vkicks=()):
         """Кольцо с несколькими возмущениями сразу: kicks=[(j, θ)] (гор.), vkicks=[(j, θ)] (верт.),

@@ -43,13 +43,18 @@ from .observer import Observer, ObsContext
 STRIDE = 15                                                   # оборотов в одном базовом такте планировщика
 NP = 12                                                       # частиц в пучке
 PHASE_DEG = 165.0                                             # фаза ВЧ для 6D-трекинга ([[dynamics-time-domain-foundation]])
+# Полюса ондуляторов (секторные диполи 9 мм, θ ≈ 3e-4): им хватает 1 среза — на СИЛА-26 это 2280 из 4920
+# элементов и половина цены трекинга. С 1 срезом против 8: тюн −2e-8, орбита 5e-12, частица через 200 оборотов
+# (СИ+ВЧ) 2e-5 от амплитуды; трекинг вдвое быстрее. Включается id_pole_nsl (клиент — по умолчанию 1).
+ID_POLE_DEVS = ("und_UPP", "und_UPM", "und_UE0", "und_UE1")
 
 
 class TbtPlant:
     def __init__(self, lattice=26, nsl=8, n_part=NP, stride=STRIDE, dist_amp=0.3e-6,
                  dist_rho=1.0, meas_noise=0.0, settle_turns=300, seed=1, dist_seed=11, n_photon=8,
                  avg_chunks=9, resp_dims=4, sr=True, disturbance_spec=None, gap_mm=5.0, observer=None,
-                 relative_orbit=False, rf_actuator=False, center_bunch=None):
+                 relative_orbit=False, rf_actuator=False, center_bunch=None, id_pole_nsl=None):
+        nsl_dev = {d: int(id_pole_nsl) for d in ID_POLE_DEVS} if id_pole_nsl else None   # срезы полюсов ИД
         self.stride = stride
         self.gap_mm = float(gap_mm)                           # стартовый зазор ондуляторов (мм); живёт в state.undulators
         self.sr = bool(sr)                                    # СИ вкл/выкл (режим 2: затухание vs сохранение)
@@ -83,7 +88,7 @@ class TbtPlant:
         inf = dict(fr.info_of(lattice)); inf["_id"] = lattice
         self.ring = ring_cpp.CppRing(lattice=lattice, sr=self.sr,
             rf={"volt_mv": inf["rf"][0], "harmonic": inf["rf"][1], "phase_deg": PHASE_DEG},
-            design_mev=inf["energy_mev"], nsl=nsl)
+            design_mev=inf["energy_mev"], nsl=nsl, nsl_dev=nsl_dev)
         if resp_dims == 6:                                    # модель контура снята на 6D-равновесии своего кольца
             self.Hc = self._build_resp_6d("ebpm.x", "hkick")  # (дисперсия/энергия в горизонтали учтены — как LOCO)
             self.Hcy = self._build_resp_6d("ebpm.y", "vkick")
@@ -97,6 +102,13 @@ class TbtPlant:
         # якоря ондуляторов для остаточного орбитного кика (гэп-зависимый I1): dev=und_UFC, s-порядок ↔ group_id
         _ufc = sorted(i for i, m in enumerate(self.ring.mags) if str(getattr(m, "dev", "") or "") == "und_UFC")
         self._und_anchor = {f"und_{k + 1:02d}": i for k, i in enumerate(_ufc)}
+        # вертикальный фокус UFC от живого зазора (k1v ∝ K², канал DKV): номинал k1v и опорный K (зазор сборки)
+        self._und_k1v = {gid: float(getattr(self.ring.mags[i], "k1v", 0.0) or 0.0) for gid, i in self._und_anchor.items()}
+        try:
+            import undulator_sr as _sr
+            self._und_sr = _sr; self._und_Kref = float(_sr.K_of_B0(_sr.B0_of_gap(_sr.P.gap_ref)))
+        except Exception:
+            self._und_sr = None; self._und_Kref = None
 
         # --- многоканальное возмущение из disturbance_spec (режим 4): plant владеет Disturbance,
         #     вливаем её в kick_lists каждый шаг. При spec=None — прежний скалярный путь PATX/PATY.
@@ -327,18 +339,60 @@ class TbtPlant:
                 k = u.orbit_kick_rad()
                 if k:
                     vv.append((idx, float(k)))
+        dkv = self._und_focus_dkv(state)                      # верт. фокус ИД от зазора → тюн трекаемых частиц
+        if dkv:
+            extra["dkvs"] = extra.get("dkvs", []) + dkv
         return kk, vv, extra
 
+    UND_FAC_QUANT = 1e-3   # шаг квантования (K/K_ref)²: Δνy ≤ ~1e-7 на ИД, а apply_perturb (~113 мс) — лишь на шаге кванта
+
+    def _und_focus_dkv(self, state):
+        """Δk1v элементов UFC от живых зазоров: k1v_ном·(fac − 1), fac = (K/K_ref)² квантованный UND_FAC_QUANT.
+        На опорном зазоре (сборки, 5 мм) — пусто ⇒ прогоны без смены зазора бит-в-бит как раньше. Горизонтальный
+        k1 UFC не трогается (гасит 1/ρ² полюсов, а полюса от зазора не зависят) — как в OpticsPlant."""
+        if not self._und_Kref or not getattr(state, "undulators", None):
+            return []
+        out = []
+        q = self.UND_FAC_QUANT
+        for gid, idx in self._und_anchor.items():
+            u = state.undulators.get(gid)
+            k1v = self._und_k1v.get(gid, 0.0)
+            if u is None or not k1v:
+                continue
+            fac = (self._und_sr.K_of_B0(self._und_sr.B0_of_gap(float(u.gap_mm))) / self._und_Kref) ** 2
+            fac = round(fac / q) * q
+            if abs(fac - 1.0) > 0.5 * q:
+                out.append((idx, k1v * (fac - 1.0)))
+        return out
+
     def _apply(self, state):
-        """Применить текущий набор киков к кольцу. apply_perturb дорог (~113 мс, RESET+набор) —
-        зовём ТОЛЬКО когда набор изменился."""
+        """Применить текущий набор возмущений к кольцу. Полный apply_perturb дорог (RESET + набор, ~0,3 с) —
+        зовём его ТОЛЬКО когда изменились «прочие» каналы (dks/dk2s/dk3s/dsks — ряби поля, feed-down через
+        градиент). Кики KICK/VKICK (корректоры FOFB, раз в цикл) «задают», а не прибавляют, — шлём только
+        изменившиеся (set_kicks, без RESET). Фокус ИД от зазора (dkvs) меняется почти каждый такт, пока едут
+        челюсти, — шлём приращения DKV (add_perturb). Оба дешёвых пути — миллисекунды."""
         kk, vv, extra = self.kick_lists(state)
         self._apply_rf(state)                                 # частота ВЧ + длина кольца (дёшево: команда RF)
-        key = (tuple(kk), tuple(vv), tuple(sorted((k, tuple(v)) for k, v in extra.items())))
-        if key == self._last_kick:
+        dkv = dict(extra.pop("dkvs", []))
+        kd, vd = dict(kk), dict(vv)                           # последний выигрывает — как при replay сервера
+        xkey = tuple(sorted((k, tuple(v)) for k, v in extra.items()))
+        last = self._last_kick
+        if last is None or last[2] != xkey:
+            self.ring.apply_perturb(kicks=kk, vkicks=vv, dkvs=sorted(dkv.items()), **extra)
+            self._last_kick = (kd, vd, xkey); self._dkv_applied = dkv
             return
-        self.ring.apply_perturb(kicks=kk, vkicks=vv, **extra)
-        self._last_kick = key
+        okd, ovd, _ = last
+        ch_h = [(j, kd.get(j, 0.0)) for j in sorted(set(kd) | set(okd)) if kd.get(j, 0.0) != okd.get(j, 0.0)]
+        ch_v = [(j, vd.get(j, 0.0)) for j in sorted(set(vd) | set(ovd)) if vd.get(j, 0.0) != ovd.get(j, 0.0)]
+        if ch_h or ch_v:
+            self.ring.set_kicks(kicks=ch_h, vkicks=ch_v)
+            self._last_kick = (kd, vd, xkey)
+        old = getattr(self, "_dkv_applied", {})
+        delta = [(j, dkv.get(j, 0.0) - old.get(j, 0.0)) for j in sorted(set(dkv) | set(old))
+                 if dkv.get(j, 0.0) != old.get(j, 0.0)]
+        if delta:
+            self.ring.add_perturb(dkvs=delta)
+            self._dkv_applied = dkv
 
     def _snapshot(self):
         """Центроид пучка вдоль линии (track_elements, read-only — выход НЕ переносим)."""

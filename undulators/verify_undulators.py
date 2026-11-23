@@ -53,13 +53,13 @@ def main():
     ap.add_argument("--prefix", default="und_")
     a = ap.parse_args()
 
-    ron = rc.CppRing(lattice=a.lattice)
+    ron = rc.CppRing(lattice=a.lattice, nsl=rc.OPTICS_NSL)
     nxon, nyon, byon, acon = tunes(ron); ron.close()
 
     tmp = tempfile.mkdtemp(prefix="und_off_")
     try:
         zeroed_ws(a.lattice, a.prefix, tmp)
-        roff = rc.CppRing(lattice=a.lattice, ws=tmp)
+        roff = rc.CppRing(lattice=a.lattice, ws=tmp, nsl=rc.OPTICS_NSL)
         nxoff, nyoff, byoff, acoff = tunes(roff); roff.close()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

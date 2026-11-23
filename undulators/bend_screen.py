@@ -67,6 +67,31 @@ def illuminates(d, Cs, gamma, nfan=8.0):
     return -abs(d["theta0"]) / 2 - 1e-3 <= Dh <= abs(d["theta0"]) / 2 + 1e-3
 
 
+def reaches_screen(d, scr, gamma, nfan=8.0, margin=2e-4):
+    """Достаёт ли веер диполя d ХОТЬ ЧАСТЬ экрана (не только центр, как illuminates). Веер — тонкая полоса
+    (~1/γ по вертикали), поэтому проверяем ПЕРЕКРЫТИЕ интервалов углов, покрытых экраном (по 9 точкам: углы,
+    середины сторон, центр), с интервалами веера: верт. |ψ| ≤ nfan/γ, гор. |Δh| ≤ θ0/2 (+margin, рад)."""
+    hw, hh = scr["w"] / 2e3, scr["h"] / 2e3
+    psis, dhs = [], []
+    for a in (-1, 0, 1):
+        for b in (-1, 0, 1):
+            dC = scr["C"] + a * hw * scr["u"] + b * hh * scr["v"] - d["C"]
+            D = np.linalg.norm(dC)
+            if D == 0:
+                continue
+            dh = dC / D
+            if float(np.dot(dh, d["axis"])) <= 0:
+                continue
+            psis.append(math.asin(max(-1.0, min(1.0, float(np.dot(dh, d["vhat"]))))))
+            dh_h = _unit(dh - np.dot(dh, d["vhat"]) * d["vhat"])
+            dhs.append(math.atan2(float(np.dot(np.cross(d["axis"], dh_h), d["vhat"])),
+                                  float(np.dot(d["axis"], dh_h))))
+    if not psis:
+        return False
+    vfan = nfan / gamma; hfan = abs(d["theta0"]) / 2 + margin
+    return min(psis) <= vfan and max(psis) >= -vfan and min(dhs) <= hfan and max(dhs) >= -hfan
+
+
 def footprint(scr, emitters, gamma, I, mesh):
     """Карта плотности мощности [Вт/м²] на экране: веера всех осветителей (некогерентно)."""
     hw, hh = scr["w"] / 2e3, scr["h"] / 2e3
@@ -110,7 +135,8 @@ def emitter_geom(d, Cs, gamma):
     t = _unit(_rot(d["axis"], d["vhat"], alpha_ex))
     dh1 = (-d["theta0"] / 2) - alpha_ex; dh2 = (d["theta0"] / 2) - alpha_ex
     return dict(P=P, t=t, vn=d["vhat"], theta0=d["theta0"], Ptot=d["Ptot"], dev=d["dev"], iid=d["iid"],
-                ec=d["ec"], dh_lo=min(dh1, dh2), dh_hi=max(dh1, dh2))
+                ec=d["ec"], dh_lo=min(dh1, dh2), dh_hi=max(dh1, dh2),
+                alpha=alpha_ex, U=_unit(_rot(d["uhat"], d["vhat"], alpha_ex)))   # точка дуги и радиаль (для орбиты)
 
 
 def plot_footprint(scr, fp, emitters, path, ec):

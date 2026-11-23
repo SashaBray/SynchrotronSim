@@ -51,7 +51,9 @@ def trajectory(K, lam_u, N, gamma, ppp=64):
     wz = np.empty(Ns); wz[0] = 0.5 * dz[0]; wz[-1] = 0.5 * dz[-1]
     wz[1:-1] = 0.5 * (dz[1:] + dz[:-1])
     w = wz / (C * bz)
-    return dict(z=z, r=r, beta=beta, t=t, w=w, K=K, gamma=gamma, N=N, lam_u=lam_u, L=N * lam_u)
+    # periodic: N одинаковых периодов по ppp точек — amplitude() считает один период × множитель решётки
+    return dict(z=z, r=r, beta=beta, t=t, w=w, K=K, gamma=gamma, N=N, lam_u=lam_u, L=N * lam_u,
+                ppp=int(ppp), periodic=True)
 
 
 def apply_phase_errors(tr, sigma_phi_deg, seed=0, mode="iid", p=sr.P):
@@ -73,6 +75,7 @@ def apply_phase_errors(tr, sigma_phi_deg, seed=0, mode="iid", p=sr.P):
     kper = np.clip((tr["z"] / tr["lam_u"]).astype(int), 0, N - 1)
     tr2 = dict(tr); tr2["t"] = tr["t"] + phis[kper] / om1
     tr2["sigma_phi_deg"] = sigma_phi_deg
+    tr2["periodic"] = False                                   # периоды больше не одинаковы — полный интеграл
     return tr2
 
 
@@ -83,12 +86,31 @@ def _dirs(thx, thy):
     return np.stack([thx, thy, nz], axis=-1)                     # (...,3)
 
 
+def _period_view(tr):
+    """Один период периодической траектории как отдельная «траектория» + сдвиги на период (T, Δr) и N.
+    Трапеция по всей длине = Σ_k трапеций по периодам k (внутренние стыки получают полный вес), а период k —
+    сдвиг периода 0 на k·T по времени и k·Δr в пространстве ⇒ A = A_период · Σ_k e^{ikω(T − n·Δr/c)}."""
+    p = int(tr["ppp"]); r = tr["r"]; t = tr["t"]
+    dz = tr["z"][1] - tr["z"][0]
+    bz = tr["beta"][: p + 1, 2]
+    wz = np.full(p + 1, dz); wz[0] = wz[-1] = 0.5 * dz
+    one = dict(r=r[: p + 1], beta=tr["beta"][: p + 1], t=t[: p + 1], w=wz / (C * bz))
+    return one, float(t[p] - t[0]), np.asarray(r[p] - r[0], float), int(tr["N"])
+
+
 def amplitude(tr, E_keV, dirs, chunk=256):
     """|A|²·ω² по сетке направлений dirs(...,3) и энергий E_keV(nE). Возврат shape (*dirs_shape, nE).
 
-    A(ω,n)=Σ_s [n(n·β)−β] e^{iω(t−n·r/c)} w_s.  Векторизовано по s, чанк по направлениям."""
-    r = tr["r"]; beta = tr["beta"]; t = tr["t"]; w = tr["w"]     # (Ns,3),(Ns,3),(Ns,),(Ns,)
+    A(ω,n)=Σ_s [n(n·β)−β] e^{iω(t−n·r/c)} w_s.  Векторизовано по s, чанк по направлениям.
+    У ИДЕАЛЬНОЙ траектории (tr["periodic"], из trajectory()) интеграл берётся по ОДНОМУ периоду и умножается
+    на сумму решётки Σ_{k<N} e^{ikφ}, φ = ω(T − n·Δr/c) — это тот же интеграл (точно, в N раз дешевле);
+    с фазовыми ошибками (apply_phase_errors) — полный интеграл по всем точкам."""
     om = omega_of_keV(np.atleast_1d(E_keV))                      # (nE,)
+    if tr.get("periodic") and tr.get("ppp"):
+        src, T, dr, Nper = _period_view(tr)
+    else:
+        src, T, dr, Nper = tr, None, None, 1
+    r = src["r"]; beta = src["beta"]; t = src["t"]; w = src["w"]  # (Ns,3),(Ns,3),(Ns,),(Ns,)
     flat = dirs.reshape(-1, 3)
     out = np.empty((flat.shape[0], om.size))
     for i0 in range(0, flat.shape[0], chunk):
@@ -100,7 +122,14 @@ def amplitude(tr, E_keV, dirs, chunk=256):
         # A(g,nE,3) = Σ_s Vperp(g,Ns,3) * exp(i om[nE] arg(g,Ns)) * w[Ns]
         phase = np.exp(1j * om[None, None, :] * arg[:, :, None]) * w[None, :, None]  # (g,Ns,nE)
         A = np.einsum("gsc,gse->gec", Vperp, phase)             # (g,nE,3)
-        out[i0:i0 + chunk] = (om[None, :, None] ** 2 * np.abs(A) ** 2).sum(axis=2)
+        I = (np.abs(A) ** 2).sum(axis=2)                         # (g,nE)
+        if T is not None:                                        # |Σ_k e^{ikφ}|² = sin²(Nφ/2)/sin²(φ/2)
+            x = 0.5 * om[None, :] * (T - (n @ dr)[:, None] / C)  # φ/2 ~ 1e8–1e9 рад
+            d = x - math.pi * np.round(x / math.pi)              # приведённый к ближайшему mπ: числитель и
+            s = np.sin(d)                                         # знаменатель от ОДНОГО угла (гладко у резонанса)
+            g2 = np.where(np.abs(s) > 1e-15, (np.sin(Nper * d) / np.where(s == 0, 1.0, s)) ** 2, float(Nper) ** 2)
+            I = I * g2
+        out[i0:i0 + chunk] = om[None, :] ** 2 * I
     return out.reshape(*dirs.shape[:-1], om.size)
 
 

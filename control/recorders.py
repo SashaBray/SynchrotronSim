@@ -205,9 +205,15 @@ class ScreenRecorder(Recorder):
             I = mp["I"][..., 0] if np.asarray(mp["I"]).ndim == 3 else mp["I"]
             return np.asarray(I, float), float(mp["peak"]), np.asarray(mp["extent"], float), E0, window
 
-        Istart, pk_s, ext, E1_s, _ = pattern_at(gap_start, 0.0, 0.0)     # идеал при НАЧАЛЬНОМ зазоре
         Iend, pk_e, ext_e, E1_e, win_e = pattern_at(gap_end, 0.0, 0.0)   # идеал при КОНЕЧНОМ зазоре
-        Imeas, pk_m, _, _, _ = pattern_at(gap_end, jx, jy)               # измеренный (джиттер) при конечном зазоре
+        if gap_start == gap_end:                                          # зазор не менялся → та же картина
+            Istart, pk_s, ext, E1_s = Iend, pk_e, ext_e, E1_e
+        else:
+            Istart, pk_s, ext, E1_s, _ = pattern_at(gap_start, 0.0, 0.0) # идеал при НАЧАЛЬНОМ зазоре
+        if jx == 0.0 and jy == 0.0:                                       # нет джиттера → измеренная = идеал
+            Imeas, pk_m = Iend, pk_e
+        else:
+            Imeas, pk_m, _, _, _ = pattern_at(gap_end, jx, jy)           # измеренный (джиттер) при конечном зазоре
 
         Kend = sr.K_of_B0(sr.B0_of_gap(gap_end))                          # спектр в выбранной точке (конечный зазор)
         try:

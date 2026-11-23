@@ -213,6 +213,22 @@ _SECTOR_LINEAR = os.environ.get("SS_SECTOR_LINEAR", "") == "1"   # откат н
 _SECTOR_NSLICES = 5
 
 
+def _nsl_by_dev():
+    """Срезы сектор/кик-тела ПО ТИПУ УСТРОЙСТВА из env SS_NSL_DEV="dev=n,dev=n" (как nslByDev в C++
+    matrix_ring.h — паритет бит-в-бит). Нет переменной — пусто, всё как было."""
+    out = {}
+    for tok in (os.environ.get("SS_NSL_DEV", "") or "").split(","):
+        dev, eq, n = tok.partition("=")
+        if eq and dev:
+            try:
+                n = int(n)
+            except ValueError:
+                continue
+            if n > 0:
+                out[dev] = n
+    return out
+
+
 def _yoshida(order):
     """Коэффициенты (дрейф, кик) симплектического расщепления Йошиды — дословно из elegant integrate_csbend_ordn.
     order 2 — leapfrog; 4 — Форест–Рут (BETA=2^(1/3)); 6 — из AOP-TN-2020-064. Последний кик каждого шага = 0."""
@@ -358,6 +374,7 @@ class Magnet:
         if self.sector or self.kick_sector:
             # N срезов и порядок Йошиды = как elegant (N_SLICES=5, INTEGRATION_ORDER=4); env перекрывает.
             self._nsl_sector = int(os.environ.get("SS_SECTOR_NSL", "") or _SECTOR_NSLICES)
+            self._nsl_sector = _nsl_by_dev().get(self.dev, self._nsl_sector)   # SS_NSL_DEV по типу устройства
             self._yoshida_dk = _yoshida(int(os.environ.get("SS_SECTOR_ORDER", "") or 4))
         if self.sector:
             rho = self.Leff / self.theta0
