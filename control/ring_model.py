@@ -27,9 +27,28 @@ ID_FOCUS_SUFFIX = "UFC"
 
 
 def is_id_focus(dev):
-    """Фокус-элемент ондулятора (`<prefix>UFC`, kind=quad). Не ручка: его силу задаёт зазор устройства
-    (OpticsPlant ведёт вертикальный k1v ∝ K² по state.undulators), отдельного источника питания у него нет."""
+    """Прежний фокус-элемент ондулятора (`<prefix>UFC`, kind=quad) — в текущих решётках его НЕТ (фокусировку несут
+    полюса-«жёсткий край», undulators/migrate_hardedge_poles.py). Оставлено для старых БД: такой элемент не ручка
+    контура тюна (своего источника питания нет, силу задаёт зазор)."""
     return str(dev or "").endswith(ID_FOCUS_SUFFIX)
+
+
+# Полюса ондуляторов (секторные диполи-«жёсткий край»): по ним ищутся устройства. Группа = непрерывный прогон
+# полюсов по индексу кольца, номер — порядок по s (und_01…), как element_groups/TbtPlant.
+ID_POLE_DEVS = ("und_UPP", "und_UPM", "und_UE0", "und_UE1")
+
+
+def id_devices(mags):
+    """[(group_id, [индексы полюсов])] — ондуляторы кольца по s-порядку (прогоны полюсов ID_POLE_DEVS)."""
+    runs, cur = [], []
+    for i, m in enumerate(mags):
+        if str(getattr(m, "dev", "") or "") in ID_POLE_DEVS:
+            cur.append(i)
+        elif cur:
+            runs.append(cur); cur = []
+    if cur:
+        runs.append(cur)
+    return [(f"und_{k + 1:02d}", r) for k, r in enumerate(runs)]
 
 
 

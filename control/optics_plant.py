@@ -18,6 +18,7 @@ k1→частоты, k2→хроматизм, k3→ADTS. Матрицы откл
 Контуры — плагины IntegralSVD со своей уставкой (ref). model= — общий RingModel, НЕ закрывается здесь.
 """
 import copy
+import math
 
 import numpy as np
 
@@ -26,7 +27,7 @@ import ring_analysis as ra
 
 from .state import Schema, History, UndulatorConfig, OpticsView, _undulator_sr
 from .controller import ResponseMatrix
-from .ring_model import RingModel
+from .ring_model import RingModel, id_devices
 from .observer import Observer, ObsContext
 
 FD_EPS = 1e-3                                                  # шаг конечной разности матриц отклика (абс. Δk)
@@ -65,18 +66,18 @@ class OpticsPlant:
             from .controllers.optics_adts import AdtsLoop
             observer = observer_for([TuneLoop(), ChromaLoop(), AdtsLoop()], serves=set(self.observe))
         self.observer = observer
-        # зазор ондулятора → вертикальный фокус UFC (k1v ∝ K²) → отклик ТЮНА; UFC↔ондулятор по s-порядку
+        # зазор ондулятора → поле его полюсов ∝ K (масштаб изгиба f = K/K_ref: угол и грани полюсов, рамки заново).
+        # Фокусировку несут сами полюса (эквивалент «жёсткий край», грани θ/2): вертикаль ∝ ∫B² ∝ K², горизонталь 0.
         self.gap_mm = float(gap_mm); self.gap_ref = 5.0
         _sr = _undulator_sr()
         self._K_ref = float(_sr.K_of_B0(_sr.B0_of_gap(self.gap_ref))) if _sr is not None else None
-        _ufc_idx = sorted(i for i, m in enumerate(mags) if str(getattr(m, "dev", "") or "") == "und_UFC")
-        self._ufc = [(i, float(getattr(mags[i], "k1", 0.0) or 0.0), float(getattr(mags[i], "k1v", 0.0) or 0.0),
-                      f"und_{k + 1:02d}") for k, i in enumerate(_ufc_idx)]
+        self._und = id_devices(mags)                           # [(group_id, [индексы полюсов])] по s-порядку
 
     # ---- аналитическая оценка оптики на возмущённом кольце ----
-    def _perturbed(self, pk1, pk2, pk3, gaps=None, ufc_fac=None):
-        """Копия аналитического кольца с Δk1/Δk2/Δk3 (pk*), фокусом UFC по живым зазорам (gaps: group_id → мм)
-        и/или прямым множителем фокуса ufc_fac (group_id → (K/K_ref)²; имеет приоритет над gaps)."""
+    def _perturbed(self, pk1, pk2, pk3, gaps=None, id_fac=None):
+        """Копия аналитического кольца с Δk1/Δk2/Δk3 (pk*) и полем полюсов ондуляторов по живым зазорам (gaps:
+        group_id → мм) и/или прямым множителем фокусировки id_fac (group_id → (K/K_ref)²; приоритет над gaps):
+        полюса устройства масштабируются по изгибу f = √id_fac = K/K_ref (Magnet.rescale_bend, как BSCALE C++)."""
         pr = copy.copy(self.base); mags = list(self.base.mags)
         touched = {}                                          # копируем магнит один раз, даже если его трогают несколько каналов
 
@@ -94,31 +95,36 @@ class OpticsPlant:
         for fld, pk in (("k2", pk2), ("k3", pk3)):             # секступоль/октуполь — одна компонента, без v-пары
             for i, dv in pk.items():
                 m = _edit(i); setattr(m, fld, float(getattr(m, fld, 0.0) or 0.0) + dv)
-        # зазор ондулятора → ВЕРТИКАЛЬНЫЙ фокус UFC: k1v ∝ K² (естественный фокус планарного ИД k_y = ½(B0/Bρ)²).
-        # Горизонтальный k1 UFC НЕ трогаем: он гасит слабую фокусировку 1/ρ² секторных полюсов, а полюса в
-        # кольце от живого зазора не зависят (их углы заданы при сборке). Масштаб k1 ломал бы гашение → ложный
-        # Δνx (+0,013 при раскрытии всех 38 ИД 5→20 мм), тогда как у планарного ИД горизонталь — дрейф при любом зазоре.
-        if self._ufc and (ufc_fac or (gaps and self._K_ref)):
-            for i, k1n, k1vn, gid in self._ufc:
-                if ufc_fac and gid in ufc_fac:
-                    fac = float(ufc_fac[gid])
+        # зазор ондулятора → поле его полюсов: масштаб изгиба f = K/K_ref (угол и грани θ/2 полюсов, рамки заново).
+        # Вертикальная фокусировка граней ∝ f², горизонталь — дрейф при любом зазоре (грани гасят слабую 1/ρ²).
+        if self._und and (id_fac or (gaps and self._K_ref)):
+            for gid, poles in self._und:
+                if id_fac and gid in id_fac:
+                    f = math.sqrt(max(0.0, float(id_fac[gid])))
                 else:
                     g = gaps.get(gid) if gaps else None
                     if g is None or not self._K_ref or abs(g - self.gap_ref) < 1e-9:
                         continue
-                    fac = self.gap_fac(g)
-                m = _edit(i); m.k1v = k1vn * fac
+                    f = self.gap_scale(g)
+                if f == 1.0:
+                    continue
+                for i in poles:
+                    _edit(i).rescale_bend(f)
         for i, m in touched.items():
             mags[i] = m
         pr.mags = mags
         return pr
 
-    def gap_fac(self, gap_mm):
-        """Множитель вертикального фокуса UFC при зазоре gap_mm относительно опорного (K/K_ref)². 1 — без модели СИ."""
+    def gap_scale(self, gap_mm):
+        """Масштаб поля (изгиба) полюсов ИД при зазоре gap_mm относительно опорного: f = K/K_ref. 1 — без модели СИ."""
         _sr = _undulator_sr()
         if _sr is None or not self._K_ref:
             return 1.0
-        return float(_sr.K_of_B0(_sr.B0_of_gap(float(gap_mm))) / self._K_ref) ** 2
+        return float(_sr.K_of_B0(_sr.B0_of_gap(float(gap_mm))) / self._K_ref)
+
+    def gap_fac(self, gap_mm):
+        """Множитель фокусировки ИД при зазоре gap_mm: (K/K_ref)² = f² (вертикаль граней ∝ ∫B²)."""
+        return self.gap_scale(gap_mm) ** 2
 
     GAP_OBS = ("tune", "chroma")
 
@@ -126,20 +132,21 @@ class OpticsPlant:
         """Линейный отклик наблюдаемых на фокус ондуляторов: (group_id по s-порядку, {obs: R k×n_ИД}),
         Δobs = R·(fac − 1), fac = gap_fac(зазор) = (K/K_ref)². Столбец ИД — конечная разность «вертикальный
         фокус ИД снят» (fac 1 → 0): отклик линеен по fac (на единицу (1 − fac) одинаков при 10 и 50 мм).
-        Хроматизм идёт в основном через бета-биение в секступолях (у СИЛА-26 ×9 больше прямого вклада UFC),
+        Хроматизм идёт в основном через бета-биение в секступолях (у СИЛА-26 ×9 больше прямого вклада ИД),
         поэтому формулой −β·k·L/4π его не взять — только разностью. Порядок 2 точен для ν и ξ₁.
         only — подмножество group_id (без кэша, для проверок). Полный набор кэшируется на диск по отпечатку
         кольца: первый раз n_ИД + 1 проход ring_map (СИЛА-26: 39 × ~3 с ≈ 2 мин), дальше — мгновенно."""
         import hashlib, os, pickle
         from .response import ring_fingerprint, CACHE_DIR
         obs = [o for o in observables if o in self.observe]
-        gids = [gid for *_, gid in self._ufc if only is None or gid in only]
+        gids = [gid for gid, _ in self._und if only is None or gid in only]
         if not gids or not obs:
             return [], {}
         path = None
         if only is None:
             key = (ring_fingerprint(self.rm.ring), "gapmodel", int(order), tuple(obs),
-                   tuple((int(i), float(k1vn), gid) for i, _, k1vn, gid in self._ufc))
+                   tuple((gid, tuple(int(i) for i in poles)) for gid, poles in self._und),
+                   tuple(float(self.base.mags[p[0]].theta0) for _, p in self._und))
             path = os.path.join(CACHE_DIR, f"gapmodel_{hashlib.md5(repr(key).encode()).hexdigest()[:12]}.pkl")
             if not rebuild and os.path.exists(path):
                 try:
@@ -149,7 +156,7 @@ class OpticsPlant:
                     pass
 
         def run(fac):
-            ctx = ObsContext(None, self, ring=self._perturbed({}, {}, {}, ufc_fac=fac), order=int(order),
+            ctx = ObsContext(None, self, ring=self._perturbed({}, {}, {}, id_fac=fac), order=int(order),
                              intermediates=self.observer.intermediates)
             return self.observer.compute(ctx, obs)
 
@@ -169,7 +176,7 @@ class OpticsPlant:
     def _ctx(self, pk1, pk2, pk3, state=None):
         """Контекст наблюдателя на ВОЗМУЩЁННОМ кольце (общие промежуточные: карта оборота считается раз)."""
         gaps = ({gid: c.gap_mm for gid, c in state.undulators.items()}
-                if state is not None and state.undulators else None)      # живые зазоры → фокус UFC → тюн
+                if state is not None and state.undulators else None)      # живые зазоры → поле полюсов ИД
         return ObsContext(state, self, ring=self._perturbed(pk1, pk2, pk3, gaps), order=self.order,
                           intermediates=self.observer.intermediates)       # билдеры optics-промежуточных — из контуров
 

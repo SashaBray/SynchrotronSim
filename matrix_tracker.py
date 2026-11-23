@@ -326,6 +326,12 @@ class Magnet:
         # k1=k1u (гор. фокус ∂Bz/∂u), k1v (верт. фокус ∂By/∂v): неголоморфн. диполь Gu≠Gv ⇒ |f_x|≠|f_y|.
         self.theta0 = QP * B * self.Leff
         self.k1 = QP * G; self.k1v = QP * Gv; self.k2 = QP * S; self.k3 = QP * O
+        self._bend0 = (self.theta0, self.edge1, self.edge2)   # база масштаба изгиба (rescale_bend, BSCALE)
+        self._derive()
+
+    def _derive(self):
+        """Всё производное от угла изгиба θ0 и углов граней (краевые линзы, фриндж ψ, сектор/кик, срезы,
+        СИ, рамки). Общий путь для __init__ и rescale_bend — с исходными θ0/E даёт бит-в-бит тот же магнит."""
         # краевой (фриндж) верт. фокус 2-го порядка: 1/f_y = FE·θ₀²/L_eff (∝поле², offset/угол-независим).
         # Эквивалент углового члена Δv'=−(q/p)u'v∂ₓBz после ∫по частям = −(q/p)²∫Bz²ds·v. Диполи: θ₀≠0.
         self.kEdge = _edge_ff(self.dev) * self.theta0 ** 2 / self.Leff if self.Leff > 0 else 0.0
@@ -394,6 +400,13 @@ class Magnet:
         else:
             self.fr_in = (self.entry, self.axis, self.uhat, self.vhat)
             self.fr_out = (self.exit, self.axis, self.uhat, self.vhat)
+
+    def rescale_bend(self, f):
+        """Живой зазор ИД: угол и грани изгиба = f × исходные, всё производное и РАМКИ заново (опорная
+        дуга следует за полем) — как команда BSCALE C++-сервера (matrix_ring_serve.h). f=0 ⇒ не сектор."""
+        th0, e10, e20 = self._bend0
+        self.theta0 = f * th0; self.edge1 = f * e10; self.edge2 = f * e20
+        self._derive()
 
     def _ref_bow(self):
         """Опорная орбита в раме ящика: (x в точках кика, x на входной плоскости, x на выходной).

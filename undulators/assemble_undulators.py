@@ -6,13 +6,11 @@
   • ПРОВЕРЯЕТ, что устройство (+ зазор безопасности) помещается в промежуток — иначе отказ;
   • режет прогон дрейфов слота [i_first..i_last] на DRIF(a) + <полюса устройства> + DRIF(b).
 
-Полюса — ОБЩИЕ имена (UPP/UPM/UE0/UE1), определяются ОДИН раз (k=1); несут ИЗГИБ-орбиту, путь и увод
-при перекосе (kind=dipole, секторный интегратор). ФОКУС устройства несёт отдельный элемент UFC (KQUAD,
-один на устройство): ядро для kind=quad идёт в body_kick, где k1 (горизонт) и k1v (вертикаль) НЕЗАВИСИМЫ.
-UFC несёт ВЕРТИКАЛЬНЫЙ k1v (естественный фокус ондулятора k_y=½(B0/Bρ)²) и ГОРИЗОНТАЛЬНЫЙ k1, гасящий
-побочную слабую фокусировку 1/ρ² секторных полюсов ⇒ нетто-оптика планарного ондулятора: горизонталь —
-дрейф, вертикаль — k_y. Сила/фокус КОНКРЕТНОГО устройства не в .lte, а в undulator_knobs.csv (по зазору),
-и применяются ПО ИНСТАНСУ при импорте — каждый ондулятор управляется отдельно, типы в .lte не плодятся.
+Полюса и промежутки устройства — ОБЩИЕ имена (UPP/UPM/UE0/UE1, UDG/UDH), определяются ОДИН раз (k=1). Полюса —
+прямоугольные «жёсткий край» (грани θ/2, build_undulator_lte.py): несут орбиту-качку, путь, увод при перекосе И
+естественную фокусировку планарного ондулятора (вертикаль ∝ ∫B², горизонталь — дрейф) — отдельного фокус-
+элемента нет. Сила КОНКРЕТНОГО устройства не в .lte, а в undulator_knobs.csv (k по зазору: углы и грани ×k) и
+применяется ПО ИНСТАНСУ при импорте — каждый ондулятор управляется отдельно, типы в .lte не плодятся.
 
 Базовый .lte НЕ меняется: определения берутся из него ДОСЛОВНО, переписывается только линия ring.
 
@@ -28,36 +26,34 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import lte_flatten as lf
 import undulator_sr as sr
 import matrix_tracker as mt
-_QP = mt.QP                                          # q/p₀ ядра: mat_Gv = k1v/QP
 
 HERE = os.path.dirname(__file__)
 DEFAULT_LTE = os.path.join("workspace", "lte", "configuration_v5_sila2026", "sila2026.lte")
 
 
-L_FC = 0.02                                          # длина фокус-элемента UFC, м (тонкая линза в промежутке)
-
-
 def read_device(path):
-    """(elems, line_tokens, L_dev, B0, sum_th2) устройства. sum_th2=Σθ² полюсов (для 1/ρ²-гашения)."""
+    """(elems, line_tokens, L_dev, B0) устройства (линия: торцевые маркеры, полюса, промежутки)."""
     elems, lines, order = lf.read(path)
     line = lines[order[-1]]                           # единственная LINE устройства
     L_dev = sum(elems[t].get("L", 0.0) for t in line)
-    sum_th2 = sum(elems[t].get("ANGLE", 0.0) ** 2 for t in line if elems[t]["type"] != "MARK")
     m = re.search(r"B0=([\d.]+)", open(path, encoding="utf-8").read())
-    return elems, line, L_dev, (float(m.group(1)) if m else sr.P.B0_ref), sum_th2
+    return elems, line, L_dev, (float(m.group(1)) if m else sr.P.B0_ref)
 
 
 def device_defs(delems, line):
-    """Определения УНИКАЛЬНЫХ элементов-ПОЛЮСОВ (по одному разу, k=1) + фокус-элемент UFC.
-    Маркеры устройства НЕ включаются: при monitors=True они стали бы BPM и разорвали бы прогон группы."""
+    """Определения УНИКАЛЬНЫХ элементов устройства (по одному разу, k=1): полюса-«жёсткий край» (CSBEND с гранями
+    E1=E2=ANGLE/2) и промежутки (DRIF). Маркеры устройства НЕ включаются: при monitors=True они стали бы BPM."""
     out, seen = [], set()
     for t in line:
         if t in seen or delems[t]["type"] == "MARK":
             continue
         seen.add(t)
         e = delems[t]
-        out.append(f"{t}: CSBEND, L={e.get('L',0.0):.12g}, ANGLE={e.get('ANGLE',0.0):.15e}, N_SLICES=1")
-    out.append(f"UFC: KQUAD, L={L_FC:.12g}, K1=0, N_SLICES=1")   # фокус-элемент (k1/k1v по инстансу при импорте)
+        if e["type"] == "DRIF":
+            out.append(f"{t}: DRIF, L={e.get('L', 0.0):.12g}")
+        else:
+            out.append(f"{t}: CSBEND, L={e.get('L', 0.0):.12g}, ANGLE={e.get('ANGLE', 0.0):.15e}, "
+                       f"E1={e.get('E1', 0.0):.15e}, E2={e.get('E2', 0.0):.15e}, N_SLICES=1")
     return out
 
 
@@ -81,10 +77,9 @@ def assemble(base_lte, device_lte, manifest, out_lte, knobs_csv,
     beamline = "RING" if "RING" in lines else order[-1]
     seq = list(lf.expand(beamline, lines))
 
-    delems, dline, L_dev, b0_dev, sum_th2 = read_device(device_lte)
+    delems, dline, L_dev, b0_dev = read_device(device_lte)
     Brho = sr.P.E / 0.299792458
-    L_pole = next(delems[t].get("L", 0.0) for t in dline if delems[t]["type"] != "MARK")
-    L_foot = L_dev + L_FC                              # footprint устройства (полюса + фокус-элемент)
+    L_foot = L_dev                                     # footprint устройства (полюса с промежутками)
 
     rows = list(csv.DictReader(open(manifest, encoding="utf-8"), delimiter=";"))
     for r in rows:                                     # нормализация активности (установлен ли слот)
@@ -97,8 +92,8 @@ def assemble(base_lte, device_lte, manifest, out_lte, knobs_csv,
     active = [r for r in rows if r["_on"]]
     active.sort(key=lambda r: int(r["i_first"]), reverse=True)   # врезка с конца — индексы не съезжают
 
-    pole_seq = [t for t in dline if delems[t]["type"] != "MARK"]   # полюса без маркеров
-    npole = len(pole_seq)
+    dev_seq = [t for t in dline if delems[t]["type"] != "MARK"]    # полюса и промежутки без маркеров
+    npole = sum(delems[t]["type"] == "CSBEND" for t in dev_seq)
     drift_defs, knobs, report = [], [], []
     for r in active:
         slot = r["slot_id"]
@@ -107,11 +102,7 @@ def assemble(base_lte, device_lte, manifest, out_lte, knobs_csv,
         gap = gap_override if gap_override is not None else float(r["gap_mm"].replace(",", "."))
         B0slot = sr.B0_of_gap(gap, sr.P)
         k = B0slot / b0_dev                            # сила относительно устройства (gap→поле)
-        Ky = 0.5 * (B0slot / Brho) ** 2                # верт. фокус k_y (∫k1v ds = Ky·L_dev)
-        Kx = k ** 2 * sum_th2 / L_pole                 # побочный горизонт. фокус секторных полюсов ∫1/ρ² ds
-        # фокус-элемент UFC (kind=quad → body_kick): вертикаль — естеств. фокус, горизонталь — гашение 1/ρ²
-        fc_mat_Gv = (-Ky * L_dev / L_FC) / _QP         # k1v<0 (фокус); ∫k1v ds = −Ky·L_dev
-        fc_mat_G = (-Kx / L_FC) / _QP                  # ∫k1 ds = −Kx (гасит горизонт. фокус полюсов)
+        Ky = 0.5 * (B0slot / Brho) ** 2                # справочно: k_y синусоиды (фокусируют грани полюсов)
         if L_foot + 2 * margin > L_slot + 1e-9:
             raise SystemExit(f"[ОТКАЗ] слот {slot}: устройство {L_foot:.4f} м + зазор {2*margin:.4f} "
                              f"не влезает в промежуток {L_slot:.4f} м")
@@ -123,9 +114,8 @@ def assemble(base_lte, device_lte, manifest, out_lte, knobs_csv,
         da, db = f"{slot}_DA", f"{slot}_DB"
         drift_defs.append(f"{da}: DRIF, L={a:.15g}")
         drift_defs.append(f"{db}: DRIF, L={b:.15g}")
-        seq[i0:i1 + 1] = [da] + pole_seq + ["UFC", db]   # полюса + фокус-элемент, свои дрейфы по краям
-        knobs.append(f"{slot};{r['sp_pair']};cpmu18;{gap:.3f};{k:.6f};{npole};{r['pos']};{a:.6f};{b:.6f};"
-                     f"{fc_mat_G:.9e};{fc_mat_Gv:.9e};{Ky:.6e};{Kx:.6e}")
+        seq[i0:i1 + 1] = [da] + dev_seq + [db]         # полюса с промежутками, свои дрейфы по краям
+        knobs.append(f"{slot};{r['sp_pair']};cpmu18;{gap:.3f};{k:.6f};{npole};{r['pos']};{a:.6f};{b:.6f};{Ky:.6e}")
         report.append((slot, r["sp_pair"], gap, k, a, b))
 
     base_txt = open(base_lte, encoding="utf-8").read()
@@ -138,10 +128,11 @@ def assemble(base_lte, device_lte, manifest, out_lte, knobs_csv,
               f"сила/фокус — по инстансу при импорте (undulator_knobs.csv)\n")
     os.makedirs(os.path.dirname(os.path.abspath(out_lte)), exist_ok=True)
     open(out_lte, "w", encoding="utf-8", newline="\n").write(
-        header + preamble.rstrip() + "\n\n! ── полюса ондулятора (общие, k=1) ──\n" + "\n".join(device_defs(delems, dline))
+        header + preamble.rstrip() + "\n\n! ── полюса и промежутки ондулятора (общие, k=1) ──\n"
+        + "\n".join(device_defs(delems, dline))
         + "\n\n! ── дрейфы промежутков ──\n" + "\n".join(drift_defs) + "\n\n" + ring_txt + "\n")
     open(knobs_csv, "w", encoding="utf-8", newline="\n").write(
-        "slot_id;sp_pair;device;gap_mm;k;n_poles;pos;a_m;b_m;fc_mat_G;fc_mat_Gv;Ky;Kx_poles\n"
+        "slot_id;sp_pair;device;gap_mm;k;n_poles;pos;a_m;b_m;Ky\n"
         + "\n".join(knobs) + ("\n" if knobs else ""))
     return report, L_dev, len(seq)
 

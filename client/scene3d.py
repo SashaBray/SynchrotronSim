@@ -26,7 +26,7 @@ import numpy as np
 # элементы САМОГО ондулятора (полюса + концевые) — не STL-тела, рисуются гребёнкой ондулятора; не адресуем
 POLE_DEVS = {"und_UPM", "und_UPP", "und_UE0", "und_UE1"}
 # устройства, СКРЫТЫЕ в сцене по просьбе (чистый визуал; ядро и якоря ондуляторов не затрагиваются)
-HIDDEN_DEVS = {"und_UFC"}
+HIDDEN_DEVS = {"und_UFC"}                 # прежний фокус-элемент ИД (в текущих решётках его нет)
 # типы, у которых рисуем ТЕЛО-блок (остальное — дрейфы/маркеры/мониторы — тел не имеют)
 DRAW_KINDS = {"dipole", "dq", "quad", "sext", "oct", "corrector", "kicker"}
 
@@ -111,20 +111,26 @@ def build_geometry(plant, state=None, *, decimate: int = 1) -> dict:
                 g["magnets"].append({"name": nm, "dev": dev,
                                      "c": [cx, cy], "ax": a2, "ux": u2, "t": t,
                                      "L": float(getattr(m, "L", 0.0) or 0.0), "kind": kind})
-        # якоря ондуляторов: group_id → якорь (UFC) + осевое направление + ЦЕНТРЫ ПОЛЮСОВ (для отрисовки
-        # самого ондулятора периодическим рядом; полюса UPM/UPP идут ПЕРЕД якорем-UFC по s)
+        # якоря ондуляторов: group_id → якорь (выходной полюс) + осевое направление + ЦЕНТРЫ ПОЛЮСОВ (для отрисовки
+        # самого ондулятора периодическим рядом). Полюса — из plant._und_poles; старый путь (якорь-UFC после полюсов)
+        # — сбор назад по s от якоря, если plant их не отдаёт.
+        poles_of = getattr(plant, "_und_poles", {}) or {}
         for gid, idx in getattr(plant, "_und_anchor", {}).items():
             idx = int(idx)
             m = mags[idx]
             axis = _axis_xy(mags, idx)
             cells = []                                       # ячейки гребёнки: [x, y, is_end] (концевые — длиннее)
-            j = idx - 1
-            while j >= 0 and str(getattr(mags[j], "dev", "") or "") in ("und_UPM", "und_UPP", "und_UE0", "und_UE1"):
+            if gid in poles_of:
+                seq = [int(j) for j in poles_of[gid]]
+            else:
+                seq, j = [], idx - 1
+                while j >= 0 and str(getattr(mags[j], "dev", "") or "") in ("und_UPM", "und_UPP", "und_UE0", "und_UE1"):
+                    seq.append(j); j -= 1
+                seq.reverse()
+            for j in seq:
                 dv = str(getattr(mags[j], "dev", "") or "")
                 cells.append([float(mags[j].center[0]), float(mags[j].center[1]),
                               1 if dv in ("und_UE0", "und_UE1") else 0])
-                j -= 1
-            cells.reverse()
             g["undulators"][gid] = {"xy": [float(m.center[0]), float(m.center[1])], "axis": axis,
                                     "gap_mm": _gap_of(state, gid, default=plant.gap_mm), "poles": cells}
     # доска могла знать ондуляторы, которых нет среди якорей (фейк-plant): добавить с нулём координат

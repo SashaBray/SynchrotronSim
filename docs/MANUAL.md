@@ -318,8 +318,8 @@ Python больше **не считает** — только БД/анализ/�
   перед первым магнитом, ВЧ как RFCA с FIDUCIAL=light, СИ и ISR по срезам изгибов, у каждой частицы свой
   генератор). Двоичный протокол по stdin/stdout: `TRACK`/`TBT`/`ELEM`/`PIECES`/`JUNCTION` + float64,
   `INFO`/`PIECEMETA`, возмущения `KICK`/`VKICK j θ` (гор./верт. доп. кик) / `DK j dk` (±Δ нормального
-  градиента k1 обеих плоскостей — BBA) / `DKV j dk` (±Δ только вертикального k1v — фокус ондулятора от
-  живого зазора, `TbtPlant`) / `DSK j dks` (скью-градиент ks, связь x↔y — коррекция связи) /
+  градиента k1 обеих плоскостей — BBA) / `DKV j dk` (±Δ только вертикального k1v) / `BSCALE j f` (угол и грани
+  изгиба j = f × исходные, рамки заново — живой зазор ондулятора, `TbtPlant`) / `DSK j dks` (скью-градиент ks, связь x↔y — коррекция связи) /
   `DK2 j dk2` / `DK3 j dk3` (±Δ секступольной k2 / октупольной k3 — нелинейный тюнер ν(δ), коррекция
   хроматизма: ξ1 семействами SF/SD, ξ2 октуполями) / `YAW j α` / `RESET` / `RF on V h φ f` (параметры ВЧ на
   лету; `f` ≤ 0 ⇒ f_RF = h·c/C, иначе длина ВЧ-оборота C_RF = h·c/f — расстроенный резонатор сдвигает
@@ -331,13 +331,14 @@ Python больше **не считает** — только БД/анализ/�
   `track_elements`, `track_pieces`, `with_kick`, `with_yaw`, `perturbed`, `junction`; `rf=dict(volt_mv,
   harmonic, phase_deg[, freq_hz])` и `set_rf(freq_hz=…)` — частота ВЧ на лету (`rf_frequency()`,
   `rf_circumference()`; Python-эталон — `ring_analysis.Ring.set_rf`/`rf_circumference`, elegant — `FREQ=freq_hz`);
-  `apply_perturb(kicks, vkicks, dks, dsks, dk2s, dk3s, dkvs)` — RESET + набор возмущений на том же сервере,
+  `apply_perturb(kicks, vkicks, dks, dsks, dk2s, dk3s, dkvs, bscales)` — RESET + набор возмущений на том же сервере,
   ошибки рассогласования и возмущения создания `with_*`/`perturbed` сохраняются, сбрасывается только прежний
   `apply_perturb`; описание магнитов `mags`/`plane` для `ring_matrix`/`ring_response` следует за всеми
   возмущениями: кик изгиба не трогает его θ0, `VKICK` — только атрибут `vkick`); сверка с Python-эталоном — до
   1e-11, быстрее в 150–450 раз. Дешёвые пути БЕЗ RESET (~0,3 с): `set_kicks(kicks, vkicks)` — задать
   изменившиеся кики (смена корректоров FOFB; снять — 0), `add_perturb(dks=…, dkvs=…, dsks=…, dk2s=…, dk3s=…)` —
-  доложить аддитивные приращения (фокус ИД от движущегося зазора); `TbtPlant._apply` сам выбирает путь.
+  доложить аддитивные приращения, `set_bend_scale([(j, f)])` — масштаб изгиба полюсов (живой зазор ИД);
+  `TbtPlant._apply` сам выбирает путь.
   `nsl_dev={device_type_id: n}` — срезы сектор/кик-тела по типу устройства (env `SS_NSL_DEV="dev=n,…"`,
   её же читает Python-эталон — паритет 1e-11); не задано — из окружения, по умолчанию всё как было.
 

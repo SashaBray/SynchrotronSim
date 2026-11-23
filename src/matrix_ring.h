@@ -63,6 +63,7 @@ struct Node {
     Element phys;
     Vec3   center, axis, uhat, vhat, entry, exit;   // «ящик» (для стыков)
     Frame  fr_in, fr_out;                            // рамки стыковки (у сектора — криволинейные)
+    double theta0_0 = 0, edge1_0 = 0, edge2_0 = 0;   // исходные угол/грани изгиба (база BSCALE — живой зазор ИД)
     // Плоскость инжекции — тело=тождество; иначе физдвижок (Element::body сам даёт дрейф для не-sector/не-kick).
     State  body(const State& s, IsrRng* rng = nullptr) const { return is_plane ? s : phys.body(s, rng); }
 };
@@ -136,6 +137,24 @@ inline std::map<std::string, int> nslByDev() {
     return m;
 }
 
+// Рамки стыковки узла: у сектора — криволинейные (грань ⊥ касательной опорной дуги), иначе ⊥ оси ящика.
+// Общая для buildLine и BSCALE (смена угла полюса на ходу — рамки следуют за опорной).
+inline void setFrames(Node& nd) {
+    double Leff = nd.phys.Leff;
+    if (nd.sector) {                                            // криволинейные рамки (⊥ касательной дуги)
+        double rho = Leff / nd.phys.theta0;
+        Vec3 Oc = nd.center + nd.uhat * rho;                    // центр кривизны
+        double th2 = nd.phys.theta0 / 2.0;
+        Vec3 entry_pt = Oc + rot(nd.center - Oc, nd.vhat, -th2);
+        Vec3 exit_pt  = Oc + rot(nd.center - Oc, nd.vhat,  th2);
+        nd.fr_in  = { entry_pt, rot(nd.axis, nd.vhat, -th2), rot(nd.uhat, nd.vhat, -th2), nd.vhat };
+        nd.fr_out = { exit_pt,  rot(nd.axis, nd.vhat,  th2), rot(nd.uhat, nd.vhat,  th2), nd.vhat };
+    } else {
+        nd.fr_in  = { nd.entry, nd.axis, nd.uhat, nd.vhat };
+        nd.fr_out = { nd.exit,  nd.axis, nd.uhat, nd.vhat };
+    }
+}
+
 // ---- СБОРКА КОЛЬЦА из БД (build_line + check_junctions) ----------------------------------------
 // nsl/order — срезы и порядок сектор/кик-тела (по умолчанию как elegant: 5 и 4); isr — квантовое возбуждение.
 inline std::vector<Node> buildLine(const std::string& ws, int lattice, double design_mev, bool sr,
@@ -195,18 +214,8 @@ inline std::vector<Node> buildLine(const std::string& ws, int lattice, double de
         frame(yaw, pitch, roll, nd.axis, nd.uhat, nd.vhat);
         nd.entry = nd.center - nd.axis * (0.5 * Leff);
         nd.exit  = nd.center + nd.axis * (0.5 * Leff);
-        if (nd.sector) {                                            // криволинейные рамки (⊥ касательной дуги)
-            double rho = Leff / nd.phys.theta0;
-            Vec3 Oc = nd.center + nd.uhat * rho;                    // центр кривизны
-            double th2 = nd.phys.theta0 / 2.0;
-            Vec3 entry_pt = Oc + rot(nd.center - Oc, nd.vhat, -th2);
-            Vec3 exit_pt  = Oc + rot(nd.center - Oc, nd.vhat,  th2);
-            nd.fr_in  = { entry_pt, rot(nd.axis, nd.vhat, -th2), rot(nd.uhat, nd.vhat, -th2), nd.vhat };
-            nd.fr_out = { exit_pt,  rot(nd.axis, nd.vhat,  th2), rot(nd.uhat, nd.vhat,  th2), nd.vhat };
-        } else {
-            nd.fr_in  = { nd.entry, nd.axis, nd.uhat, nd.vhat };
-            nd.fr_out = { nd.exit,  nd.axis, nd.uhat, nd.vhat };
-        }
+        nd.theta0_0 = nd.phys.theta0; nd.edge1_0 = nd.phys.edge1; nd.edge2_0 = nd.phys.edge2;
+        setFrames(nd);
         mags.push_back(nd); ++i;
     }
     // check_junctions: снап совпадающих плоскостей (same_plane_as_prev) — по «ящику» (axis/entry/exit).

@@ -46,7 +46,7 @@ TB = os.path.join("workspace", "tables")
 EG = os.path.join(TB, "element_groups.csv")
 SCR = os.path.join(TB, "screens.csv")
 RESDIR = os.path.join("workspace", "results", "screens")
-RADIATE = {"dipole", "dq"}                           # что светит (квадруполь-фокус UFC — нет)
+RADIATE = {"dipole", "dq"}                           # что светит (изгибы; полюса ИД — свой эмиттер)
 
 
 def _unit(v):

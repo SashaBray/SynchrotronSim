@@ -1783,23 +1783,30 @@ class TestOpticsPlant(unittest.TestCase):
 
 
 @unittest.skipUnless(os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")),
-                     "нет lattice_configs.csv — пропуск ручек контура тюна на решётке 26")
-class TestTuneKnobsExcludeIdFocus(unittest.TestCase):
-    """Фокус ондулятора (UFC, kind=quad) задаётся зазором, своего источника питания у него нет — значит это
-    не ручка контура тюна: в семейства quad.<fam>.dk он не входит, обычные квадрупольные семейства — на месте."""
+                     "нет lattice_configs.csv — пропуск модели полюсов ИД на решётке 26")
+class TestUndulatorHardEdgePoles(unittest.TestCase):
+    """Полюса ондуляторов — эквивалент «жёсткий край» (undulators/migrate_hardedge_poles.py): длина (8/π²)·λu/2,
+    грани θ/2 того же знака, что угол (вертикальный ФОКУС краёв), отдельной линзы UFC нет; фокус-элемент старых
+    БД (is_id_focus) — не ручка контура тюна."""
 
-    def test_undulator_focus_not_a_tune_knob(self):
-        from control.ring_model import RingModel, is_id_focus
-        self.assertTrue(is_id_focus("und_UFC"))
-        self.assertFalse(is_id_focus("und_QF1A"))
+    def test_poles_are_hard_edge_without_lens(self):
+        import math
+        from control.ring_model import RingModel, is_id_focus, id_devices
+        self.assertTrue(is_id_focus("und_UFC")); self.assertFalse(is_id_focus("und_QF1A"))
         rm = RingModel(lattice=26, nsl=2)
         try:
-            ufc = {i for i, m in enumerate(rm.ring.mags) if is_id_focus(getattr(m, "dev", ""))}
-            if not ufc:
-                self.skipTest("в решётке 26 нет ондуляторов (UFC)")
-            fam_idx = {i for idx in rm.quad_fams.values() for i in idx}
-            self.assertFalse(fam_idx & ufc, "UFC попал в семейства градиентных ручек")
-            self.assertEqual([a for a in rm.dk_ids if "UFC" in a], [])
+            mags = rm.ring.mags
+            devs = id_devices(mags)
+            if not devs:
+                self.skipTest("в решётке 26 нет ондуляторов")
+            self.assertEqual(len(devs), 38)
+            self.assertFalse(any(is_id_focus(getattr(m, "dev", "")) for m in mags), "в решётке остался UFC")
+            Lp = 8.0 / math.pi ** 2 * 0.009
+            for i in devs[0][1]:
+                m = mags[i]
+                self.assertAlmostEqual(float(m.Leff), Lp, places=9)
+                self.assertAlmostEqual(float(m.edge1), 0.5 * float(m.theta0), places=12)   # CSV: 15 знаков
+                self.assertGreater(float(m.kEdge1), 0.0)                  # tg(E)·θ/L > 0 — вертикальный фокус
             self.assertIn("quad.und_QF1A.dk", rm.dk_ids)
         finally:
             rm.close()
@@ -1808,8 +1815,8 @@ class TestTuneKnobsExcludeIdFocus(unittest.TestCase):
 @unittest.skipUnless(os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")),
                      "нет lattice_configs.csv — пропуск отклика тюна на зазор ИД на решётке 26")
 class TestUndulatorGapTune(unittest.TestCase):
-    """Зазор планарного ондулятора двигает только ВЕРТИКАЛЬ: νy и ξy (горизонталь — дрейф при любом зазоре: k1 UFC
-    гасит 1/ρ² полюсов, полюса от зазора не зависят), а линейный член кокпита R_gap·(fac − 1) совпадает с полным
+    """Зазор планарного ондулятора двигает только ВЕРТИКАЛЬ: νy и ξy (горизонталь — дрейф при любом зазоре: грани θ/2
+    полюсов гасят 1/ρ² при любом масштабе поля), а линейный член кокпита R_gap·(fac − 1) совпадает с полным
     пересчётом аналитической модели (ring_map) на тех же зазорах. Хроматизм — через бета-биение в секступолях."""
 
     def test_gap_moves_only_vertical_and_cockpit_term_matches(self):
@@ -1819,15 +1826,15 @@ class TestUndulatorGapTune(unittest.TestCase):
         from control.composite_plant import CompositePlant
         op = OpticsPlant(lattice=26, nsl=2, observe=("tune", "chroma"), order=2)
         try:
-            if len(op._ufc) < 20:
-                self.skipTest("в решётке 26 нет ондуляторов (UFC)")
+            if len(op._und) < 20:
+                self.skipTest("в решётке 26 нет ондуляторов")
 
             def optics(gaps):
                 rm = rmap.RingMap(op._perturbed({}, {}, {}, gaps), 2)
                 ch = rm.chromaticity(rm.one_turn())
                 return np.array([ch["nux"], ch["nuy"], ch["xi_x"][1], ch["xi_y"][1]])
 
-            sub = [op._ufc[0][3], op._ufc[19][3]]                       # два ИД на 10 мм, остальные на опорном
+            sub = [op._und[0][0], op._und[19][0]]                       # два ИД на 10 мм, остальные на опорном
             gaps = {g: 10.0 for g in sub}
             d_full = optics(gaps) - optics(None)
             self.assertLess(abs(d_full[0]), 1e-6, "зазор ИД сдвинул горизонтальный тюн")
@@ -1847,54 +1854,70 @@ class TestUndulatorGapTune(unittest.TestCase):
 
 
 @unittest.skipUnless(os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")),
-                     "нет lattice_configs.csv — пропуск канала DKV на решётке 26")
+                     "нет lattice_configs.csv — пропуск канала BSCALE на решётке 26")
 class TestUndulatorGapTuneTracking(unittest.TestCase):
-    """C++-канал DKV (только k1v) несёт фокус ИД от живого зазора в трекинг (TbtPlant): сдвиг тюна C++-кольца
-    от раскрытия ИД = аналитике −βy·Δk1v·L/4π, горизонталь стоит; на опорном зазоре канал пуст (бит-в-бит)."""
+    """Живой зазор ИД в трекинге (TbtPlant): команда BSCALE масштабирует угол и грани полюсов (рамки заново) —
+    сдвиг тюна C++-кольца = аналитике Σβy·(tgE₁+tgE₂)θ/L·(f²−1)/4π, горизонталь стоит; на опорном зазоре канал
+    пуст; дешёвый путь set_bend_scale = полный apply_perturb бит-в-бит. DKV (только k1v) — общий канал ядра."""
 
-    def test_dkv_channel_moves_tracking_tune(self):
+    def test_bscale_moves_tracking_tune(self):
         import types
         import ring_cpp as rc
         import ring_analysis as ra
         import ring_response as rr
         import undulator_sr as sr
         from control.tbt_plant import TbtPlant
+        from control.ring_model import id_devices
         r = rc.CppRing(lattice=26, nsl=8)
         try:
-            ufc = sorted(i for i, m in enumerate(r.mags) if str(getattr(m, "dev", "") or "") == "und_UFC")
-            if not ufc:
-                self.skipTest("в решётке 26 нет ондуляторов (UFC)")
-            tp = TbtPlant.__new__(TbtPlant)                            # только логика «зазор → Δk1v»
-            tp._und_anchor = {f"und_{k + 1:02d}": i for k, i in enumerate(ufc)}
-            tp._und_k1v = {g: float(r.mags[i].k1v) for g, i in tp._und_anchor.items()}
+            devs = dict(id_devices(r.mags))
+            if not devs:
+                self.skipTest("в решётке 26 нет ондуляторов")
+            tp = TbtPlant.__new__(TbtPlant)                            # только логика «зазор → масштаб полюсов»
+            tp._und_poles = devs
             tp._und_sr = sr; tp._und_Kref = float(sr.K_of_B0(sr.B0_of_gap(sr.P.gap_ref)))
 
             def st(g):
-                return types.SimpleNamespace(undulators={k: types.SimpleNamespace(gap_mm=g) for k in tp._und_anchor})
+                return types.SimpleNamespace(undulators={k: types.SimpleNamespace(gap_mm=g) for k in devs})
 
-            self.assertEqual(tp._und_focus_dkv(st(5.0)), [])          # опорный зазор → канал пуст
-            dkv = tp._und_focus_dkv(st(10.0))
-            self.assertEqual(len(dkv), len(ufc))
-            dx, dy, _ = rr.tune_response(r._python_ring())
-            expect = sum(dy[i] * dk * float(r.mags[i].Leff) for i, dk in dkv)
-            j = ufc[0]
-            k1_0, k1v_0 = float(r.mags[j].k1), float(r.mags[j].k1v)
+            self.assertEqual(tp._und_bscale(st(5.0)), [])             # опорный зазор → канал пуст
+            bs = tp._und_bscale(st(10.0))
+            self.assertEqual(len(bs), sum(len(v) for v in devs.values()))
+            f = bs[0][1]
+            py0 = r._python_ring()
+            _, dy, _ = rr.tune_response(py0)
+            expect = sum(-dy[i] * (py0.mags[i].kEdge1 + py0.mags[i].kEdge2) * (f * f - 1.0) for i, _ in bs)
+            j = bs[0][0]; th0 = float(py0.mags[j].theta0)
             tw0 = ra.twiss(r)
-            r.apply_perturb(dkvs=dkv)
-            m = r._python_ring().mags[j]                              # описание следует за сервером: только k1v
-            self.assertAlmostEqual(float(m.k1), k1_0, places=14)
-            self.assertAlmostEqual(float(m.k1v), k1v_0 + dkv[0][1], places=14)
+            r.apply_perturb(bscales=bs)
+            self.assertAlmostEqual(float(r._python_ring().mags[j].theta0), f * th0, places=15)
             tw1 = ra.twiss(r)
-            self.assertLess(abs(tw1["nux"] - tw0["nux"]), 1e-6, "DKV сдвинул горизонтальный тюн")
+            self.assertLess(abs(tw1["nux"] - tw0["nux"]), 1e-5, "масштаб полюсов сдвинул горизонтальный тюн")
             self.assertLess(abs((tw1["nuy"] - tw0["nuy"]) - expect), 0.02 * abs(expect))
             self.assertLess(expect, -1e-3)
-            r.apply_perturb()                                         # тот же фокус двумя доливками без RESET
-            r.add_perturb(dkvs=[(i, 0.5 * dk) for i, dk in dkv]); r.add_perturb(dkvs=[(i, 0.5 * dk) for i, dk in dkv])
-            self.assertAlmostEqual(float(r._python_ring().mags[j].k1v), k1v_0 + dkv[0][1], places=14)
-            self.assertLess(abs(ra.twiss(r)["nuy"] - tw1["nuy"]), 1e-10)
+            p0 = [[1e-4, 0.0, 5e-5, 0.0, 0.0, 0.0]]
+            ref = np.asarray(r.track(p0, 2), float)
+            r.apply_perturb(); r.set_bend_scale([(i, 0.7) for i, _ in bs]); r.set_bend_scale(bs)   # без RESET
+            self.assertTrue(np.array_equal(np.asarray(r.track(p0, 2), float), ref))
+        finally:
+            r.apply_perturb(); r.close()
+
+    def test_dkv_vertical_only(self):
+        """DKV меняет только вертикальный градиент k1v (описание следует за сервером), DK — обе плоскости."""
+        import ring_cpp as rc
+        r = rc.CppRing(lattice=26, nsl=2)
+        try:
+            j = next(i for i, m in enumerate(r.mags) if str(getattr(m, "kind", "")) == "quad")
+            k1_0, k1v_0 = float(r.mags[j].k1), float(r.mags[j].k1v)
+            r.apply_perturb(dkvs=[(j, 2e-3)])
+            m = r._python_ring().mags[j]
+            self.assertAlmostEqual(float(m.k1), k1_0, places=14)
+            self.assertAlmostEqual(float(m.k1v), k1v_0 + 2e-3, places=14)
+            r.apply_perturb(); r.add_perturb(dkvs=[(j, 1e-3)]); r.add_perturb(dkvs=[(j, 1e-3)])
+            self.assertAlmostEqual(float(r._python_ring().mags[j].k1v), k1v_0 + 2e-3, places=14)
             with self.assertRaises(ValueError):
                 r.add_perturb(kicks=[(j, 1e-6)])                      # кик — не аддитивный канал
-            r.apply_perturb(dks=[(j, 1e-3)])                          # DK — по-прежнему обе плоскости
+            r.apply_perturb(dks=[(j, 1e-3)])
             m = r._python_ring().mags[j]
             self.assertAlmostEqual(float(m.k1), k1_0 + 1e-3, places=14)
             self.assertAlmostEqual(float(m.k1v), k1v_0 + 1e-3, places=14)
@@ -1950,34 +1973,31 @@ class TestUndulatorGapTuneTracking(unittest.TestCase):
             r.apply_perturb(); r.close()
 
     def test_apply_cheap_paths(self):
-        """Дешёвые пути TbtPlant._apply без RESET: движение челюстей — приращения DKV (add_perturb), смена
-        корректоров — только изменившиеся кики (set_kicks, снятый кик = 0); смена «прочих» каналов (dks/…) —
-        полный apply_perturb с текущими киками и фокусом."""
+        """Дешёвые пути TbtPlant._apply без RESET: движение челюстей — только изменившиеся полюса (set_bend_scale,
+        вернувшийся к опорному = 1), смена корректоров — только изменившиеся кики (set_kicks, снятый кик = 0);
+        смена «прочих» каналов (dks/…) — полный apply_perturb с текущими киками и масштабом полюсов."""
         from control.tbt_plant import TbtPlant
         calls = []
 
         class _Ring:
             def apply_perturb(self, **kw): calls.append(("apply", kw))
-            def add_perturb(self, **kw): calls.append(("add", kw))
+            def set_bend_scale(self, pairs): calls.append(("bscale", list(pairs)))
             def set_kicks(self, **kw): calls.append(("set", kw))
 
         tp = TbtPlant.__new__(TbtPlant)
         tp.ring = _Ring(); tp._last_kick = None; tp._apply_rf = lambda s: None
-        cfg = {"kk": [(1, 0.0), (2, 5e-7)], "vv": [(1, 0.0)], "dkv": [(7, -1e-3)], "x": {}}
-        tp.kick_lists = lambda s: (list(cfg["kk"]), list(cfg["vv"]), dict(cfg["x"], dkvs=list(cfg["dkv"])))
+        cfg = {"kk": [(1, 0.0), (2, 5e-7)], "vv": [(1, 0.0)], "bs": [(7, 0.9)], "x": {}}
+        tp.kick_lists = lambda s: (list(cfg["kk"]), list(cfg["vv"]), dict(cfg["x"], bscales=list(cfg["bs"])))
         tp._apply(None)
-        self.assertEqual(calls[-1], ("apply", dict(kicks=[(1, 0.0), (2, 5e-7)], vkicks=[(1, 0.0)], dkvs=[(7, -1e-3)])))
+        self.assertEqual(calls[-1], ("apply", dict(kicks=[(1, 0.0), (2, 5e-7)], vkicks=[(1, 0.0)], bscales=[(7, 0.9)])))
         n = len(calls); tp._apply(None); self.assertEqual(len(calls), n)          # ничего не изменилось
-        cfg["dkv"] = [(7, -3e-3), (9, -1e-3)]; tp._apply(None)                   # челюсти едут
-        kind, kw = calls[-1]
-        self.assertEqual(kind, "add")
-        self.assertEqual([j for j, _ in kw["dkvs"]], [7, 9])
-        self.assertAlmostEqual(kw["dkvs"][0][1], -2e-3, places=15); self.assertAlmostEqual(kw["dkvs"][1][1], -1e-3, places=15)
+        cfg["bs"] = [(9, 0.8)]; tp._apply(None)                                  # одни едут, другие вернулись
+        self.assertEqual(calls[-1], ("bscale", [(7, 1.0), (9, 0.8)]))
         cfg["kk"] = [(1, 1e-6)]; cfg["vv"] = [(1, 2e-6)]; tp._apply(None)       # FOFB сменил корректоры
         self.assertEqual(calls[-1], ("set", dict(kicks=[(1, 1e-6), (2, 0.0)], vkicks=[(1, 2e-6)])))
         cfg["x"] = {"dks": [(5, 1e-4)]}; tp._apply(None)                         # другой канал → полный путь
         self.assertEqual(calls[-1][0], "apply")
-        self.assertEqual(calls[-1][1]["dkvs"], [(7, -3e-3), (9, -1e-3)])
+        self.assertEqual(calls[-1][1]["bscales"], [(9, 0.8)])
         self.assertEqual(calls[-1][1]["kicks"], [(1, 1e-6)])
 
 

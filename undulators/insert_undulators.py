@@ -3,8 +3,8 @@
 
 В отличие от плоского переимпорта (import_undulators.py, искажает β вдвое), здесь берётся выверенная
 решётка SRC (по умолч. 1 = СИЛА) ДОСЛОВНО (вся физика mat_*/edge/kind/геометрия — как есть, β_y=6.52 м),
-и в её прямолинейные промежутки ВСТАВЛЯЮТСЯ строки полюсов (kind=dipole) + фокус-элемент UFC (kind=quad,
-k1v — верт. фокус, k1 — гашение 1/ρ² полюсов). Геометрия вставки — центрами вдоль оси промежутка (прямой
+и в её прямолинейные промежутки ВСТАВЛЯЮТСЯ строки полюсов-«жёсткий край» (kind=dipole, длина (8/π²)·λu/2,
+грани θ/2 — фокусировка самими полюсами, без отдельной линзы). Геометрия вставки — центрами вдоль оси промежутка (прямой
 дрейф: центр строки = x/y/z, ось из yaw/pitch/roll, см. matrix_tracker.Magnet). Типы und_* переиспользуются
 из БД (их заводит import_undulators при первом прогоне).
 
@@ -21,7 +21,7 @@ os.environ.setdefault("SS_SECTOR", "1")
 import numpy as np
 import matrix_tracker as mt
 import undulator_sr as sr
-from assemble_undulators import read_device, resolve_pos, L_FC
+from assemble_undulators import read_device, resolve_pos
 
 TB = os.path.join("workspace", "tables")
 LC = os.path.join(TB, "lattice_configs.csv")
@@ -62,15 +62,12 @@ def main():
     if not base:
         raise SystemExit(f"решётка {a.src} пуста")
 
-    delems, dline, L_dev, b0_dev, sum_th2 = read_device(a.device)
-    poles = [t for t in dline if delems[t]["type"] != "MARK"]           # порядок полюсов
-    L_pole = delems[poles[0]].get("L", 0.009)
-    L_foot = L_dev + L_FC
+    delems, dline, L_dev, b0_dev = read_device(a.device)
+    dseq = [t for t in dline if delems[t]["type"] != "MARK"]            # полюса и промежутки по порядку
+    poles = [t for t in dseq if delems[t]["type"] == "CSBEND"]
+    L_foot = L_dev
     B0 = sr.B0_of_gap(a.gap, sr.P); k = B0 / b0_dev
     Ky = 0.5 * (B0 / Brho) ** 2
-    Kx = k ** 2 * sum_th2 / L_pole
-    fc_mat_Gv = (-Ky * L_dev / L_FC) / QP
-    fc_mat_G = (-Kx / L_FC) / QP
 
     manifest = list(csv.DictReader(open(a.manifest, encoding="utf-8"), delimiter=";"))
     pos_by_order = [r["pos"] for r in sorted(manifest, key=lambda r: float(r["s_start"]))]
@@ -89,13 +86,13 @@ def main():
 
     blank = {c: "" for c in hdr}
 
-    def mkrow(dev, kind, center, yaw, pitch, roll, Leff, nsl, matB=0.0, matG=0.0, matGv=0.0):
+    def mkrow(dev, kind, center, yaw, pitch, roll, Leff, nsl, matB=0.0, matG=0.0, matGv=0.0, edge=0.0):
         r = dict(blank)
         r.update(lattice_id=str(a.dst), device_type_id=dev, kind=kind, n_slices=str(nsl),
                  x=f"{center[0]:.12f}", y=f"{center[1]:.12f}", z=f"{center[2]:.12f}",
                  yaw=yaw, pitch=pitch, roll=roll, arg_val="0", correct_coeff="1",
                  eff_length=f"{Leff:.12f}", mat_B=f"{matB:.15g}", mat_G=f"{matG:.15g}",
-                 mat_S="0", mat_O="0", mat_Gv=f"{matGv:.15g}", edge1="0", edge2="0")
+                 mat_S="0", mat_O="0", mat_Gv=f"{matGv:.15g}", edge1=f"{edge:.15g}", edge2=f"{edge:.15g}")
         return [r[c] for c in hdr]
 
     # собрать упорядоченный список строк новой решётки (база копией + вставки), затем перенумеровать
@@ -116,14 +113,16 @@ def main():
         aoff = resolve_pos(pos_by_order[sidx] if sidx < len(pos_by_order) else "center",
                            L_slot_at[i], L_foot, 0.05)
         member = []
-        for pidx, t in enumerate(poles):
-            matB = -delems[t].get("ANGLE", 0.0) / (QP * L_pole) * k
-            cen = P0 + (aoff + (pidx + 0.5) * L_pole) * axis
-            out_rows.append(mkrow("und_" + t, "dipole", cen, yaw, pitch, roll, L_pole, 1, matB=matB))
-            member.append(len(out_rows) - 1)
-        cen = P0 + (aoff + len(poles) * L_pole + 0.5 * L_FC) * axis
-        out_rows.append(mkrow("und_UFC", "quad", cen, yaw, pitch, roll, L_FC, 1, matG=fc_mat_G, matGv=fc_mat_Gv))
-        member.append(len(out_rows) - 1)
+        s_run = 0.0                                                      # путь от входа устройства
+        for t in dseq:
+            Lt = delems[t].get("L", 0.0)
+            if delems[t]["type"] == "CSBEND":
+                th = -delems[t].get("ANGLE", 0.0) * k                    # угол ядра θ0 = QP·mat_B·L (знак БД)
+                cen = P0 + (aoff + s_run + 0.5 * Lt) * axis
+                out_rows.append(mkrow("und_" + t, "dipole", cen, yaw, pitch, roll, Lt, 1,
+                                      matB=th / (QP * Lt), edge=0.5 * th))   # грань = θ/2 (прямоугольный полюс)
+                member.append(len(out_rows) - 1)
+            s_run += Lt
         groups.append((sidx, member))
 
     # перенумеровать instance_id = 1..M в порядке кольца
@@ -153,7 +152,7 @@ def main():
         w = csv.writer(f, delimiter=";"); w.writerow(ex_hdr)
         w.writerows(keep); w.writerow([tmpl[c] for c in ex_hdr])
 
-    # element_groups: группа на устройство (полюса+UFC), pivot = среднее положение
+    # element_groups: группа на устройство (полюса), pivot = среднее положение (центр устройства)
     eg_hdr = ["group_id", "lattice_id", "kind", "pivot_x", "pivot_y", "pivot_z", "yaw", "pitch", "roll", "instance_ids"]
     eg_rows = []
     for sidx, member in sorted(groups):
@@ -171,8 +170,8 @@ def main():
             w = csv.writer(f, delimiter=";"); w.writerow(eg_hdr); w.writerows(eg_rows)
 
     print(f"  решётка {a.dst} = копия реш.{a.src} ({len(base)} строк) + {len(groups)} ондуляторов "
-          f"({len(poles)} полюсов + UFC каждый); всего {M} инстансов")
-    print(f"  k={k:.4f}, Ky={Ky:.4e}, ∫k_y ds={Ky*L_dev:.4e}; fc_mat_Gv={fc_mat_Gv:.4e}, fc_mat_G={fc_mat_G:.4e}")
+          f"({len(poles)} полюсов-«жёсткий край» каждый); всего {M} инстансов")
+    print(f"  k={k:.4f}, справочно k_y={Ky:.4e}, ½(B0/Bρ)²·L={Ky*L_dev:.4e} (фокусируют грани полюсов)")
     print(f"[OK] lattice_configs/element_connectivity/experiments/element_groups ← решётка {a.dst}")
 
 

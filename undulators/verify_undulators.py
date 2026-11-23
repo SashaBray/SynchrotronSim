@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """Проверка решётки с ондуляторами: тюн/оптика ВКЛ vs ВЫКЛ на ОДНОЙ базе (изоляция эффекта ИД).
 
-ВКЛ  — решётка LAT как импортирована (полюса с mat_B/mat_Gv).
-ВЫКЛ — та же решётка в рабочей папке с ОБНУЛЁННЫМИ mat_B/mat_Gv полюсов (ондуляторы «разведены в ноль»):
+ВКЛ  — решётка LAT как импортирована (полюса-«жёсткий край»: mat_B и грани θ/2 — изгиб и фокусировка).
+ВЫКЛ — та же решётка в рабочей папке с ОБНУЛЁННЫМИ mat_B и гранями полюсов (ондуляторы «разведены в ноль»):
        изгиб и фокус исчезают, остаётся дрейф. Разница тюна = чистый эффект ондуляторов.
 Оба прогона — продакшн C++-ядро (ring_cpp), оптика из ring_analysis.twiss (из матриц трекинга).
 
@@ -21,9 +21,8 @@ POLES = ("UPP", "UPM", "UE0", "UE1")
 
 
 def zeroed_ws(lat, prefix, out_dir):
-    """Рабочая папка с ВЫКЛЮЧЕННЫМИ ондуляторами: полюса (mat_B,mat_Gv=0) И фокус-элемент UFC (mat_G,mat_Gv=0)."""
+    """Рабочая папка с ВЫКЛЮЧЕННЫМИ ондуляторами: полюса без поля и граней (mat_B=0, edge1=edge2=0)."""
     pole_devs = {prefix + n for n in POLES}
-    fc_dev = prefix + "UFC"
     dst = os.path.join(out_dir, "tables")
     os.makedirs(dst, exist_ok=True)
     rows = list(csv.reader(open(os.path.join(TB, "lattice_configs.csv"), encoding="utf-8"), delimiter=";"))
@@ -32,9 +31,7 @@ def zeroed_ws(lat, prefix, out_dir):
         if not r or r[ci["lattice_id"]] != str(lat):
             continue
         if r[ci["device_type_id"]] in pole_devs:
-            r[ci["mat_B"]] = "0"; r[ci["mat_Gv"]] = "0"
-        elif r[ci["device_type_id"]] == fc_dev:
-            r[ci["mat_G"]] = "0"; r[ci["mat_Gv"]] = "0"
+            r[ci["mat_B"]] = "0"; r[ci["edge1"]] = "0"; r[ci["edge2"]] = "0"
     with open(os.path.join(dst, "lattice_configs.csv"), "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=";"); w.writerow(hdr); w.writerows(rows[1:])
     for t in ("element_connectivity.csv", "particle_groups.csv"):
@@ -54,7 +51,13 @@ def main():
     a = ap.parse_args()
 
     ron = rc.CppRing(lattice=a.lattice, nsl=rc.OPTICS_NSL)
-    nxon, nyon, byon, acon = tunes(ron); ron.close()
+    nxon, nyon, byon, acon = tunes(ron)
+    # аналитика: Σ по полюсам β_y·(фокусировка граней tanE·θ/L на входе и выходе)/4π при РЕАЛЬНОЙ β_y (ВКЛ)
+    import ring_response as rr
+    py = ron._python_ring(); _, dy, _ = rr.tune_response(py)
+    pole_devs = {a.prefix + n for n in POLES}
+    est = sum(-dy[i] * (m.kEdge1 + m.kEdge2) for i, m in enumerate(py.mags) if str(getattr(m, "dev", "")) in pole_devs)
+    ron.close()
 
     tmp = tempfile.mkdtemp(prefix="und_off_")
     try:
@@ -67,7 +70,7 @@ def main():
     print(f"  решётка {a.lattice}")
     print(f"  ВЫКЛ (ондуляторы в ноль):  νx={nxoff:.5f}  νy={nyoff:.5f}  β_y^max={byoff:.3f}  αc={acoff:.3e}")
     print(f"  ВКЛ  (ондуляторы 5 мм):    νx={nxon:.5f}  νy={nyon:.5f}  β_y^max={byon:.3f}  αc={acon:.3e}")
-    print(f"  Δνx={nxon-nxoff:+.5f}  Δνy={nyon-nyoff:+.5f}   (аналитика Δνy≈+0.0161)")
+    print(f"  Δνx={nxon-nxoff:+.5f}  Δνy={nyon-nyoff:+.5f}   (аналитика Σβ_y·(tgE₁+tgE₂)θ/L/4π = {est:+.5f})")
 
 
 if __name__ == "__main__":

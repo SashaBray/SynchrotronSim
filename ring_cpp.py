@@ -273,6 +273,8 @@ class CppRing:
                 m = ra.yaw_element(m, v)
             elif cmd in ("KICK", "VKICK"):
                 setattr(m, "hkick" if cmd == "KICK" else "vkick", v)
+            elif cmd == "BSCALE":                                   # угол/грани = f × исходные, рамки заново
+                m.rescale_bend(v)
             else:
                 for a in self._FIELD[cmd]:
                     setattr(m, a, float(getattr(m, a, 0.0) or 0.0) + v)
@@ -326,17 +328,18 @@ class CppRing:
         """Кольцо с магнитом j, повёрнутым на α вокруг вертикали входа (ring_analysis.yaw_element)."""
         return self._copy_with("YAW", j, alpha)
 
-    def apply_perturb(self, kicks=(), vkicks=(), dks=(), dsks=(), dk2s=(), dk3s=(), dkvs=()):
+    def apply_perturb(self, kicks=(), vkicks=(), dks=(), dsks=(), dk2s=(), dk3s=(), dkvs=(), bscales=()):
         """Применить возмущения НА ТОМ ЖЕ сервере (RESET + KICK/VKICK/DK/DSK/DK2/DK3), без нового процесса. Для
         матрицы отклика, коррекции орбиты, BBA, коррекции связи и нелинейного тюнера. RESET пересобирает кольцо
         из ws (ошибки рассогласования СОХРАНЯЮТСЯ), затем возвращаются базовые возмущения кольца (with_*/
         perturbed) — сбрасываются только транзитные от прежнего apply_perturb. dks=[(j,dk)] — k1 квадруполя
         (BBA); dsks=[(j,ks)] — скью (связь); dk2s=[(j,dk2)]/dk3s=[(j,dk3)] — секступ./октуп. силы (нелинейный
-        тюнер ν(δ)); dkvs=[(j,dk1v)] — ТОЛЬКО вертикальный градиент (фокус ондулятора от живого зазора).
+        тюнер ν(δ)); dkvs=[(j,dk1v)] — ТОЛЬКО вертикальный градиент; bscales=[(j,f)] — масштаб изгиба полюса
+        (угол и грани = f × исходные, рамки заново: живой зазор ондулятора).
         Описание mags/plane следует за ними. apply_perturb() — вернуть кольцо в исходное. Возврат self."""
         new = [(cmd, int(j), float(v)) for cmd, pairs in (("KICK", kicks), ("VKICK", vkicks), ("DK", dks),
                                                           ("DSK", dsks), ("DK2", dk2s), ("DK3", dk3s),
-                                                          ("DKV", dkvs))
+                                                          ("DKV", dkvs), ("BSCALE", bscales))
                for j, v in pairs]
         self._py = None
         self._transient = []                    # до RESET: при сбое описание не припишет кольцу чужих возмущений
@@ -368,6 +371,13 @@ class CppRing:
         (миллисекунды против ~0,3 с RESET у apply_perturb). Снять кик — задать 0. Возврат self."""
         self._push_transient([("KICK", int(j), float(v)) for j, v in kicks]
                              + [("VKICK", int(j), float(v)) for j, v in vkicks])
+        return self
+
+    def set_bend_scale(self, pairs=()):
+        """Масштаб изгиба полюсов BSCALE j f (угол и грани = f × исходные, рамки заново) поверх текущих БЕЗ
+        RESET: «задаёт», а не прибавляет (f=1 — исходный полюс). Живой зазор ондулятора: поле полюсов ∝ K,
+        фокусировка граней ∝ K² и нулевая горизонталь получаются сами. Возврат self."""
+        self._push_transient([("BSCALE", int(j), float(f)) for j, f in pairs])
         return self
 
     def _push_transient(self, new):

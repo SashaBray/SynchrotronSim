@@ -116,6 +116,7 @@ struct Element {
     // ψ=0 ⇒ верт. коэффициент = kEdge (жёсткий край, прежнее поведение бит-в-бит). matrix_tracker._edge_kv.
     double edge1 = 0, edge2 = 0, rinv = 0;                // углы граней (рад, знак БД) и 1/ρ (знак по изгибу)
     double psi1 = 0, psi2 = 0;                            // фриндж-поправки углов граней
+    double lf1 = 0, lf2 = 0;                              // длины спада поля L_f (для пересчёта ψ в setBend)
     bool   sector = false;                                // изгиб (dipole/dq) с theta0≠0 → секторный интегратор
     bool   kick   = false;                                // прямой мультиполь (quad/sext/oct)
     double rad_coef = 0;                                  // распределённое СИ (классическое)
@@ -138,23 +139,31 @@ struct Element {
         // ЕДИНАЯ КОНВЕНЦИЯ: все mat_* абсолютные у любого вида (у «dipole» доли mat_B отменены) — matrix_tracker.py
         double b = B, g = G, gv = Gv, s = S, o = O;
         double QP = qp();
-        e.theta0 = QP * b * Leff;
         e.k1 = QP * g; e.k1v = QP * gv; e.k2 = QP * s; e.k3 = QP * o;
-        double rinv = (Leff > 0) ? e.theta0 / Leff : 0.0;
-        e.kEdge1 = std::tan(edge1) * rinv;
-        e.kEdge2 = std::tan(edge2) * rinv;
-        e.edge1 = edge1; e.edge2 = edge2; e.rinv = rinv;
-        e.psi1 = fringe_psi(lf1, edge1, rinv);
-        e.psi2 = fringe_psi(lf2, edge2, rinv);
-        bool bend = (kind == "dipole" || kind == "dq") && std::fabs(e.theta0) > 0.0;
-        e.sector = bend;
-        e.precache();                                                // флаг kick (по полю, не по виду) + прекэш
-        if (e.sector && sr) {                                        // распределённое СИ (классическое)
-            double gamma = design_mev / MC2_MEV;
-            e.rad_coef = RAD_K * gamma * gamma * gamma / (e.rho0 * e.rho0);
-            if (isr) e.isr_coef = ISR_K * std::pow(gamma, 2.5) / std::pow(std::fabs(e.rho0), 1.5);
-        }
+        e.lf1 = lf1; e.lf2 = lf2;
+        e.setBend(QP * b * Leff, edge1, edge2, design_mev, sr, isr);
         return e;
+    }
+
+    // Угол изгиба и углы граней → всё производное (1/ρ, краевые линзы, фриндж ψ, сектор/кик, прекэш, СИ).
+    // Единый путь для make и для масштаба на ходу (BSCALE: живой зазор ондулятора — поле полюсов ∝ K):
+    // с исходными θ/E даёт бит-в-бит тот же элемент. θ=0 у изгиба ⇒ не сектор (тело — дрейф/ящик).
+    void setBend(double theta, double e1, double e2, double design_mev, bool sr, bool isr) {
+        theta0 = theta;
+        double r = (Leff > 0) ? theta0 / Leff : 0.0;
+        kEdge1 = std::tan(e1) * r;
+        kEdge2 = std::tan(e2) * r;
+        edge1 = e1; edge2 = e2; rinv = r;
+        psi1 = fringe_psi(lf1, e1, r);
+        psi2 = fringe_psi(lf2, e2, r);
+        sector = (kind == "dipole" || kind == "dq") && std::fabs(theta0) > 0.0;
+        precache();                                                  // флаг kick (по полю, не по виду) + прекэш
+        rad_coef = 0.0; isr_coef = 0.0;
+        if (sector && sr) {                                          // распределённое СИ (классическое)
+            double gamma = design_mev / MC2_MEV;
+            rad_coef = RAD_K * gamma * gamma * gamma / (rho0 * rho0);
+            if (isr) isr_coef = ISR_K * std::pow(gamma, 2.5) / std::pow(std::fabs(rho0), 1.5);
+        }
     }
 
     // ψ = L_f·(1/ρ)·(1+sin²E)/cos E (matrix_tracker._fringe_psi); L_f=0 или прямой элемент ⇒ 0.

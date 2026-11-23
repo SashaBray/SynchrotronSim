@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Импорт составной решётки с ондуляторами в БД + фокус по инстансу + реестр жёстких групп.
+"""Импорт составной решётки с ондуляторами в БД + сила полюсов по инстансу + реестр жёстких групп.
 
 ШАГИ
   1. s2lattice_to_db.run — плоский .lte → БД как решётка LAT (устройства `und_*`, геометрия проходом
      кольца). База переимпортируется вместе с ондуляторами ⇒ решётка самодостаточна, выверенную реш.1
      не трогает (сравнение «вкл/выкл» делается ВНУТРИ этой решётки).
-  2. ПАТЧ по ИНСТАНСУ (носитель — строка lattice_configs): фокус-элемент UFC (kind=quad → body_kick)
-     получает mat_Gv (вертикальный k1v — естеств. фокус k_y) и mat_G (горизонт. k1 — гасит побочную
-     1/ρ² секторных полюсов) ⇒ нетто: горизонталь дрейф, вертикаль k_y. Полюса остаются dipole (изгиб-
-     орбита + увод при перекосе), их mat_B×=k по зазору. k1/k1v в body_kick ядра НЕЗАВИСИМЫ (matrix_core.h).
-     Полюса одного устройства — непрерывный прогон инстансов типов und_UPP/UPM/UE0/UE1; прогоны ↔ слоты
-     по порядку s. Параметры (k, k1v) — из спутника undulator_knobs.csv.
+  2. ПАТЧ по ИНСТАНСУ (носитель — строка lattice_configs): полюса-«жёсткий край» (dipole, грани θ/2 из .lte)
+     получают силу по зазору: mat_B ×k и грани edge1/edge2 ×k (прямоугольный полюс: грань = половина угла).
+     Фокусировку дают сами грани (вертикаль ∝ ∫B², горизонталь — дрейф) — отдельного фокус-элемента нет.
+     Полюса одного устройства — непрерывный прогон инстансов типов und_UPP/UPM/UE0/UE1 (промежутки — не
+     инстансы); прогоны ↔ слоты по порядку s. Параметр k — из спутника undulator_knobs.csv.
   3. element_groups.csv — реестр ЖЁСТКИХ групп: group_id → инстансы + опорная точка (центр устройства) и
      рамка. На него опирается errors.py (жёсткий сдвиг/поворот всего ондулятора как целого).
 
@@ -40,12 +39,11 @@ def _write(path, hdr, rows):
         w = csv.writer(f, delimiter=";"); w.writerow(hdr); w.writerows(rows)
 
 
-def patch_focus(lat, prefix, knobs, manifest):
-    """Патч: фокус-элемент UFC (kind=quad) ← mat_G/mat_Gv устройства; полюса (dipole) ← mat_B×k.
-    Прогон = непрерывные инстансы полюсов+UFC; прогоны ↔ слоты по порядку s. Группа = весь прогон."""
+def patch_poles(lat, prefix, knobs, manifest):
+    """Патч: полюса (dipole) ← mat_B ×k и грани edge1/edge2 ×k (зазор → поле; грань = θ/2 масштабируется с углом).
+    Прогон = непрерывные инстансы полюсов; прогоны ↔ слоты по порядку s. Группа = весь прогон, опорная точка —
+    среднее центров полюсов (центр устройства)."""
     pole_devs = {prefix + n for n in ("UPP", "UPM", "UE0", "UE1")}
-    fc_dev = prefix + "UFC"
-    member_devs = pole_devs | {fc_dev}
     hdr, rows = _read(LC)
     ci = {c: i for i, c in enumerate(hdr)}
     li, di, ii = ci["lattice_id"], ci["device_type_id"], ci["instance_id"]
@@ -53,11 +51,11 @@ def patch_focus(lat, prefix, knobs, manifest):
     s_of = {r["slot_id"]: 0.5 * (float(r["s_start"]) + float(r["s_end"])) for r in manifest}
     kn = sorted(knobs, key=lambda r: s_of.get(r["slot_id"], 0.0))   # слоты по порядку s
 
-    runs, cur = [], []                                 # непрерывные прогоны (полюса+UFC) → устройства
+    runs, cur = [], []                                 # непрерывные прогоны полюсов → устройства
     for r in rows:
         if r[li] != str(lat):
             continue
-        if r[di] in member_devs:
+        if r[di] in pole_devs:
             cur.append(r)
         elif cur:
             runs.append(cur); cur = []
@@ -68,13 +66,13 @@ def patch_focus(lat, prefix, knobs, manifest):
 
     groups = []
     for run, knb in zip(runs, kn):
-        k = float(knb["k"]); fc_G = float(knb["fc_mat_G"]); fc_Gv = float(knb["fc_mat_Gv"])
+        k = float(knb["k"])
         inst = []; xs = ys = zs = 0.0
         for r in run:
-            if r[di] == fc_dev:                        # фокус-элемент: вертикаль k1v + гашение горизонт. k1
-                r[ci["mat_G"]] = f"{fc_G:.15g}"; r[ci["mat_Gv"]] = f"{fc_Gv:.15g}"
-            elif k != 1.0 and r[ci["mat_B"]] not in ("", "0"):   # полюса: сила изгиба по зазору
-                r[ci["mat_B"]] = f"{float(r[ci['mat_B']]) * k:.15g}"
+            if k != 1.0:                               # полюса: сила изгиба и грани по зазору
+                for col in ("mat_B", "edge1", "edge2"):
+                    if r[ci[col]] not in ("", "0"):
+                        r[ci[col]] = f"{float(r[ci[col]]) * k:.15g}"
             inst.append(r[ii]); xs += float(r[ci["x"]]); ys += float(r[ci["y"]]); zs += float(r[ci["z"]])
         n = len(run); mid = run[n // 2]
         groups.append(dict(slot=knb["slot_id"], lat=str(lat), insts=inst,
@@ -119,12 +117,12 @@ def main():
     s2.run(lte_path=lte, lat_id=a.lattice, exp_id=a.lattice, prefix=a.prefix, n_slices=a.n_slices,
            monitors=True)
 
-    print(f"[2/3] патч фокуса/силы по инстансам ({len(knobs)} устройств)")
-    groups = patch_focus(a.lattice, a.prefix, knobs, manifest)
+    print(f"[2/3] сила полюсов по инстансам ({len(knobs)} устройств)")
+    groups = patch_poles(a.lattice, a.prefix, knobs, manifest)
 
     print(f"[3/3] реестр жёстких групп")
     path, n = write_groups(groups)
-    print(f"[OK] фокус проставлен {len(groups)} устройствам; {path}: {n} групп")
+    print(f"[OK] сила полюсов проставлена {len(groups)} устройствам; {path}: {n} групп")
     print(f"     проверка: py -3.14 ring_analysis.py twiss  (на решётке {a.lattice} — через ura_twiss)")
 
 
