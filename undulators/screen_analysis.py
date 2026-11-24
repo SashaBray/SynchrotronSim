@@ -234,9 +234,12 @@ def footprint(scr, emitters, mesh, bends=None, E=None, I=None):
                 cu=cu, cv=cv, ru=ru, rv=rv)
 
 
-SCREEN_DEFAULT_DIST = 12.0                               # как у сцены кокпита (client.scene3d), если строки нет
+SCREEN_DEFAULT_DIST = 20.0     # м: экраны кокпита (client.scene3d, control.recorders) — у всех ондуляторов и линеек
 SCREEN_DEFAULT_SIZE_MM = 50.0
-_LIVE = {}                                               # (решётка, экран) → таблицы, геометрия экрана, веера
+BEND_LINE_MODULES = 5          # линейка продольно-градиентного диполя: модулей встык
+BEND_SCREEN_MM = (100.0, 30.0)  # ширина × высота экрана у линейки (веер модуля №3 на 20 м ≈ 84 мм)
+_LIVE = {}                     # (решётка, экран, веера) → таблицы, геометрия экрана, веера
+_BEND_SCR = {}                 # (решётка, dist) → экраны у центральных модулей линеек
 
 
 def _screen_rows():
@@ -247,15 +250,72 @@ def _screen_rows():
         return list(csv.DictReader(f, delimiter=";"))
 
 
+def bend_line_screens(lattice, dist=SCREEN_DEFAULT_DIST, ci=None, byid=None, groups=None, E=None):
+    """Экраны у ЦЕНТРАЛЬНЫХ модулей (№3) линеек диполя из BEND_LINE_MODULES модулей встык (продольно-градиентный
+    диполь: цепочки sr_trace.link_chains). Источник — центр дуги модуля №3, ось — касательная там (туда летит его
+    СИ), экран поперёк на dist, u — горизонталь (плоскость веера). Имя SCR_DP<instance_id модуля>. Кэш по решётке."""
+    key = (int(lattice), float(dist))
+    if key in _BEND_SCR:
+        return _BEND_SCR[key]
+    import sr_trace as st
+    from build_screens import screen_frame
+    if ci is None or byid is None:
+        ci, byid = load_lattice(lattice, None)
+    groups = load_groups(lattice) if groups is None else groups
+    E = sr.P.E if E is None else E
+    poles = set().union(*groups.values()) if groups else set()
+    out, lines, rest = [], [], []
+    for ch in st.link_chains(st.bend_modules(ci, byid, E, poles)):
+        (lines if len(ch) == BEND_LINE_MODULES else rest).append(ch)
+    lines = [(ch, ch[BEND_LINE_MODULES // 2]) for ch in lines]
+    # линейка, разбитая вставкой (инжекция: крайний модуль через ~0,4 м): модули одного семейства с номерами
+    # _1.._5 в типе устройства — центральный «_3» (номер — порядок в линейке)
+    fam = {}
+    for ch in rest:
+        for m in ch:
+            if m["kind"] == "dipole" and "_" in m["dev"] and m["dev"].rsplit("_", 1)[1].isdigit():
+                fam.setdefault(m["dev"].rsplit("_", 1)[0], []).append(m)
+    used = set()
+    for pre, ms in fam.items():
+        nums = sorted(int(m["dev"].rsplit("_", 1)[1]) for m in ms)
+        if nums == list(range(1, BEND_LINE_MODULES + 1)):
+            mid = next(m for m in ms if int(m["dev"].rsplit("_", 1)[1]) == BEND_LINE_MODULES // 2 + 1)
+            lines.append((sorted(ms, key=lambda m: int(m["dev"].rsplit("_", 1)[1])), mid))
+            used |= {m["iid"] for m in ms}
+    # без номеров в имени (реш.27): куски одного типа, сложенные в BEND_LINE_MODULES, со вставкой короче модуля
+    rest = [ch for ch in rest if not ({m["iid"] for m in ch} & used)]
+    for i, a in enumerate(rest):
+        for b in rest[i + 1:]:
+            if len(a) + len(b) != BEND_LINE_MODULES or a[0]["dev"] != b[0]["dev"] or a[0]["kind"] != "dipole":
+                continue
+            Lmax = max(m["L"] for m in a + b)
+            for first, second in ((a, b), (b, a)):
+                if float(np.linalg.norm(second[0]["P_in"] - first[-1]["P_out"])) < Lmax:
+                    line = first + second
+                    lines.append((line, line[BEND_LINE_MODULES // 2]))
+    for ch, m in lines:
+        P = np.asarray(m["C"], float); t = _unit(m["axis"])
+        n = -t; u, v = screen_frame(n)
+        out.append(dict(sid=f"SCR_DP{m['iid']}", src=str(m["iid"]), C=P + float(dist) * t, n=n, u=u, v=v,
+                        w=BEND_SCREEN_MM[0], h=BEND_SCREEN_MM[1], mode="bend", kind="bend", P=P, t=t,
+                        dev=m["dev"], theta=float(m["theta0"]), ec=float(m["ec"]), D=float(dist),
+                        line=[c["iid"] for c in ch]))
+    _BEND_SCR[key] = out
+    return out
+
+
 def live_screen(lattice, screen_id, groups, ci, byid):
-    """Геометрия экрана для живой карты (кокпит). Есть замороженная строка этой решётки — она; иначе экран
-    строится так же, как его рисует сцена кокпита: по оси ондулятора-источника (по рамке железа решётки) на
-    расстоянии dist_m строки с тем же source_ref/screen_id из любой решётки (нет — 12 м), размер — из той же
-    строки (нет — 50×50 мм), плоскость поперёк оси. None — источник не ондулятор этой решётки."""
+    """Геометрия экрана для живой карты (кокпит). Есть замороженная строка этой решётки — она; экран линейки
+    диполя (SCR_DP…) — bend_line_screens; иначе экран ондулятора строится так же, как его рисует сцена кокпита:
+    по оси ондулятора-источника (рамка железа) на dist_m строки с тем же screen_id из любой решётки (нет —
+    SCREEN_DEFAULT_DIST), размер — из той же строки (нет — 50×50 мм), плоскость поперёк оси. None — не построить."""
     rows = _screen_rows()
     for r in rows:
         if r.get("lattice_id") == str(lattice) and r.get("screen_id") == screen_id:
             return next(s for s in load_screens(lattice) if s["sid"] == screen_id)
+    if str(screen_id).startswith("SCR_DP"):
+        return next((s for s in bend_line_screens(lattice, ci=ci, byid=byid, groups=groups) if s["sid"] == screen_id),
+                    None)
     row = next((r for r in rows if r.get("screen_id") == screen_id), None)
     src = (row or {}).get("source_ref", "").strip() or (screen_id[4:] if screen_id.startswith("SCR_") else "")
     if (row or {}).get("mode") == "bend" or src not in groups:
@@ -270,12 +330,8 @@ def live_screen(lattice, screen_id, groups, ci, byid):
                 w=f("width_mm", SCREEN_DEFAULT_SIZE_MM), h=f("height_mm", SCREEN_DEFAULT_SIZE_MM), mode="axis")
 
 
-def live_power_map(lattice, screen_id, gaps, mesh=121, default_gap=5.0, bends=True):
-    """Карта ПЛОТНОСТИ МОЩНОСТИ (быстрый режим, Льенар) для живого кокпита: зазор КАЖДОГО ондулятора — из gaps
-    {gid: мм} (нет — default_gap), источник — по рамке железа (номинальная машина), веера соседних диполей —
-    как в footprint. Таблицы машины, геометрия экрана и веера кэшируются по (решётка, экран). Возврат — dict
-    footprint (S [Вт/мм²], extent, peak, total, und_W, bend_W, n_bend, центроид) + illuminators [(gid, зазор)],
-    src, D; None — экран не построить (не ондуляторный источник этой решётки)."""
+def live_context(lattice, screen_id, bends=True):
+    """Кэш живого экрана: таблицы машины, геометрия экрана, веера диполей, достающие экран. None — не построить."""
     key = (int(lattice), str(screen_id), bool(bends))
     c = _LIVE.get(key)
     if c is None:
@@ -287,6 +343,17 @@ def live_power_map(lattice, screen_id, gaps, mesh=121, default_gap=5.0, bends=Tr
         poles = set().union(*groups.values()) if groups else set()
         c = dict(ci=ci, byid=byid, groups=groups, scr=scr, fans=find_bends(scr, ci, byid, poles) if bends else [])
         _LIVE[key] = c
+    return c
+
+
+def live_power_map(lattice, screen_id, gaps, mesh=121, default_gap=5.0, bends=True):
+    """Карта ПЛОТНОСТИ МОЩНОСТИ (быстрый режим, Льенар) для живого кокпита: зазор КАЖДОГО ондулятора — из gaps
+    {gid: мм} (нет — default_gap), источник — по рамке железа (номинальная машина), веера диполей — как в
+    footprint. Возврат — dict footprint (S [Вт/мм²], extent, peak, total, und_W, bend_W, n_bend, центроид) +
+    illuminators [(gid, зазор)], src, D, kind; None — экран не построить."""
+    c = live_context(lattice, screen_id, bends)
+    if c is None:
+        return None
     scr = c["scr"]; ems, ill = [], []
     for gid, insts in c["groups"].items():
         gap = float(gaps.get(gid, default_gap))
@@ -294,9 +361,73 @@ def live_power_map(lattice, screen_id, gaps, mesh=121, default_gap=5.0, bends=Tr
         if gid in em and find_illuminators(scr, em):
             ems.append(em[gid]); ill.append((gid, gap))
     fp = footprint(scr, ems, int(mesh), c["fans"])
-    srcP = emitter_frame(c["groups"][scr["src"]], c["ci"], c["byid"])[0] if scr["src"] in c["groups"] else None
-    fp.update(illuminators=ill, src=scr["src"], D=float(np.linalg.norm(scr["C"] - srcP)) if srcP is not None else None)
+    if scr.get("mode") == "bend":
+        D = float(scr["D"]) if scr.get("D") else None
+    else:
+        srcP = emitter_frame(c["groups"][scr["src"]], c["ci"], c["byid"])[0] if scr["src"] in c["groups"] else None
+        D = float(np.linalg.norm(scr["C"] - srcP)) if srcP is not None else None
+    fp.update(illuminators=ill, src=scr["src"], D=D, kind=scr.get("mode", "axis"))
     return fp
+
+
+_TRACE_CTX = {}               # решётка → контекст sr_trace (модули, цепочки, кэш траекторий)
+_BEND_TRACES = {}             # (решётка, экран) → траектории цепочек, достающих экран (отсеянные)
+_BEND_VIEW = {}               # (решётка, экран, сетка, величина) → карта
+
+
+def _bend_traces(lattice, scr, cull=40.0):
+    """Траектории цепочек диполей (мягкий край по картам поля), достающих экран, — отсеянные под экран."""
+    import sr_trace as st
+    key = (int(lattice), scr["sid"])
+    if key not in _BEND_TRACES:
+        if int(lattice) not in _TRACE_CTX:
+            _TRACE_CTX[int(lattice)] = st.make_context(int(lattice), None, None, 5.0)
+        ctx = _TRACE_CTX[int(lattice)]
+        trs = []
+        for ic in st._chain_candidates(ctx, scr, cull):
+            tr = st._chain_trace(ctx, ic, True)
+            m = st.cull_mask(tr, scr, ctx["g"], cull)
+            if m.any():
+                trs.append(dict(tr, **{k: tr[k][m] for k in ("r", "t", "acc", "dt")}))
+        _BEND_TRACES[key] = (ctx, trs)
+    return _BEND_TRACES[key]
+
+
+def bend_view(lattice, screen_id, mesh=121, quantity="power"):
+    """Карта экрана у ДИПОЛЯ для кокпита — по траектории электрона (точный режим sr_trace: протяжённый источник,
+    мягкий край по картам поля), без стыков вееров быстрого режима. От живого состояния не зависит — считается
+    один раз на (экран, сетка, величина). «power» — Вт/мм² (footprint_accurate, эффекты extended+fringe);
+    «flux» — ф/с/мрад²/0.1%BW на ε_c центрального модуля. Возврат dict(S, extent, peak, [total, n_bend, cu, cv],
+    ec, dev, D) или None."""
+    key = (int(lattice), str(screen_id), int(mesh), str(quantity))
+    if key in _BEND_VIEW:
+        return _BEND_VIEW[key]
+    import sr_trace as st
+    c = live_context(lattice, screen_id)
+    if c is None or c["scr"].get("mode") != "bend":
+        return None
+    scr = c["scr"]
+    ctx, trs = _bend_traces(lattice, scr)
+    ec0 = float(scr.get("ec") or (max(f["ec"] for f in c["fans"]) if c["fans"] else 0.0))
+    if quantity == "power":
+        fp = st.footprint_accurate(scr, ctx, "extended,fringe", int(mesh), undulators=False)
+        res = dict(S=fp["S"], extent=fp["extent"], peak=fp["peak"], total=fp["total"], bend_W=fp["bend_W"],
+                   und_W=0.0, n_bend=len(fp["chains"]), cu=fp["cu"], cv=fp["cv"])
+    else:
+        res = st.trace_flux_map(trs, scr, ec0, int(mesh))
+    res.update(ec=ec0, dev=scr.get("dev", ""), D=scr.get("D"))
+    _BEND_VIEW[key] = res
+    return res
+
+
+def bend_spectrum(lattice, screen_id, u_mm, v_mm, n=400):
+    """Сплошной спектр в точке экрана у диполя по траектории (та же модель, что карта bend_view)."""
+    import sr_trace as st
+    c = live_context(lattice, screen_id)
+    if c is None or c["scr"].get("mode") != "bend":
+        return None
+    ctx, trs = _bend_traces(lattice, c["scr"])
+    return st.trace_point_spectrum(trs, c["scr"], u_mm, v_mm, n)
 
 
 def save_png(scr, fp, path, gap, calc="fast"):

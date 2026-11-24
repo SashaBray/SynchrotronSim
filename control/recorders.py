@@ -21,7 +21,7 @@ _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 # параметры ондулятора/оптики для screen-рекордера (как в interference_compare, ПРЕДПОЛОЖИТЕЛЬНЫЕ)
 GAP_MM = 5.0
 BETA_X, BETA_Y = 4.0, 2.0
-D_DEFAULT = 15.0                                              # плечо источник→экран, м (если нет в screens.csv)
+D_DEFAULT = 20.0                                              # плечо источник→экран, м (если нет в screens.csv; = кокпит)
 
 
 def _rms(v):

@@ -564,8 +564,16 @@ class Cockpit(QMainWindow):
         for gid in sorted(state.undulators):
             node(n_und, gid, ("graph", f"undulator.{gid}.gap"))
         n_scr = node(None, "экраны")
-        for sid in screens:
-            node(n_scr, sid, ("screen", sid))
+        sub = {}
+        for it in screens:                                 # sid или (sid, вид): ондуляторы / линейки диполей
+            sid, kind = (it, "") if isinstance(it, str) else (it[0], it[1])
+            parent = n_scr
+            if kind:
+                title = {"undulator": "у ондуляторов", "bend": "у линеек диполей (модуль №3)"}.get(kind, kind)
+                if kind not in sub:
+                    sub[kind] = node(n_scr, title)
+                parent = sub[kind]
+            node(parent, sid, ("screen", sid))
         n_sens = node(None, "сенсоры")
         if "ebpm.x" in state.observables:
             node(n_sens, "e-BPM 0 (x×y)", ("point", "obs.ebpm.x:0", "obs.ebpm.y:0"))
@@ -870,7 +878,8 @@ def launch_cockpit(lattice: int = 26, exp=None, parent=None, gap_scale: float = 
         for name in sch.loops:                          # живое состояние контуров → переключатели панели
             win._subscribe(f"loop.{name}.enabled")
 
-        win.build_tree(state, sch.loops, _read_screen_ids())
+        scr_list = [(s["sid"], s.get("kind", "")) for s in (scene.model.screens or [])] or _read_screen_ids()
+        win.build_tree(state, sch.loops, scr_list)
 
         from .engine import EngineThread
         eng = EngineThread(link, sch, steps_per_cycle=steps_per_cycle, publish_every=publish_every)

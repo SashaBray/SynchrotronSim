@@ -577,6 +577,81 @@ def footprint_accurate(scr, ctx, effects=None, mesh=161, cull=40.0, emit_x=None,
     return fp
 
 
+def stationary_points(tr, pts, chunk=2_000_000):
+    """Для точек pts (M,3): участок траектории, чья касательная в плоскости изгиба смотрит на точку (смена знака
+    горизонтального угла между касательной и направлением на точку). Возврат (valid (M,), ψ (M,) — вертикальный
+    угол от плоскости орбиты, ec (M,) — локальная ε_c [кэВ], интерполированная между соседними точками).
+    Плоскость изгиба — tr["vhat"]; ε_c по локальной кривизне: B = |κ|·Bρ, ε_c = 0,665·E²·B."""
+    step = max(1, tr["r"].shape[0] // 600)                     # касательная поворачивается плавно — хватит ~600
+    r, t, acc = tr["r"][::step], tr["t"][::step], tr["acc"][::step]   # точек (между ними — линейная интерполяция)
+    K, M = r.shape[0], pts.shape[0]
+    valid = np.zeros(M, bool); psi = np.zeros(M); ec = np.zeros(M)
+    if K < 2:
+        return valid, psi, ec
+    vh = np.asarray(tr["vhat"], float)
+    E = sr.P.E
+    ec_k = 0.665 * E ** 2 * (np.linalg.norm(acc, axis=1) / _C) * (E / 0.299792458)   # |β̇|/c ≈ |κ| (β≈1)
+    mc = max(1, int(chunk // (3 * K)))
+    for i in range(0, M, mc):
+        p = pts[i:i + mc]
+        d = p[None, :, :] - r[:, None, :]
+        dv = d @ vh
+        dh = d - dv[..., None] * vh
+        cr = np.cross(t[:, None, :], dh) @ vh
+        dt_ = np.einsum("kmj,kj->km", dh, t)
+        dl = np.arctan2(cr, dt_)                                    # горизонт. угол касательная→точка
+        ch = (np.sign(dl[:-1]) != np.sign(dl[1:])) & (dt_[:-1] > 0)
+        ok = ch.any(axis=0)
+        k = np.argmax(ch, axis=0)
+        cols = np.arange(p.shape[0])
+        a0, a1 = dl[k, cols], dl[k + 1, cols]
+        f = np.where(np.abs(a0 - a1) > 0, a0 / (a0 - a1), 0.5)
+        dk = d[k, cols]
+        valid[i:i + mc] = ok
+        psi[i:i + mc] = np.arcsin(np.clip(dv[k, cols] / np.linalg.norm(dk, axis=1), -1, 1))
+        ec[i:i + mc] = ec_k[k] + f * (ec_k[np.minimum(k + 1, K - 1)] - ec_k[k])
+    return valid, psi, ec
+
+
+def trace_flux_map(traces, scr, E_keV, mesh, I=None):
+    """Карта ПОТОКА поворотного СИ на энергии E_keV [ф/с/мрад²/0.1%BW] по траекториям (протяжённый источник,
+    мягкий край: у края поля ε_c падает → поток на фиксированной энергии плавно гаснет; стыков модулей нет)."""
+    import screen_analysis as sa
+    import bend_sr as bsr
+    I = sr.P.I if I is None else I
+    hw, hh, UU, VV, cell, pts3 = sa._grid(scr, mesh)
+    pts = pts3.reshape(-1, 3)
+    S = np.zeros(pts.shape[0])
+    g = sr.gamma()
+    for tr in traces:
+        ok, psi, ec = stationary_points(tr, pts)
+        ok &= ec > 0
+        if ok.any():
+            S[ok] += bsr.flux_angular(float(E_keV), psi[ok], ec[ok], sr.P.E, I, g)
+    S = S.reshape(mesh, mesh)
+    return dict(S=S, extent=(-hw * 1e3, hw * 1e3, -hh * 1e3, hh * 1e3), peak=float(S.max()))
+
+
+def trace_point_spectrum(traces, scr, u_mm, v_mm, n=400, I=None):
+    """Сплошной спектр поворотного СИ в точке экрана (u, v мм) по траекториям: на каждую — участок, чья
+    касательная смотрит на точку, со своей ε_c. Возврат dict(E_keV, flux [ф/с/мрад²/0.1%BW], ecs)."""
+    import bend_sr as bsr
+    I = sr.P.I if I is None else I
+    p = (scr["C"] + (u_mm * 1e-3) * scr["u"] + (v_mm * 1e-3) * scr["v"])[None, :]
+    hits = []
+    for tr in traces:
+        ok, psi, ec = stationary_points(tr, p)
+        if bool(ok[0]) and ec[0] > 0:
+            hits.append((float(psi[0]), float(ec[0])))
+    ecs = [e for _, e in hits] or [float(scr.get("ec") or 10.0)]
+    Es = np.geomspace(0.03 * min(ecs), 12.0 * max(ecs), int(n))
+    F = np.zeros_like(Es)
+    g = sr.gamma()
+    for psi, e in hits:
+        F += bsr.flux_angular(Es, psi, e, sr.P.E, I, g)
+    return dict(E_keV=Es, flux=F, ecs=ecs)
+
+
 def compare_line(fast, acc):
     """Короткая строка «точный против быстрого»."""
     dp = (acc["peak"] / fast["peak"] - 1) * 100 if fast.get("peak") else float("nan")

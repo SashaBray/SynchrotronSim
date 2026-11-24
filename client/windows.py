@@ -447,7 +447,7 @@ class InfoWindow(SubscriberWindow):
 
 
 # ------------------------------------------------------------------ экран (цветная карта + спектр в точке)
-SCREEN_QUANTITIES = (("flux", "поток на E₁", "поток, ф/с/мрад²/0.1%BW"),
+SCREEN_QUANTITIES = (("flux", "поток (E₁ / ε_c)", "поток, ф/с/мрад²/0.1%BW"),
                      ("power", "мощность, Вт/мм²", "плотность мощности, Вт/мм²"))
 
 
@@ -865,10 +865,16 @@ class ScreenWindow(SubscriberWindow):
         gap = d.get("gap")
         e1 = d.get("e1")
         bits = []
-        if gap is not None:
-            bits.append(f"зазор {float(gap):.2f} мм")
-        if e1 is not None:
-            bits.append(f"E₁ {float(e1):.2f} кэВ")
+        if d.get("kind") == "bend":                                # экран у диполя: источник и ε_c
+            bits.append(f"диполь {d.get('dev', '')}".strip())
+            if d.get("ec"):
+                bits.append(f"поток на ε_c {float(d['ec']):.2f} кэВ" if d.get("quantity") == "flux"
+                            else f"ε_c {float(d['ec']):.2f} кэВ")
+        else:
+            if gap is not None:
+                bits.append(f"зазор {float(gap):.2f} мм")
+            if e1 is not None:
+                bits.append(f"E₁ {float(e1):.2f} кэВ")
         if d.get("quantity") == "power" and self.quantity == "power" and d.get("peak") is not None:
             bits.append(f"пик {float(d['peak']):.1f} Вт/мм²")
             bits.append(f"перехвачено {float(d.get('total') or 0):.0f} Вт"
@@ -896,7 +902,7 @@ class ScreenInfoWindow(SubscriberWindow):
         self.screen_id = screen_id
         lay = QVBoxLayout(self)
         lay.addWidget(QLabel(f"<b>Экран {screen_id}</b>"))
-        lay.addWidget(QLabel("Фотонный экран за ондулятором — проекция светового потока."))
+        lay.addWidget(QLabel("Фотонный экран: карта мощности/потока и спектр света источника (ондулятор или диполь)."))
         btn = QPushButton("Открыть тепловую карту света")
         btn.clicked.connect(lambda: self.request_open.emit("screen", self.screen_id))
         lay.addWidget(btn)

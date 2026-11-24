@@ -3170,6 +3170,34 @@ class TestClientScreenBackground(unittest.TestCase):
         finally:
             eng.stop()
 
+    def test_engine_bend_screen_power_and_flux(self):
+        """Экран у линейки диполя (gated на БД): движок отдаёт карту мощности/потока и сплошной спектр, kind=bend."""
+        import types
+        tb = os.path.join(ROOT, "workspace", "tables")
+        if not os.path.exists(os.path.join(tb, "element_groups.csv")):
+            self.skipTest("нет element_groups.csv")
+        und = os.path.join(ROOT, "undulators")
+        if und not in sys.path:
+            sys.path.insert(0, und)
+        cwd = os.getcwd(); os.chdir(ROOT)
+        from client.engine import EngineThread
+        st = types.SimpleNamespace(observables={}, undulators={})
+        eng = EngineThread(link=None, scheduler=types.SimpleNamespace(state=st, plant=types.SimpleNamespace(lattice=26)))
+        try:
+            import screen_analysis as sa
+            sid = sa.bend_line_screens(26)[0]["sid"]
+            p = eng._compute_screen(f"screen.{sid}", {"res": 41, "quantity": "power"}, st)
+            f = eng._compute_screen(f"screen.{sid}", {"res": 41, "quantity": "flux", "point": (0.0, 0.0)}, st)
+            u = eng._bend_context("SCR_und_01")
+        finally:
+            eng.stop(); os.chdir(cwd)
+        self.assertNotIn("error", p)
+        self.assertEqual((p["kind"], p["quantity"], f["quantity"]), ("bend", "power", "flux"))
+        self.assertGreater(p["total"], 0.0)
+        self.assertEqual(np.asarray(f["heatmap"]).shape, (41, 41))
+        self.assertGreater(max(f["spectrum"]["flux"]), 0.0)
+        self.assertIsNone(u)                                                    # экран ондулятора — прежний путь
+
     def test_screen_quantity_switch_recomputes_power(self):
         """Переключатель величины окна экрана: смена flux→power — новый расчёт; power идёт в карту мощности."""
         import time as _t
@@ -3229,6 +3257,20 @@ class TestClientScene(unittest.TestCase):
                "u2": {"xy": [7.2, 0.0], "center": [7.0, 0.0], "s_idx": 12},
                "fake": {"xy": [0.0, 0.0]}}                          # без положения по пучку — не в навигации
         return {"named": named, "undulators": und}
+
+    def test_nearest_screen_by_kind_and_stub_has_no_bend_screens(self):
+        """Экран у линейки диполя ищется по ближайшему центру среди своего вида; фейк-кольцо тестов (модулей
+        линеек нет) экранов у линеек не получает."""
+        from client import scene3d
+        m = scene3d.SceneModel({"screens": [
+            {"sid": "SCR_u", "kind": "undulator", "center": [0.0, 0.0], "src": [0, 0], "axis": [1, 0]},
+            {"sid": "SCR_DP1", "kind": "bend", "center": [10.0, 0.0], "src": [0, 0], "axis": [1, 0]},
+            {"sid": "SCR_DP2", "kind": "bend", "center": [20.0, 0.0], "src": [0, 0], "axis": [1, 0]}]})
+        self.assertEqual(m.nearest_screen(1.0, 0.0)["sid"], "SCR_u")
+        self.assertEqual(m.nearest_screen(1.0, 0.0, kind="bend")["sid"], "SCR_DP1")
+        self.assertEqual(m.nearest_screen(18.0, 1.0, kind="bend")["sid"], "SCR_DP2")
+        g = scene3d.build_geometry(_StubRingPlant())
+        self.assertFalse([s for s in g["screens"] if s.get("kind") == "bend"])
 
     def test_nav_beam_order_merge_and_same_type(self):
         """Навигация камеры: порядок по пучку, ондулятор — один шаг в своём месте, строки в одной точке
@@ -3567,6 +3609,25 @@ class TestClientCockpitOffscreen(unittest.TestCase):
             self.assertIn("мс", win.control.lbl["model_time"].text())
         finally:
             win.close()
+
+    def test_bend_line_screens_drawn_as_one_actor(self):
+        """Экраны у линеек диполей — одним актёром «bscreens» (+ линии визирования «blos»), не по актёру на экран."""
+        try:
+            self._env()
+            from client.scene3d import make_ring_scene
+        except Exception as e:
+            self.skipTest(f"нет Qt/PyVista offscreen: {e}")
+        scene = make_ring_scene()
+        try:
+            scr = [{"sid": f"SCR_DP{k}", "kind": "bend", "src": [float(k), 0.0], "center": [float(k), 20.0],
+                    "axis": [0.0, 1.0], "w": 0.1, "h": 0.03} for k in range(3)]
+            scene.set_geometry({"centers": [[0, 0], [1, 0], [2, 1]], "screens": scr})
+            self.assertIn("bscreens", scene.actors)
+            self.assertIn("blos", scene.actors)
+            self.assertFalse([n for n in scene.actors if str(n).startswith("screen_SCR_DP")])
+            self.assertEqual(scene.model.nearest_screen(2.1, 19.0, kind="bend")["sid"], "SCR_DP2")
+        finally:
+            scene.close()
 
     def test_windows_wait_while_camera_moves(self):
         """Пока крутят камеру (кнопка мыши, колесо, перелёт), окна графиков не перерисовываются — снимок
@@ -3953,6 +4014,11 @@ class TestClientCockpitOffscreen(unittest.TestCase):
             st.undulators["und_01"] = UndulatorConfig(7.0, name="und_01")
             win.build_tree(st, {}, ["SCR1"])
             self.assertGreaterEqual(win.tree.topLevelItemCount(), 5)
+            win.build_tree(st, {}, [("SCR_und_01", "undulator"), ("SCR_DP7", "bend")])   # экраны — по видам
+            scr = next(win.tree.topLevelItem(i) for i in range(win.tree.topLevelItemCount())
+                       if win.tree.topLevelItem(i).text(0) == "экраны")
+            self.assertEqual(sorted(scr.child(i).text(0) for i in range(scr.childCount())),
+                             ["у линеек диполей (модуль №3)", "у ондуляторов"])
         finally:
             win.close()
 
@@ -4232,13 +4298,49 @@ class TestScreenHeatMap(unittest.TestCase):
         finally:
             os.chdir(cwd)
         self.assertEqual([g for g, _ in fp5["illuminators"]][:1], ["und_01"])
-        self.assertAlmostEqual(fp5["D"], 12.0, delta=1e-6)
+        self.assertAlmostEqual(fp5["D"], 20.0, delta=1e-6)                   # экраны кокпита — 20 м от ИД
         S = fp5["S"]; m = S.shape[0] // 2                                   # ширина по полувысоте (СКО — хвосты)
         wu = int((S[:, m] >= S.max() / 2).sum()); wv = int((S[m, :] >= S.max() / 2).sum())
         self.assertGreater(wu, 2 * wv)                                       # ±K/γ по горизонтали, ~1/γ по вертикали
         self.assertGreater(fp5["und_W"], 0.98 * self.sr.angular_power_cached(
             self.sr.K_of_B0(self.sr.B0_of_gap(5.0)))["total_W"])
         self.assertLess(fp8["peak"], fp5["peak"])
+
+    def test_bend_line_screens_at_central_module(self):
+        """Экраны у линеек диполя (gated на БД): у каждой линейки из 5 модулей (и у разбитых вставкой) — экран
+        на 20 м по касательной в центре модуля №3; картина по траектории — непрерывная полоса без стыков вееров,
+        поток на ε_c в центре = локальная ε_c модуля №3, спектр сплошной с пиком у ε_c."""
+        tb = os.path.join(ROOT, "workspace", "tables")
+        if not os.path.exists(os.path.join(tb, "element_groups.csv")):
+            self.skipTest("нет element_groups.csv")
+        cwd = os.getcwd(); os.chdir(ROOT)
+        try:
+            import screen_analysis as sa
+            import sr_trace as st
+            bs = sa.bend_line_screens(26)
+            if not bs:
+                self.skipTest("нет линеек диполей в реш.26")
+            b = next(x for x in bs if x["dev"].endswith("_3"))
+            v = sa.bend_view(26, b["sid"], 81, "power")
+            ctx, trs = sa._bend_traces(26, sa.live_context(26, b["sid"])["scr"])
+            ok, psi, ec = st.stationary_points(trs[0], np.array([b["C"]]))
+            sp = sa.bend_spectrum(26, b["sid"], 0.0, 0.0)
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(len({x["sid"] for x in bs}), len(bs))
+        self.assertEqual(sum(1 for x in bs if x["dev"].startswith("und_J")), 2)   # инжекционные (4+1) — тоже
+        for x in bs:
+            np.testing.assert_allclose(x["C"], x["P"] + 20.0 * x["t"], atol=1e-9)
+            self.assertAlmostEqual(float(np.dot(x["n"], x["t"])), -1.0, places=12)
+        S = v["S"]; m = S.shape[1] // 2
+        row = S[:, m]
+        self.assertGreater(v["total"], 0.0)
+        self.assertGreater(float(row.min()), 0.2 * float(row.max()))           # по горизонтали — без провалов
+        self.assertTrue(bool(ok[0]))
+        self.assertAlmostEqual(float(ec[0]) / b["ec"], 1.0, delta=2e-3)        # в центре — модуль №3
+        self.assertAlmostEqual(float(psi[0]), 0.0, delta=1e-9)
+        Ep = float(sp["E_keV"][int(np.argmax(sp["flux"]))])
+        self.assertTrue(0.6 * b["ec"] < Ep < 1.0 * b["ec"], Ep)                # пик угловой плотности ~0,83·ε_c
 
     def test_fan_on_orbit_shifts_point_and_tangent(self):
         """Веер по орбите: точка отбора сдвигается на (x, y), касательная поворачивается на (x′, y′)."""

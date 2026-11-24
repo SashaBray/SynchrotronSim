@@ -276,6 +276,9 @@ class EngineThread(threading.Thread):
         st = self.state if st is None else st
         mesh = int(cfg.get("res") or 121)
         pt = cfg.get("point") or (0.0, 0.0)                 # точка на экране (мм) для спектра; (0,0)=на оси
+        bend = self._bend_context(sid)
+        if bend is not None:                                # экран у диполя: веера, поток на ε_c, сплошной спектр
+            return self._compute_bend(sid, bend, mesh, pt, _quantity(cfg), st)
         if _quantity(cfg) == "power":
             return self._compute_power(sid, mesh, pt, st)
         try:
@@ -305,6 +308,52 @@ class EngineThread(threading.Thread):
             out["quantity"] = "flux"
             return out
         except Exception as e:                      # экран опционален/тяжёл — ошибку отдаём окну, не падаем
+            return {"error": f"{type(e).__name__}: {e}"}
+
+    def _sa(self):
+        import os, sys
+        und = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "undulators")
+        if und not in sys.path:
+            sys.path.insert(0, und)
+        import screen_analysis as sa
+        return sa
+
+    def _lattice(self) -> int:
+        return int(getattr(self.plant, "lattice", None) or 26)
+
+    def _bend_context(self, sid: str):
+        """Контекст живого экрана, если его источник — ДИПОЛЬ (экраны у линеек SCR_DP…, замороженные mode=bend);
+        иначе None (экран ондулятора — прежний путь)."""
+        try:
+            sa = self._sa()
+            if not str(sid).startswith("SCR_DP") and not any(
+                    r.get("screen_id") == sid and r.get("lattice_id") == str(self._lattice()) and r.get("mode") == "bend"
+                    for r in sa._screen_rows()):
+                return None
+            c = sa.live_context(self._lattice(), sid)
+            return c if c is not None and c["scr"].get("mode") == "bend" else None
+        except Exception:                                  # noqa: BLE001 — нет таблиц: не диполь
+            return None
+
+    def _compute_bend(self, sid: str, c: dict, mesh: int, pt, quantity: str, st) -> dict:
+        """Экран у диполя — по траектории электрона (точный режим, мягкий край, без стыков вееров): «мощность» —
+        Вт/мм², «поток» — на ε_c центрального модуля, ф/с/мрад²/0.1%BW; спектр в точке — сплошной, с локальной ε_c
+        участка дуги, смотрящего на точку. Карта статична (зазоры не влияют) — считается один раз на сетку."""
+        try:
+            sa = self._sa()
+            v = sa.bend_view(self._lattice(), sid, mesh, quantity)    # по траектории; кэш — считается один раз
+            out = {"mesh": mesh, "quantity": quantity, "kind": "bend", "ec": v["ec"], "dev": v["dev"], "D": v["D"],
+                   "heatmap": np.asarray(v["S"], float).tolist(), "extent": [float(e) for e in v["extent"]]}
+            if quantity == "power":
+                out.update(peak=v["peak"], total=v["total"], und_W=0.0, bend_W=v["bend_W"], n_bend=v["n_bend"],
+                           centroid=[v["cu"], v["cv"]])
+            ec0 = v["ec"]
+            sp = sa.bend_spectrum(self._lattice(), sid, float(pt[0]), float(pt[1]))
+            out["spectrum"] = {"E_keV": np.asarray(sp["E_keV"], float).tolist(),
+                               "flux": np.asarray(sp["flux"], float).tolist(),
+                               "u_mm": float(pt[0]), "v_mm": float(pt[1]), "E1": ec0}
+            return out
+        except Exception as e:                      # noqa: BLE001 — экран опционален
             return {"error": f"{type(e).__name__}: {e}"}
 
     def _compute_power(self, sid: str, mesh: int, pt, st) -> dict:

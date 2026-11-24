@@ -153,11 +153,14 @@ def build_geometry(plant, state=None, *, decimate: int = 1) -> dict:
         sc = scr.get(gid, {})
         dist = float(sc.get("dist") or 0.0) or SCREEN_DEFAULT_DIST
         ax = u.get("axis", [1.0, 0.0])
-        g["screens"].append({"gid": gid, "sid": sc.get("sid", "") or f"SCR_{gid}",
-                             "src": [u["xy"][0], u["xy"][1]],
-                             "center": [u["xy"][0] + dist * ax[0], u["xy"][1] + dist * ax[1]],
+        src = u.get("center") or u["xy"]                       # от центра гребёнки полюсов
+        g["screens"].append({"gid": gid, "sid": sc.get("sid", "") or f"SCR_{gid}", "kind": "undulator",
+                             "src": [src[0], src[1]],
+                             "center": [src[0] + dist * ax[0], src[1] + dist * ax[1]],
                              "axis": [ax[0], ax[1]],
                              "w": float(sc.get("w", 0) or 0), "h": float(sc.get("h", 0) or 0)})
+    g["screens"] += _bend_line_screens(g["lattice"], mags if ring is not None and getattr(ring, "mags", None)
+                                       is not None else [])
     # СТАРТ решётки/пучка s=0 — в глобальном начале координат (раскладка elegant). Первый элемент в ring.mags
     # (BPM) стоит ПОСЛЕ входного дрейфа DR_01, поэтому стартплоскость кладём на s=0, а не на mags[0].
     if len(g["centers"]) >= 2:
@@ -167,6 +170,32 @@ def build_geometry(plant, state=None, *, decimate: int = 1) -> dict:
         n = float(np.hypot(d[0], d[1])) or 1.0
         g["beam_start"] = {"pos": [0.0, 0.0], "dir": [float(d[0] / n), float(d[1] / n)]}
     return g
+
+
+def _bend_line_screens(lattice: int, mags) -> List[dict]:
+    """Экраны у центральных модулей (№3) линеек диполя из 5 модулей (`screen_analysis.bend_line_screens`, на
+    SCREEN_DEFAULT_DIST по касательной). Берём только те, чей модуль-источник есть в кольце сцены (совпадение
+    центра до 1 мм) — фейк-кольцо тестов их не получает. Ошибка/нет таблиц — пусто (сцена без них)."""
+    if not lattice or mags is None or len(mags) == 0:
+        return []
+    try:
+        import sys
+        und = os.path.join(_project_root(), "undulators")
+        if und not in sys.path:
+            sys.path.insert(0, und)
+        import screen_analysis as sa
+        bs = sa.bend_line_screens(int(lattice), dist=SCREEN_DEFAULT_DIST)
+    except Exception:
+        return []
+    cen = np.asarray([[float(m.center[0]), float(m.center[1])] for m in mags], float)
+    out = []
+    for b in bs:
+        if float(np.min(np.hypot(cen[:, 0] - b["P"][0], cen[:, 1] - b["P"][1]))) > 1e-3:
+            continue
+        out.append({"gid": "", "sid": b["sid"], "kind": "bend", "dev": b["dev"],
+                    "src": [float(b["P"][0]), float(b["P"][1])], "center": [float(b["C"][0]), float(b["C"][1])],
+                    "axis": [float(b["t"][0]), float(b["t"][1])], "w": b["w"] / 1e3, "h": b["h"] / 1e3})
+    return out
 
 
 def _read_screens(root: Optional[str] = None) -> dict:
@@ -224,7 +253,7 @@ UND_HALF_H = 0.03       # полувысота челюсти (тонкий ба
 STL_TRI_CAP = 20_000_000  # практически БЕЗ прореживания (полное качество STL); предохранитель от патологий
 PICK_THRESH = 2.0       # порог пикинга (м): клик дальше этого от магнита — не открываем инфо (пустой клик)
 SCREEN_MIN_SIZE = 0.6   # видимый размер экрана в сцене (реальный ~50 мм — спек на 12 м; увеличен для глаза)
-SCREEN_DEFAULT_DIST = 12.0  # дистанция экрана от ондулятора, если нет записи в screens.csv (у ВСЕХ ондуляторов)
+SCREEN_DEFAULT_DIST = 20.0  # м от центра ондулятора, если нет записи в screens.csv (= screen_analysis.SCREEN_DEFAULT_DIST)
 HOVER_SIZE = 1.0        # размер жёлтой рамки-подсветки магнита под курсором (м)
 START_PLANE_SIZE = 1.2  # размер стартовой плоскости (м) — небольшой, не во всё кольцо
 SENSOR_THICK = 0.02     # толщина экрана-сенсора (BPM) вдоль пучка, м (тоньше ×2)
@@ -402,6 +431,14 @@ class SceneModel:
             return None
         n = self.named[i]
         return (i, n["name"], n.get("kind", ""), dist)
+
+    def nearest_screen(self, x: float, y: float, kind: Optional[str] = None):
+        """Ближайший экран к (x,y) по центру (только вида kind, если задан): dict экрана или None."""
+        cand = [s for s in self.screens if kind is None or s.get("kind") == kind]
+        if not cand:
+            return None
+        d = [float(np.hypot(s["center"][0] - x, s["center"][1] - y)) for s in cand]
+        return cand[int(np.argmin(d))]
 
     def nearest_sensor(self, x: float, y: float):
         """Ближайший сенсор (BPM) к (x,y): dict из bundle['sensors'] (name/xy/z/sid/idx) или None."""
@@ -613,7 +650,16 @@ def make_ring_scene(parent=None, gap_scale: float = 1.0):
                 self._jaw_actors[gid] = (a_up, a_lo, None)
                 self._vis_gap[gid] = gap0                        # старт анимации — с текущего зазора
                 self._target_gap[gid] = gap0
+            bplanes, blines = [], []
             for sc in (self.model.screens or []):                 # экраны + линия ондулятор→экран (LOS)
+                if sc.get("kind") == "bend":                      # у линеек диполей — одним актёром (их 160)
+                    c = np.array([float(sc["center"][0]), float(sc["center"][1]), 0.0])
+                    nrm = np.array([float(sc["axis"][0]), float(sc["axis"][1]), 0.0])
+                    nrm = nrm / (float(np.hypot(nrm[0], nrm[1])) or 1.0)
+                    sz = max(float(sc.get("w", 0) or 0), float(sc.get("h", 0) or 0), SCREEN_MIN_SIZE)
+                    bplanes.append(pv.Plane(center=c, direction=nrm, i_size=sz, j_size=sz))
+                    blines.append(pv.lines_from_points(np.vstack([[float(sc["src"][0]), float(sc["src"][1]), 0.0], c])))
+                    continue
                 c = np.array([float(sc["center"][0]), float(sc["center"][1]), 0.0])
                 nrm = np.array([float(sc["axis"][0]), float(sc["axis"][1]), 0.0])
                 nrm = nrm / (float(np.hypot(nrm[0], nrm[1])) or 1.0)
@@ -623,6 +669,9 @@ def make_ring_scene(parent=None, gap_scale: float = 1.0):
                 src = np.array([float(sc["src"][0]), float(sc["src"][1]), 0.0])
                 self.add_mesh(pv.lines_from_points(np.vstack([src, c])), color="#ff8c00",
                               line_width=2, name=f"los_{sc.get('sid', '')}", pickable=False)
+            if bplanes:                                          # экраны линеек: клик → ближайший по центру
+                self.add_mesh(pv.merge(bplanes), color="#8e44ad", opacity=0.6, name="bscreens", pickable=True)
+                self.add_mesh(pv.merge(blines), color="#c39bd3", line_width=1, name="blos", pickable=False)
             self._enable_picking()
             self._add_grid_axes()                                 # сетка + оси (как в visualize.py)
             self.fit_view()                                       # вид сверху после построения актёров
@@ -799,7 +848,7 @@ def make_ring_scene(parent=None, gap_scale: float = 1.0):
                 self._set_focus_at(nm[1], nm[2])
             elif name.startswith(("und_up_", "und_lo_")) and self._focus_undulator(name[len("und_up_"):]):
                 pass                                          # ондулятор — центр его гребёнки (как при навигации)
-            elif name.startswith(("screen_", "und_up_", "und_lo_", "sensors")):
+            elif name.startswith(("screen_", "und_up_", "und_lo_", "sensors", "bscreens")):
                 self._center_on(hit[1], hit[2])
 
         # ---- ПКМ на уровне Qt (БЕЗ VTK-наблюдателей — иначе залипает dolly) ----
@@ -852,6 +901,13 @@ def make_ring_scene(parent=None, gap_scale: float = 1.0):
                     self.picked_screen.emit(name[len("screen_"):])
                 except Exception:
                     pass
+            elif name == "bscreens":                          # экран у линейки диполя — ближайший к точке клика
+                s = self.model.nearest_screen(hit[1], hit[2], kind="bend") if self.model else None
+                if s is not None:
+                    try:
+                        self.picked_screen.emit(s["sid"])
+                    except Exception:
+                        pass
             elif name.startswith("und_up_") or name.startswith("und_lo_"):
                 try:
                     self.picked_undulator.emit(name[len("und_up_"):])
