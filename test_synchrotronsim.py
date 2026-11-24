@@ -2373,6 +2373,91 @@ class TestImperativeLoop(unittest.TestCase):
         self.assertAlmostEqual(state.actual["corr.001.hkick"], 0.3)
 
 
+class TestBumplessEnable(unittest.TestCase):
+    """Безударное включение контура: после «отпустить» интегратор стартует с нуля (без броска сверх нужной
+    поправки), после «заморозить» — продолжает с удержанного вклада (без скачка)."""
+
+    class _Plant:                                   # obs = d + R·Δk: контур гонит obs к нулю → Δk = −d/R
+        d, R = 1.0, 2.0
+
+        def __init__(self):
+            from control import Schema
+            self._schema = Schema(["q.dk"])
+
+        def schema(self):
+            return self._schema
+
+        def history(self):
+            return None
+
+        def reset(self, state):
+            self.step(state, 0.0)
+
+        def step(self, state, dt):
+            state.observables["tune"] = np.array([self.d + self.R * state.actual["q.dk"]])
+
+        def fingerprint(self):
+            return ("bumpless",)
+
+    def _run(self):
+        from control import ExperimentState, Scheduler
+        from control.controllers.integral_svd import IntegralSVD
+
+        class Loop(IntegralSVD):
+            def setup(self, resources, schema):
+                self.act = ["q.dk"]; self.writes = self.act
+                self.P = np.array([[1.0 / TestBumplessEnable._Plant.R]]); self.u = np.zeros(1)
+
+        plant = self._Plant()
+        state = ExperimentState(plant.schema())
+        sch = Scheduler(plant, state, dt=1.0)
+        sch.add(Loop(name="tune", sensor="tune", actuator_key="q.", gain=0.7), rate_hz=1.0, enabled=False)
+        return sch, state
+
+    def test_release_then_enable_has_no_overshoot(self):
+        sch, state = self._run()
+        sch.set_enabled("tune", True)
+        for _ in range(40):
+            sch.step()
+        target = -self._Plant.d / self._Plant.R
+        self.assertAlmostEqual(state.actual["q.dk"], target, places=9)
+        sch.set_enabled("tune", False)                 # «отпустить» (дефолт): вклад обнулён
+        sch.step()
+        self.assertEqual(state.actual["q.dk"], 0.0)
+        sch.set_enabled("tune", True)                  # безударно: с нуля, как при первом включении
+        seq = []
+        for _ in range(20):
+            sch.step(); seq.append(state.actual["q.dk"])
+        self.assertAlmostEqual(seq[0], 0.7 * target, places=9)       # без старого интеграла было бы 1,7·target
+        self.assertTrue(all(abs(v) <= abs(target) + 1e-12 for v in seq))   # нет перерегулирования
+        self.assertTrue(all(abs(b) >= abs(a) - 1e-12 for a, b in zip(seq, seq[1:])))   # монотонно к цели
+
+    def test_freeze_then_enable_keeps_contribution(self):
+        sch, state = self._run()
+        sch.set_enabled("tune", True)
+        for _ in range(40):
+            sch.step()
+        held = state.actual["q.dk"]
+        sch.set_enabled("tune", False, mode="freeze")  # «заморозить»: вклад держится
+        for _ in range(3):
+            sch.step()
+        self.assertAlmostEqual(state.actual["q.dk"], held, places=12)
+        sch.set_enabled("tune", True)
+        sch.step()
+        self.assertAlmostEqual(state.actual["q.dk"], held, places=9)  # продолжает с удержанного — без скачка
+
+    def test_reenable_before_release_takes_effect_is_continuous(self):
+        """Выкл и сразу вкл (без такта между ними): слот ещё не обнулён — интегратор подхватывает его, скачка нет."""
+        sch, state = self._run()
+        sch.set_enabled("tune", True)
+        for _ in range(40):
+            sch.step()
+        held = state.actual["q.dk"]
+        sch.set_enabled("tune", False); sch.set_enabled("tune", True)
+        sch.step()
+        self.assertAlmostEqual(state.actual["q.dk"], held, places=9)
+
+
 class TestCompositeLinearInline(unittest.TestCase):
     """CompositePlant (линеаризованная оптика) БЕЗ кольца: объединённая схема, inline-модель
     obs=nominal+drift_off+R·u, диспетчер build_response (ebpm→tbt, оптика→кэш). Логику проверяем на
@@ -3085,6 +3170,37 @@ class TestClientScreenBackground(unittest.TestCase):
         finally:
             eng.stop()
 
+    def test_screen_quantity_switch_recomputes_power(self):
+        """Переключатель величины окна экрана: смена flux→power — новый расчёт; power идёт в карту мощности."""
+        import time as _t
+        import types
+        from client.engine import EngineThread, _quantity
+        self.assertEqual(_quantity({}), "flux")
+        self.assertEqual(_quantity({"quantity": "power"}), "power")
+        st = types.SimpleNamespace(observables={}, undulators={})
+        eng = EngineThread(link=None, scheduler=types.SimpleNamespace(state=st, plant=None))
+        calls = []
+        eng._compute_screen = lambda addr, cfg=None, inp=None: calls.append(dict(cfg or {})) or {"heatmap": [[1.0]]}
+        eng._compute_power = lambda *a: {"heatmap": [[2.0]], "quantity": "power"}
+        try:
+            eng._screen_value("screen.SCR_X"); _t.sleep(0.2); eng._screen_value("screen.SCR_X")
+            n = len(calls)
+            eng._screens["screen.SCR_X"] = {"res": 121, "quantity": "power"}
+            eng._screen_value("screen.SCR_X")
+            end = _t.time() + 2.0
+            while len(calls) == n and _t.time() < end:
+                _t.sleep(0.01)
+            self.assertEqual(calls[-1].get("quantity"), "power")
+        finally:
+            eng.stop()
+        real = EngineThread(link=None, scheduler=types.SimpleNamespace(state=st, plant=None))
+        try:
+            real._compute_power = lambda sid, mesh, pt, s: {"quantity": "power", "sid": sid, "mesh": mesh}
+            self.assertEqual(real._compute_screen("screen.SCR_Y", {"res": 61, "quantity": "power"}, st),
+                             {"quantity": "power", "sid": "SCR_Y", "mesh": 61})
+        finally:
+            real.stop()
+
 
 class TestClientScene(unittest.TestCase):
     """Этап 2 (headless): чистая геометрия сцены — узел из plant'а и модель актёров, без PyVista/Qt."""
@@ -3100,6 +3216,38 @@ class TestClientScene(unittest.TestCase):
         self.assertIn("und_01", g["undulators"])
         self.assertEqual(g["undulators"]["und_01"]["xy"], [2.0, 1.0])
         self.assertAlmostEqual(g["undulators"]["und_01"]["gap_mm"], 7.0)  # живой зазор с доски
+
+    @staticmethod
+    def _nav_bundle():
+        named = [{"name": "Q1", "xy": [0.0, 0.0], "kind": "quad", "dev": "QF", "s_idx": 0},
+                 {"name": "C1", "xy": [1.0, 0.0], "kind": "corrector", "dev": "COR", "s_idx": 1},
+                 {"name": "C1.c1", "xy": [1.0, 0.0], "kind": "corrector", "dev": "COR_c1", "s_idx": 2},
+                 {"name": "BPM1", "xy": [1.5, 0.0], "kind": "monitor", "dev": "BPM", "s_idx": 3},
+                 {"name": "Q2", "xy": [5.0, 0.0], "kind": "quad", "dev": "QF", "s_idx": 10},
+                 {"name": "B1", "xy": [6.0, 0.0], "kind": "dipole", "dev": "DP", "s_idx": 11}]
+        und = {"u1": {"xy": [3.2, 0.0], "center": [3.0, 0.0], "s_idx": 5},
+               "u2": {"xy": [7.2, 0.0], "center": [7.0, 0.0], "s_idx": 12},
+               "fake": {"xy": [0.0, 0.0]}}                          # без положения по пучку — не в навигации
+        return {"named": named, "undulators": und}
+
+    def test_nav_beam_order_merge_and_same_type(self):
+        """Навигация камеры: порядок по пучку, ондулятор — один шаг в своём месте, строки в одной точке
+        склеены, мониторы пропущены; same_type — следующий того же типа; кольцо замкнуто."""
+        from client import scene3d
+        m = scene3d.SceneModel(self._nav_bundle())
+        self.assertEqual([it["name"] for it in m.nav], ["Q1", "C1", "u1", "Q2", "B1", "u2"])
+        ix = {it["name"]: k for k, it in enumerate(m.nav)}
+        self.assertEqual(m.nav[ix["u1"]]["xy"], [3.0, 0.0])              # центр гребёнки, не якорь
+        self.assertEqual(m.nav_step(ix["Q1"], +1), ix["C1"])             # → по пучку
+        self.assertEqual(m.nav_step(ix["Q1"], -1), ix["u2"])             # ← навстречу, через «конец» кольца
+        self.assertEqual(m.nav_step(ix["u1"], +1, same_type=True), ix["u2"])
+        self.assertEqual(m.nav_step(ix["u2"], +1, same_type=True), ix["u1"])   # по кругу
+        self.assertEqual(m.nav_step(ix["Q1"], +1, same_type=True), ix["Q2"])   # тот же тип устройства
+        self.assertEqual(m.nav_step(ix["B1"], +1, same_type=True), ix["B1"])   # единственный своего типа
+        self.assertEqual(m.nav_nearest(3.01, 0.0)[0], ix["u1"])
+        self.assertIn("ондулятор u1 — 1 из 2", m.nav_label(ix["u1"]))
+        self.assertIn("квадруполь Q2 — 2 из 2", m.nav_label(ix["Q2"]))
+        self.assertEqual(scene3d.SceneModel({}).nav, [])
 
     def test_scene_model_jaws_monotonic_in_gap(self):
         from client import scene3d
@@ -3420,6 +3568,50 @@ class TestClientCockpitOffscreen(unittest.TestCase):
         finally:
             win.close()
 
+    def test_scene_camera_navigation_keys(self):
+        """Ctrl/Shift+←/→: камера перелетает на соседний элемент / соседний того же типа (без фокуса — подсказка)."""
+        try:
+            app = self._env()
+            from client import InProcLink
+            from client.cockpit import Cockpit
+            from client.scene3d import make_ring_scene
+        except Exception as e:
+            self.skipTest(f"нет Qt/PyVista offscreen: {e}")
+        link = InProcLink()
+        win = Cockpit(link, poll_ms=10)
+        try:
+            scene = make_ring_scene()
+            scene.set_geometry(dict(TestClientScene._nav_bundle(), centers=[[0, 0], [4, 0], [8, 0]]))
+            win.bind_scene(scene)
+            scene.fly_steps = 0                                     # без анимации — проверяем итог
+            got = []
+            scene.focused.connect(got.append)
+            scene._center_on(100.0, 100.0)                          # камера не на элементе
+            self.assertIsNone(scene.nav_step(+1))
+            self.assertIn("не на элементе", got[-1])
+            scene._center_on(0.0, 0.0); scene._set_focus_at(0.0, 0.0)   # «клик» по Q1
+            win._nav(+1, False)
+            self.assertEqual(tuple(round(v, 9) for v in scene.camera.focal_point[:2]), (1.0, 0.0))   # → C1
+            win._nav(+1, True); win._nav(+1, True)                  # C1 → C1 (единственный COR)
+            self.assertEqual(tuple(round(v, 9) for v in scene.camera.focal_point[:2]), (1.0, 0.0))
+            win._nav(+1, False)                                     # → u1 (центр гребёнки)
+            self.assertEqual(tuple(round(v, 9) for v in scene.camera.focal_point[:2]), (3.0, 0.0))
+            win._nav(+1, True)                                      # Shift+→ — следующий ондулятор
+            self.assertEqual(tuple(round(v, 9) for v in scene.camera.focal_point[:2]), (7.0, 0.0))
+            self.assertIn("ондулятор u2", win.statusBar().currentMessage())
+            win._nav(-1, False)                                     # Ctrl+← — навстречу пучку
+            self.assertEqual(tuple(round(v, 9) for v in scene.camera.focal_point[:2]), (6.0, 0.0))
+            scene.fly_steps = 4                                     # с анимацией — доезжает до цели
+            win._nav(+1, False)                                     # Ctrl+→ B1 → u2 плавным перелётом
+            import time as _t
+            end = _t.time() + 2.0
+            while scene._fly_timer is not None and _t.time() < end:
+                app.processEvents(); _t.sleep(0.01)
+            self.assertEqual(tuple(round(v, 9) for v in scene.camera.focal_point[:2]), (7.0, 0.0))
+            self.assertEqual(len(win._nav_keys), 6)
+        finally:
+            win.close()
+
     def test_subscriber_windows_and_refcount(self):
         try:
             app = self._env()
@@ -3570,6 +3762,68 @@ class TestClientCockpitOffscreen(unittest.TestCase):
         lk.set_screen("screen.S", area=None, res=121, point=(0.3, -0.2))
         ss = [m for m in lk.pull() if m.kind == SET_SCREEN]
         self.assertTrue(ss and ss[0].value.get("point") == (0.3, -0.2))
+
+        sw.bind_link(lk); lk.pull()                                 # переключатель «величина»: поток ↔ мощность
+        self.assertEqual(sw.quantity, "flux")
+        sw.qcmb.setCurrentIndex(1)
+        ss = [m for m in lk.pull() if m.kind == SET_SCREEN]
+        self.assertEqual(ss[-1].value.get("quantity"), "power")
+        sw.on_snapshot(Snapshot(values={"screen.SCR1": {           # кадр мощности: пик и перехват в строке
+            "heatmap": [[0.0, 640.0], [10.0, 5.0]], "extent": [-25, 25, -25, 25], "quantity": "power",
+            "gap": 5.0, "e1": 7.0, "peak": 640.0, "total": 3370.0, "und_W": 2978.0, "bend_W": 392.0, "n_bend": 2}},
+            meta={}))
+        self.assertIn("Вт/мм²", sw.info.text())
+        rt = make_window(sw.to_dict())
+        self.assertEqual(rt.quantity, "power")                      # раскладка помнит величину
+        sw.on_snapshot(Snapshot(values={"screen.SCR1": {"heatmap": [[9.0]], "quantity": "flux"}}, meta={}))
+        self.assertIn("Вт/мм²", sw.info.text())                     # чужой кадр (до пересчёта) не рисуется
+
+        self.assertEqual(sw._heat_value(25.0, 25.0), 5.0)           # значение карты под курсором ([u, v] = (x, y))
+        self.assertIsNone(sw._heat_value(99.0, 0.0))
+        sw.chk_log.setChecked(True)                                 # лог. шкала: цвет по log₁₀, данные — как были
+        self.assertAlmostEqual(float(sw.item.image.max()), np.log10(640.0), places=9)
+        self.assertEqual(sw._heat_value(25.0, 25.0), 5.0)
+        E = np.linspace(1.0, 20.0, 191); F = 1e10 * (1 + 100 * np.exp(-((E - 7.0) / 0.2) ** 2))
+        sw.on_snapshot(Snapshot(values={"screen.SCR1": {"heatmap": [[1.0, 2.0], [3.0, 4.0]], "quantity": "power",
+                                                        "extent": [-1, 1, -1, 1], "spectrum": {"E_keV": E.tolist(),
+                                                                                             "flux": F.tolist()}}},
+                                meta={}))
+        mk = sw._add_mark(7.05)                                     # «к пику»: встаёт на максимум 7.0 кэВ
+        self.assertAlmostEqual(mk["E"], 7.0, places=6)
+        self.assertEqual(sw.marks_tbl.rowCount(), 1)
+        sw.marks_tbl.item(0, 0).setText("E₁")                       # имя правится в таблице → легенда
+        sw.marks_tbl.item(0, 1).setText("12,5")                     # энергия правится (запятая тоже) → вертикаль едет
+        self.assertEqual(mk["name"], "E₁")
+        self.assertAlmostEqual(float(mk["line"].value()), 12.5)
+        sw._add_mark(15.0, snap=False)
+        rt = make_window(sw.to_dict())                              # раскладка помнит лог-шкалу и метки
+        self.assertTrue(rt.log)
+        self.assertEqual([(m["name"], round(m["E"], 6)) for m in rt._marks], [("E₁", 12.5), ("метка 2", 15.0)])
+        sw.marks_tbl.selectRow(0); sw._delete_selected()
+        self.assertEqual([m["name"] for m in sw._marks], ["метка 2"])
+        sw._clear_marks()
+        self.assertEqual(sw.marks_tbl.rowCount(), 0)
+
+        import re                                                   # подписи осей без латинских SI-приставок
+        from client.windows import _plot
+        for units, y, log, want in (("1/м²", [-1.2e-3, 0.0], False, "(×10⁻³ 1/м²)"), ("м", [-2e-5, 1.5e-5], False, "(мкм)"),
+                                    ("ф/с/мрад²/0.1%BW", [1e10, 3e17], True, "(ф/с/мрад²/0.1%BW)"),
+                                    ("", [1e-6, 3e-6], False, "(×10⁻⁶)")):
+            pw = _plot(); pw.resize(400, 300); pw.show()
+            pw.setLabel("left", "q", units=units or None)
+            if log:
+                pw.setLogMode(x=False, y=True)
+            pw.plot([0.0, 1.0], y)
+            self._env().processEvents()
+            self.assertIn(want, re.sub("<[^>]+>", "", pw.getAxis("left").labelString()))
+
+        from client.windows import CurveHover                       # значение под курсором на кривой
+        import pyqtgraph as pg
+        pw = pg.PlotWidget(); cv = pw.plot([1.0, 2.0, 3.0], [10.0, 20.0, 30.0]); pw.resize(400, 300); pw.show()
+        hv = CurveHover(pw, [(cv, "ряд", lambda x: f"x={x:g}", lambda y: f"y={y:g}")])
+        self._env().processEvents()
+        hv._move(pw.getPlotItem().vb.mapViewToScene(pg.Point(2.1, 12.0)))   # ближайшая по x — точка (2, 20)
+        self.assertIn("y=20", hv.text.toHtml())
 
     def test_orientation_noise_and_panel_optics(self):
         """Доп. инфо: углы ориентации прибора (element.*.yaw/pitch/roll), закон+σ шума датчика, и живые
@@ -3909,6 +4163,32 @@ class TestScreenHeatMap(unittest.TestCase):
         self.assertGreater(fp["und_W"], 0.98 * 2977.9)
         self.assertTrue(200.0 < fp["bend_W"] < 600.0, fp["bend_W"])
 
+    def test_live_power_map_for_cockpit(self):
+        """Карта мощности кокпита (gated на БД): экран, которого нет в этой решётке, строится по оси ИД как в
+        сцене; пятно ИД вытянуто по горизонтали; зазор живой (больше зазор — меньше мощность)."""
+        tb = os.path.join(ROOT, "workspace", "tables")
+        if not (os.path.exists(os.path.join(tb, "screens.csv")) and os.path.exists(os.path.join(tb, "element_groups.csv"))):
+            self.skipTest("нет screens.csv/element_groups.csv")
+        cwd = os.getcwd(); os.chdir(ROOT)
+        try:
+            import screen_analysis as sa
+            if "und_01" not in sa.load_groups(26):
+                self.skipTest("нет und_01 в реш.26")
+            gaps = {f"und_{i:02d}": 50.0 for i in range(1, 39)}
+            fp5 = sa.live_power_map(26, "SCR_U01", dict(gaps, und_01=5.0), 161, bends=False)
+            fp8 = sa.live_power_map(26, "SCR_U01", dict(gaps, und_01=8.0), 161, bends=False)
+            self.assertIsNone(sa.live_power_map(26, "SCR_BM08", gaps, 41))   # волноотвод — не ондуляторный экран
+        finally:
+            os.chdir(cwd)
+        self.assertEqual([g for g, _ in fp5["illuminators"]][:1], ["und_01"])
+        self.assertAlmostEqual(fp5["D"], 12.0, delta=1e-6)
+        S = fp5["S"]; m = S.shape[0] // 2                                   # ширина по полувысоте (СКО — хвосты)
+        wu = int((S[:, m] >= S.max() / 2).sum()); wv = int((S[m, :] >= S.max() / 2).sum())
+        self.assertGreater(wu, 2 * wv)                                       # ±K/γ по горизонтали, ~1/γ по вертикали
+        self.assertGreater(fp5["und_W"], 0.98 * self.sr.angular_power_cached(
+            self.sr.K_of_B0(self.sr.B0_of_gap(5.0)))["total_W"])
+        self.assertLess(fp8["peak"], fp5["peak"])
+
     def test_fan_on_orbit_shifts_point_and_tangent(self):
         """Веер по орбите: точка отбора сдвигается на (x, y), касательная поворачивается на (x′, y′)."""
         import electron_source as es
@@ -3954,6 +4234,171 @@ class TestScreenHeatMap(unittest.TestCase):
         self.assertLess(abs(float(np.dot(d1 - d0, v0))), 1e-6)                 # электрон — нет (< 1 мкрад)
 
 
+class TestScreenHeatMapAccurate(unittest.TestCase):
+    """Точный режим тепловой карты (sr_trace): Льенар по траектории против замкнутых форм и быстрого режима."""
+
+    @classmethod
+    def setUpClass(cls):
+        und = os.path.join(ROOT, "undulators")
+        if und not in sys.path:
+            sys.path.insert(0, und)
+        import undulator_sr as sr, sr_trace as st, bend_sr as bsr
+        cls.sr, cls.st, cls.bsr = sr, st, bsr
+        cls.g = sr.gamma()
+
+    @staticmethod
+    def _screen(D, w_m, h_m):
+        return dict(C=np.array([D, 0.0, 0.0]), n=np.array([-1.0, 0.0, 0.0]), u=np.array([0.0, 1.0, 0.0]),
+                    v=np.array([0.0, 0.0, 1.0]), w=w_m * 1e3, h=h_m * 1e3)
+
+    def _map(self, tr, scr, mesh):
+        import screen_analysis as sa
+        hw, hh, UU, VV, cell, pts = sa._grid(scr, mesh)
+        S = self.st.power_on_screen(tr, pts.reshape(-1, 3), scr["n"], self.g, self.sr.P.I).reshape(mesh, mesh)
+        return S, UU, VV, cell, pts
+
+    def _ideal_undulator(self, ppp=32, ends=None):
+        sr = self.sr; p = sr.P
+        kap0 = sr.B0_of_gap(5.0) / (p.E / 0.299792458)
+        n = 2 * p.N
+        sj = (np.arange(n) - (n - 1) / 2.0) * p.lam_u / 2.0
+        a = np.where(np.arange(n) % 2 == 0, 1.0, -1.0)
+        if ends is not None:
+            a[0] *= ends; a[-1] *= ends
+        return self.st.wiggle_trace(np.zeros(3), [1.0, 0, 0], [0, 1.0, 0], sj, a, kap0, p.lam_u, ppp, self.g,
+                                    centered=ends is None), a
+
+    def _module(self, theta=-9.573e-3, L=0.4178, kind="dq"):
+        from build_screens import _rot
+        st = self.st
+        rho, B, ec = self.bsr.bend_geom(theta, L, self.sr.P.E)
+        m = dict(C=np.zeros(3), axis=np.array([1.0, 0, 0]), uhat=np.array([0, 1.0, 0]), vhat=np.array([0, 0, 1.0]),
+                 theta0=theta, rho=rho, B=B, L=L, dev="TEST", iid="1", kind=kind)
+        O = m["C"] + rho * m["uhat"]
+        m.update(O=O, P_in=O + _rot(m["C"] - O, m["vhat"], -theta / 2), P_out=O + _rot(m["C"] - O, m["vhat"], theta / 2),
+                 t_in=st._unit(_rot(m["axis"], m["vhat"], -theta / 2)), t_out=st._unit(_rot(m["axis"], m["vhat"], theta / 2)))
+        return m
+
+    def test_parse_effects(self):
+        st = self.st
+        self.assertEqual(st.parse_effects(None), frozenset(st.EFFECTS))
+        self.assertEqual(st.parse_effects("all,-beam"), frozenset(st.EFFECTS) - {"beam"})
+        self.assertEqual(st.parse_effects("-fringe,-poles"), frozenset({"extended", "beam"}))
+        self.assertEqual(st.parse_effects("extended,poles"), frozenset({"extended", "poles"}))
+        self.assertEqual(st.parse_effects("none"), frozenset())
+        with self.assertRaises(ValueError):
+            st.parse_effects("all,-магия")
+
+    def test_ideal_undulator_matches_lienard_table(self):
+        """N идеальных периодов, далёкий экран: карта ≡ табличный Льенар быстрого режима, интеграл ≡ Лармор."""
+        sr, st = self.sr, self.st
+        K = sr.K_of_B0(sr.B0_of_gap(5.0)); tab = sr.angular_power_cached(K)
+        tr, _ = self._ideal_undulator(ppp=64)
+        D = 50.0
+        scr = self._screen(D, 2 * (K + 8) / self.g * D, 2 * 8 / self.g * D)
+        S, UU, VV, cell, pts = self._map(tr, scr, 81)
+        R = np.linalg.norm(pts, axis=2)
+        Ft = sr.angular_power(tab, pts[..., 1] / R, pts[..., 2] / R) * (D / R) / R ** 2
+        self.assertAlmostEqual(S[40, 40] / Ft[40, 40], 1.0, delta=1e-3)
+        self.assertLess(float(np.max(np.abs(S - Ft))) / float(Ft.max()), 3e-3)
+        P_tr = st.trace_power(tr, self.g, sr.P.I)
+        self.assertAlmostEqual(P_tr / tab["total_W"], 1.0, delta=1e-3)
+        self.assertAlmostEqual(float(S.sum() * cell) / P_tr, 1.0, delta=3e-3)
+        tr2, _ = self._ideal_undulator(ppp=128)                         # сходимость по шагу (дефолт CLI — 64)
+        S2 = self._map(tr2, scr, 81)[0]
+        self.assertLess(float(np.max(np.abs(S2 - S))) / float(S.max()), 1e-5)
+
+    def test_end_poles_scale_power_and_close_trajectory(self):
+        """Концевые полюса половинной силы: мощность ∝ Σa², электрон выходит параллельно входу, средний угол ~0."""
+        st = self.st
+        tr0, a0 = self._ideal_undulator()
+        tr1, a1 = self._ideal_undulator(ends=0.5)
+        r = st.trace_power(tr1, self.g, 0.2) / st.trace_power(tr0, self.g, 0.2)
+        self.assertAlmostEqual(r, float(np.sum(a1 ** 2) / np.sum(a0 ** 2)), delta=1e-4)
+        K_g = self.sr.K_of_B0(self.sr.B0_of_gap(5.0)) / self.g
+        self.assertLess(abs(float(tr1["t"][-1, 1])), 1e-2 * K_g)             # выход ∥ входу (до полушага)
+        self.assertLess(abs(float(np.mean(tr1["t"][:, 1]))), 2e-2 * K_g)     # конус по оси, не на K/γ
+
+    def test_hard_edge_dipole_power_profile_and_exit(self):
+        """Жёсткий диполь: выход = аналитика дуги, мощность = 1,2654·E²B²LI, верт. профиль = power_vprofile."""
+        st, bsr = self.st, self.bsr
+        m = self._module()
+        tr = st.chain_trace([m], self.g, None, fringe=False)
+        self.assertLess(float(np.linalg.norm(tr["exit_t"] - m["t_out"])), 1e-12)
+        self.assertLess(float(np.linalg.norm(tr["exit_r"] - m["P_out"])), 1e-10)
+        P_tr = st.trace_power(tr, self.g, 0.2)
+        self.assertAlmostEqual(P_tr / (bsr.total_power_kW(m["B"], m["L"], 6.0, 0.2) * 1e3 * 1.2654 / 1.266), 1.0, delta=2e-4)
+        D = 10.0
+        scr = self._screen(D, abs(m["theta0"]) * D * 1.6, 30 / self.g * D)
+        S, UU, VV, cell, _ = self._map(tr, scr, 121)
+        self.assertAlmostEqual(float(S.sum() * cell) / P_tr, 1.0, delta=2e-3)
+        vp = S[60, :]; ref = bsr.power_vprofile(VV[60, :] / D, self.g)
+        self.assertLess(float(np.max(np.abs(vp / vp.max() - ref / ref.max()))), 1e-4)
+
+    def test_soft_edge_keeps_bend_angle_and_scales_power(self):
+        """Мягкий край (симметричный профиль, ∫f = L): касательная и линия выхода — как у жёсткого края,
+        мощность ∝ ∫f²ds/L (меньше жёсткой)."""
+        st = self.st
+        m = self._module(kind="dipole")
+        L, w = m["L"], 0.010
+        x = np.linspace(-0.35, 0.35, 7001)
+        f = 0.5 * (np.tanh((x + L / 2) / w) - np.tanh((x - L / 2) / w))
+        cum = np.concatenate([[0.0], np.cumsum(0.5 * (f[1:] + f[:-1]) * np.diff(x))])
+        prof = dict(x=x, f=f, cum=cum, half=float(x[-1]), integral=float(cum[-1]))
+        hard = st.chain_trace([m], self.g, None, fringe=False)
+        soft = st.chain_trace([m], self.g, None, fringe=True, profiles=[prof])
+        self.assertLess(float(np.linalg.norm(soft["exit_t"] - hard["exit_t"])), 1e-12)
+        dr = soft["exit_r"] - hard["exit_r"]
+        self.assertLess(float(np.linalg.norm(dr - np.dot(dr, hard["exit_t"]) * hard["exit_t"])), 1e-7)
+        fs = f * (L / prof["integral"])
+        ratio = float(np.trapezoid(fs ** 2, x) / L)
+        self.assertAlmostEqual(st.trace_power(soft, self.g, 0.2) / st.trace_power(hard, self.g, 0.2), ratio, delta=1e-4)
+        self.assertLess(ratio, 1.0)
+
+    def test_beam_blur_adds_second_moments(self):
+        """Свёртка с пучком: вторые моменты складываются, интеграл сохраняется (FFT-гауссиана, σ и меньше пикселя)."""
+        st = self.st
+        n = 201; d = 2e-5
+        u = (np.arange(n) - n // 2) * d
+        UU, VV = np.meshgrid(u, u, indexing="ij")
+        s0 = 3e-4
+        S = np.exp(-(UU ** 2 + VV ** 2) / (2 * s0 ** 2))
+        for su, sv in ((2e-4, 1e-4), (5e-6, 3e-6)):
+            B = st.gauss_blur(S, np.diag([su ** 2, sv ** 2]), d, d)
+            self.assertAlmostEqual(float(B.sum() / S.sum()), 1.0, delta=1e-6)      # до вытекания за край
+            mu = float((B * UU ** 2).sum() / B.sum()); mv = float((B * VV ** 2).sum() / B.sum())
+            self.assertAlmostEqual(mu / (s0 ** 2 + su ** 2), 1.0, delta=1e-3)
+            self.assertAlmostEqual(mv / (s0 ** 2 + sv ** 2), 1.0, delta=1e-3)
+
+    def test_scr_u01_accurate_vs_fast(self):
+        """Реш.27, SCR_U01 (gated на БД): точный режим находит тот же ИД и обе цепочки соседних диполей; ИД даёт
+        Σa²/2N мощности быстрого (концевые полюса); мягкий край уменьшает мощность вееров."""
+        tb = os.path.join(ROOT, "workspace", "tables")
+        if not (os.path.exists(os.path.join(tb, "screens.csv")) and os.path.exists(os.path.join(tb, "element_groups.csv"))):
+            self.skipTest("нет screens.csv/element_groups.csv")
+        st = self.st
+        cwd = os.getcwd(); os.chdir(ROOT)
+        try:
+            import screen_analysis as sa
+            scr = next((s for s in sa.load_screens(27) if s["sid"] == "SCR_U01"), None)
+            if scr is None:
+                self.skipTest("нет экрана SCR_U01 в реш.27")
+            ctx = st.make_context(27, None, None, 5.0, ppp=32)
+            fp = st.footprint_accurate(scr, ctx, "all,-beam", 61)
+            nof = st.footprint_accurate(scr, ctx, "all,-beam,-fringe", 61)
+            tr = st._und_trace(ctx, "und_01", True)
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(fp["illuminators"], ["und_01"])
+        self.assertEqual(len(fp["chains"]), 2)
+        self.assertEqual(tr["n_poles"], 60)
+        P_tr = st.trace_power(tr, self.g, self.sr.P.I)
+        self.assertAlmostEqual(fp["und_W"] / P_tr, 1.0, delta=1e-2)          # экран ловит весь конус ИД
+        ideal = self.sr.angular_power_cached(self.sr.K_of_B0(self.sr.B0_of_gap(5.0)))["total_W"]
+        self.assertAlmostEqual(P_tr / ideal, tr["sum_a2"] / (2 * self.sr.P.N), delta=2e-3)
+        self.assertLess(fp["bend_W"], nof["bend_W"])
+
+
 import contextlib as _ctx
 
 
@@ -3976,6 +4421,27 @@ def _temp_cavities(rows):
             shutil.move(bak, path)
         elif os.path.exists(path):
             os.remove(path)
+
+
+@_ctx.contextmanager
+def _temp_kick_tables():
+    """Временные строки импульсных кикеров: pulsed_kickers.csv / kicker_timing.csv по выходе как были
+    (не было файла — удаляется)."""
+    import shutil
+    saved = []
+    for n in ("pulsed_kickers.csv", "kicker_timing.csv"):
+        p = os.path.join(mt.TB, n); had = os.path.exists(p)
+        if had:
+            shutil.copy2(p, p + ".testbak")
+        saved.append((p, had))
+    try:
+        yield
+    finally:
+        for p, had in saved:
+            if had:
+                shutil.move(p + ".testbak", p)
+            elif os.path.exists(p):
+                os.remove(p)
 
 
 @_ctx.contextmanager
@@ -4154,6 +4620,157 @@ class TestExplicitPlanes(unittest.TestCase):
         self.assertIn("RFD1: EDRIFT, L=0.5", defs); self.assertIn("RFD2: EDRIFT, L=1.5", defs)
         with self.assertRaises(ValueError):
             ed._splice_rf(["D1", "Q", "D1"], par, dict(volt_mv=1.0, phase_deg=180.0, at_s=[2.2]), 1e8)
+
+
+def _kick_spec(center, normal, **kw):
+    spec = dict(kicker_id="k", center=np.asarray(center, float), normal=np.asarray(normal, float), shape="half_sine",
+                duration=2e-9, rise=0.0, theta_x=0.0, theta_y=0.0, delay=0.0, period=None)
+    spec.update(kw)
+    return spec
+
+
+@unittest.skipUnless(os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")),
+                     "нет lattice_configs.csv — пропуск импульсных кикеров")
+class TestPulsedKickers(unittest.TestCase):
+    """Импульсные кикеры (pulsed_kickers.csv + kicker_timing.csv) — Python-эталон: форма импульса, загрузка и
+    проверки ввода, место на пути (промежуток / старт / финиш), удар по времени прихода частицы, авторинг
+    exp_planes, вставка BUMPER для elegant. C++ ≡ Python и аналитика по Твиссу — test_matrix_core_ring."""
+
+    def test_pulse_shape_and_period(self):
+        import beam_injection as bi
+        D = 2e-9
+        self.assertEqual(bi.pulse_shape("half_sine", D, 0.0, -1e-12), 0.0)
+        self.assertEqual(bi.pulse_shape("half_sine", D, 0.0, 1.001 * D), 0.0)
+        self.assertAlmostEqual(bi.pulse_shape("half_sine", D, 0.0, D / 2), 1.0, places=15)
+        self.assertAlmostEqual(bi.pulse_shape("half_sine", D, 0.0, D / 6), 0.5, places=12)
+        self.assertAlmostEqual(bi.pulse_shape("trapezoid", 4e-9, 1e-9, 0.5e-9), 0.5, places=12)
+        self.assertEqual(bi.pulse_shape("trapezoid", 4e-9, 1e-9, 2e-9), 1.0)
+        self.assertAlmostEqual(bi.pulse_shape("trapezoid", 4e-9, 1e-9, 3.75e-9), 0.25, places=12)
+        self.assertEqual(bi.pulse_shape("trapezoid", 4e-9, 0.0, 1e-9), 1.0)          # фронт 0 — прямоугольник
+        k = bi.KickerNode(np.zeros(3), np.array([1.0, 0.0, 0.0]),
+                          _kick_spec(np.zeros(3), (1, 0, 0), theta_x=1e-3, theta_y=-2e-3, delay=1e-6, period=1e-6))
+        T = lambda sec: sec * bi.C                                                     # время, с → c·t, м
+        self.assertEqual(k.amplitude(T(0.5e-6)), 0.0)                                  # до задержки — 0
+        self.assertAlmostEqual(k.amplitude(T(1e-6 + D / 2)), 1.0, places=9)
+        self.assertAlmostEqual(k.amplitude(T(5e-6 + D / 2)), 1.0, places=6)            # период повторяет импульс
+        self.assertEqual(k.amplitude(T(5.5e-6)), 0.0)                                  # между импульсами
+        st = k.kick((1e-3, 2e-4, 0.0, 0.0, 0.3, 1e-3), T(1e-6 + D / 6))
+        self.assertAlmostEqual(st[1], 2e-4 + 0.5e-3, places=12); self.assertAlmostEqual(st[3], -1e-3, places=12)
+        self.assertEqual((st[0], st[2], st[4], st[5]), (1e-3, 0.0, 0.3, 1e-3))         # x, y, t, δ — не трогает
+
+    def test_load_and_validation(self):
+        import beam_injection as bi
+        import exp_planes as ep
+        pl = _mid_gap_plane(3, 0.5, 0.1)[0]
+        with _temp_kick_tables():
+            self.assertEqual(bi.load_kickers(3, 3), [])                                # нет таблиц — нет кикеров
+            kid = ep.write_kicker(3, pl, 2e-9, note="тест")
+            self.assertEqual(bi.load_kickers(3, 3), [])                                # без импульса не стреляет
+            ep.write_timing(3, kid, 1e-4, 0.0, 1e-8)
+            kk = bi.load_kickers(3, 3)
+            self.assertEqual((len(kk), kk[0]["shape"], kk[0]["theta_x"], kk[0]["period"]), (1, "half_sine", 1e-4, None))
+            ep.write_timing(3, kid, 2e-4, 0.0, 2e-8, add=True)
+            self.assertEqual(len(bi.load_kickers(3, 3)), 2)                            # два импульса одного кикера
+            ep.write_timing(3, kid, 1e-4, 0.0, 0.0, period=1e-9)
+            with self.assertRaises(ValueError):
+                bi.load_kickers(3, 3)                                                  # период короче импульса
+            with self.assertRaises(ValueError):
+                ep.write_kicker(3, pl, 2e-9, shape="gauss")
+            with self.assertRaises(ValueError):
+                ep.write_kicker(3, pl, 4e-9, shape="trapezoid", rise=3e-9)             # 2·rise > duration
+            with self.assertRaises(ValueError):
+                ep.write_timing(3, 999, 1e-4)                                          # кикера нет у решётки
+
+    def test_place_on_path(self):
+        import beam_injection as bi
+        import exp_planes as ep
+        st, fin = bi.planes_of(bi.experiment_row(3))
+        mid = _mid_gap_plane(3, 0.5, 0.1)[0]
+        path = bi.build_path(ep._mags(3), st, fin, kickers=[_kick_spec(*fin, kicker_id="f"),
+                                                             _kick_spec(*st, kicker_id="s"), _kick_spec(*mid)])
+        self.assertEqual([k.kicker_id for k in path["kick_end"]], ["f"])              # финиш — конец пролёта
+        self.assertEqual([k.kicker_id for k in path["kick_begin"]], ["s"])            # старт линии — начало
+        self.assertEqual(len(path["kickers"]), 1)
+        self.assertEqual(path["kick_end"][0].s_k, path["line_len"]); self.assertEqual(path["kick_begin"][0].s_k, 0.0)
+        self.assertTrue(0.0 < path["kickers"][0].s_k < path["line_len"])
+        self.assertIn(path["kickers"][0], path["ordered"])
+        st26, _ = bi.planes_of(bi.experiment_row(26))
+        p26 = bi.build_path(ep._mags(26), st26, None, kickers=[_kick_spec(*st26)])
+        self.assertEqual((len(p26["kick_end"]), p26["kick_begin"]), (1, []))           # кольцо: старт = конец пролёта
+
+    def test_kick_by_arrival_time(self):
+        """Δpx на узле = θ·f(τ), τ = T/c − delay, T = ct + Δt_raw/β0 — у каждой частицы по своему времени прихода."""
+        import io
+        import beam_injection as bi
+        import exp_planes as ep
+        import matrix_traj_export as mte
+        D, TH = 2e-9, 1e-4
+        states = [(0, 0, 0, 0, 0.0, 0), (0, 0, 0, 0, 0.15, 0), (0, 0, 0, 0, -0.25, 0)]
+        with _temp_kick_tables():
+            kid = ep.write_kicker(3, _mid_gap_plane(3, 0.5, 0.1)[0], D, note="тест")
+            delay = ep.reference_time(3, kid, 0) - D / 2
+            ep.write_timing(3, kid, TH, 0.0, delay)
+            with _ctx.redirect_stdout(io.StringIO()):
+                d = mte.local_trajectories(3, 1, n_turns=1, exp_id=3, states_override=states)
+        ki = d["elem_names"].index(f"PULSE_KICKER_{kid}")
+        beta0 = 6000.0 / math.hypot(6000.0, mte.MC2_MEV)
+        fs = []
+        for st0, L in zip(states, d["locals"]):
+            ent, ext = L[L[:, 7] == ki]
+            T = st0[4] + (ent[5] - st0[4]) / beta0
+            f = bi.pulse_shape("half_sine", D, 0.0, T / bi.C - delay)
+            self.assertAlmostEqual(ext[2] - ent[2], TH * f, delta=1e-15)               # px: удар θ·f(τ)
+            self.assertEqual((ext[1], ext[3], ext[4], ext[5]), (ent[1], ent[3], ent[4], ent[5]))
+            fs.append(f)
+        self.assertGreater(fs[0], 0.999999)                                            # опорная — на пике
+        self.assertLess(fs[1], 0.75); self.assertLess(fs[2], 0.75)                     # раньше/позже — слабее
+
+    def test_exp_planes_kicker_authoring(self):
+        import io
+        import beam_injection as bi
+        import exp_planes as ep
+        with _temp_kick_tables():
+            kid = ep.write_kicker(3, _mid_gap_plane(3, 0.5, 0.1)[0], 3e-9, "trapezoid", 1e-9, note="тест")
+            self.assertEqual(ep.kicker_row(3, kid)["shape"], "trapezoid")
+            t0, t1 = ep.reference_time(3, kid, 0), ep.reference_time(3, kid, 1)
+            beta0 = 6000.0 / math.hypot(6000.0, ep.MC2_MEV)
+            L = bi.inject(3, 1, exp_id=3)[3]["line_len"]
+            self.assertAlmostEqual((t1 - t0) * bi.C, L / beta0, places=9)              # без ВЧ: пролёт = L/β0
+            ep.write_timing(3, kid, 1e-4, 0.0, t0)
+            out = io.StringIO()
+            with _ctx.redirect_stdout(out):
+                ep.show(3)
+            self.assertIn("кикер : " + str(kid), out.getvalue())
+            ep.remove_timing(3, kid)
+            self.assertEqual(bi.load_kickers(3, 3), [])
+            with self.assertRaises(ValueError):
+                ep.remove_timing(3, kid)
+            ep.remove_kicker(3, kid)
+            with self.assertRaises(ValueError):
+                ep.kicker_row(3, kid)
+
+    def test_elegant_splice_kicker(self):
+        import elegant_diag as ed
+        par = {"D1": {"type": "EDRIFT", "L": 2.0}, "Q": {"type": "KQUAD", "L": 0.5}}
+        kk = [dict(at_s=0.5, theta_x=1e-3, theta_y=0.0, shape="half_sine", duration=2e-9, time_offset=1e-9),
+              dict(at_s=3.0, theta_x=0.0, theta_y=2e-3, shape="trapezoid", duration=4e-9, rise=1e-9, period=1e-6)]
+        try:
+            names, defs = ed._splice_rf(["D1", "Q", "D1"], par, dict(volt_mv=1.0, phase_deg=180.0, at_s=[0.5]), 1e8, kk)
+            self.assertEqual(names, ["RFD1", "RFC0", "PK0", "RFD2", "Q", "RFD3", "PK1", "RFD4"])
+            self.assertIn("RFD2: EDRIFT, L=1.5", defs); self.assertIn("RFD3: EDRIFT, L=0.5", defs)
+            pk = {d.split(":")[0]: d for d in defs if ": BUMPER" in d}
+            self.assertIn("ANGLE=0.001,", pk["PK0"]); self.assertIn("TILT=0,", pk["PK0"])
+            self.assertIn("TIME_OFFSET=1.0000000000000001e-09", pk["PK0"]); self.assertIn("PERIODIC=0", pk["PK0"])
+            self.assertIn(f"TILT={math.pi / 2:.17g}", pk["PK1"]); self.assertIn("PERIODIC=1", pk["PK1"])
+            with open(os.path.join(ed.DIAG, "PK1_wf.sdds"), encoding="ascii") as f:
+                rows = [ln.split() for ln in f.read().splitlines()[6:]]
+            self.assertEqual(len(rows), 4002)                                          # импульс + нули до периода
+            self.assertEqual((float(rows[-1][0]), float(rows[-1][1])), (1e-6, 0.0))
+        finally:
+            for n in ("PK0_wf.sdds", "PK1_wf.sdds"):
+                p = os.path.join(ed.DIAG, n)
+                if os.path.exists(p):
+                    os.remove(p)
 
 
 if __name__ == "__main__":

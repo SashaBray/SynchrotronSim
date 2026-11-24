@@ -137,7 +137,7 @@ def perturbed_workspace(lattice, seed, tol, out_dir, cutoff=2.5):
     os.makedirs(dst_tb, exist_ok=True)
     with open(os.path.join(dst_tb, "lattice_configs.csv"), "w", encoding="utf-8", newline="") as f:
         csv.writer(f, delimiter=";").writerows(rows)
-    for t2 in ("element_connectivity.csv", "particle_groups.csv", "rf_cavities.csv"):
+    for t2 in ("element_connectivity.csv", "particle_groups.csv", "rf_cavities.csv", "pulsed_kickers.csv", "kicker_timing.csv"):
         if os.path.exists(os.path.join(TB, t2)):              # rf_cavities.csv может отсутствовать — нет резонаторов
             shutil.copyfile(os.path.join(TB, t2), os.path.join(dst_tb, t2))
     with open(os.path.join(dst_tb, "errors_truth.csv"), "w", encoding="utf-8", newline="") as f:   # эталон для валидации

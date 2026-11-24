@@ -77,6 +77,10 @@ class RfFrequencyLoop(IntegralSVD):
         super().reset()
         self._buf.clear()
 
+    def track(self, contribution):
+        super().track(contribution)
+        self._buf.clear()                                   # старые измерения до выключения — не усреднять
+
     def provides(self):
         return ObsContribution(observables={self.sensor: _rf_delta},
                                intermediates={"rf_eta_bpm": _b_eta_bpm})

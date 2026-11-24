@@ -332,6 +332,54 @@ class SineRF:
         return (x, px, y, py, t, d)
 
 
+class KickClock:
+    """Часы импульсных кикеров (beam_injection.KickerNode) — АБСОЛЮТНОЕ время опыта T (c·t, м) с момента, когда
+    опорная частица пересекла старт на пролёте 0; начально T = ct частицы. Внутри пролёта T = T0 + Σ Δt_raw/β(δ)
+    по отрезкам между узлами-событиями (кикеры и резонаторы; β по δ в конце отрезка, до кика резонатора), в конце
+    пролёта — плюс остаток; портал мгновенный. β — по проектной энергии опыта (та же конвенция, что SineRF), поэтому
+    с sine T = n·C_RF + t: кикер синхронен ВЧ. Отдельны от часов ВЧ — ВЧ не трогают. C++ — mc::KickClock."""
+
+    def __init__(self, design_mev):
+        self.design = float(design_mev or 6000.0)
+        self.T0 = 0.0; self.raw = 0.0; self.acc = 0.0
+
+    def beta(self, d):
+        pc = self.design * (1.0 + d)
+        return pc / math.sqrt(pc * pc + MC2_MEV * MC2_MEV)
+
+    def start(self, st, T0):
+        self.T0 = T0; self.raw = st[4]; self.acc = 0.0
+
+    def advance(self, st):
+        """Узел-событие: отрезок до него → T в узле."""
+        self.acc = self.acc + (st[4] - self.raw) / self.beta(st[5]); self.raw = st[4]
+        return self.T0 + self.acc
+
+    def end(self, st):
+        """Конец пролёта (до ВЧ) → T в плоскости финиша = T старта следующего пролёта."""
+        return self.T0 + (self.acc + (st[4] - self.raw) / self.beta(st[5]))
+
+
+def _kick_setup(info):
+    """(clock|None, kick_begin, kick_end, сводка) импульсных кикеров опыта из info beam_injection.inject(kick=True)."""
+    on = list(info.get("kickers") or []); kb = list(info.get("kick_begin") or []); ke = list(info.get("kick_end") or [])
+    if not (on or kb or ke):
+        return None, [], [], []
+    rad = mt.load_radiation(info.get("exp_id"))
+    clock = KickClock(rad["design_mev"] if rad else 6000.0)
+    summary = [(k.kicker_id, k.s_k, k.theta_x, k.theta_y, k.delay) for k in kb + on + ke]
+    return clock, kb, ke, summary
+
+
+def _event(m, st, clock):
+    """Узел пути после body: у импульсного кикера — удар по абсолютному времени (часы двигаются на всех узлах)."""
+    if clock is not None and (getattr(m, "is_kicker", False) or getattr(m, "is_cavity", False)):
+        T = clock.advance(st)
+        if m.is_kicker:
+            st = m.kick(st, T)
+    return st
+
+
 def local_trajectories(lattice, group, source="physical", settings=None, n_turns=1, target=30000,
                        states_override=None, exp_id=None):
     """ЛОКАЛЬНЫЕ координаты СЕКТОРНОЙ модели (m.body при SS_SECTOR=1; x = отклонение от ОПОРНОЙ ОРБИТЫ,
@@ -349,10 +397,12 @@ def local_trajectories(lattice, group, source="physical", settings=None, n_turns
     ~сотни мм), а не бетатрон от опорной орбиты. Поэтому трекаем через m.body()+modified_drift (сектор).
     Требует SS_SECTOR=1 (иначе m.body() = боксовая модель — предупреждение в вызывающем коде)."""
     import beam_injection as bi
-    plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings, exp_id=exp_id)
+    plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings, exp_id=exp_id,
+                                             kick=True)
     if states_override is not None:
         states = [tuple(map(float, s)) for s in states_override]   # произвольные частицы вместо пучка группы
     finish = info["finish"]; closed = bool(info["closed"])
+    clock, kick_begin, kick_end, kick_summary = _kick_setup(info)   # импульсные кикеры опыта (нет — None)
     gap_in = float((ordered[0].fr_in[0] - plane.fr_out[0]) @ plane.fr_out[1])
     ord_gaps = [float((ordered[j].fr_in[0] - ordered[j - 1].fr_out[0]) @ ordered[j - 1].fr_out[1])
                 for j in range(1, len(ordered))]
@@ -371,21 +421,29 @@ def local_trajectories(lattice, group, source="physical", settings=None, n_turns
     n_turns = max(1, int(n_turns))
     locals_all = []; globals_all = []; surv_turns = []
     for st0 in states:
-        st = tuple(map(float, st0)); done = 0
+        st = tuple(map(float, st0)); done = 0; T = st[4]          # T — абсолютное время опыта (часы кикеров)
         loc = [(0.0, st[0], st[1], st[2], st[3], st[4], st[5], 0)]; glo = [gp(plane.fr_out, st[0], st[2])]
         try:
             for turn in range(n_turns):
                 base = turn * ring_len
+                if clock is not None:                            # начало пролёта: кикеры в старте разомкнутой линии
+                    clock.start(st, T)
+                    for k in kick_begin:
+                        st = k.kick(st, T)
                 st = mt.modified_drift(st, plane, ordered[0])
                 loc.append((base + entry_arc[0], st[0], st[1], st[2], st[3], st[4], st[5], 1)); glo.append(gp(ordered[0].fr_in, st[0], st[2]))
-                st = ordered[0].body(st)
+                st = _event(ordered[0], ordered[0].body(st), clock)
                 loc.append((base + entry_arc[0] + ordered[0].L, st[0], st[1], st[2], st[3], st[4], st[5], 1)); glo.append(gp(ordered[0].fr_out, st[0], st[2]))
                 for j in range(1, len(ordered)):
                     st = mt.modified_drift(st, ordered[j - 1], ordered[j])
                     loc.append((base + entry_arc[j], st[0], st[1], st[2], st[3], st[4], st[5], j + 1)); glo.append(gp(ordered[j].fr_in, st[0], st[2]))
-                    st = ordered[j].body(st)
+                    st = _event(ordered[j], ordered[j].body(st), clock)
                     loc.append((base + entry_arc[j] + ordered[j].L, st[0], st[1], st[2], st[3], st[4], st[5], j + 1)); glo.append(gp(ordered[j].fr_out, st[0], st[2]))
                 st = mt.modified_drift(st, ordered[-1], finish)   # → финиш (кольцо: = старт; иначе портал на старт)
+                if clock is not None:                            # конец пролёта: кикеры в плоскости финиша
+                    T = clock.end(st)
+                    for k in kick_end:
+                        st = k.kick(st, T)
                 loc.append((base + ring_len, st[0], st[1], st[2], st[3], st[4], st[5], fin_idx)); glo.append(gp(finish.fr_in, st[0], st[2]))
                 done = turn + 1
         except mt.ParticleLost:
@@ -396,7 +454,7 @@ def local_trajectories(lattice, group, source="physical", settings=None, n_turns
         locals_all.append(L); globals_all.append(G); surv_turns.append(done)
     return dict(mode="full", locals=locals_all, globals=globals_all, surv_turns=surv_turns, n_turns=n_turns,
                 elem_names=elem_names, closed=closed, ring_len=ring_len, lattice=lattice, group=group,
-                **_radiation_meta())
+                kickers=kick_summary, **_radiation_meta())
 
 
 def long_trajectories(lattice, group, source="physical", settings=None, n_turns=1000, states_override=None, rf=None,
@@ -414,13 +472,15 @@ def long_trajectories(lattice, group, source="physical", settings=None, n_turns=
 
     Резонаторы — плоскости установки на пути (rf_cavities.csv, beam_injection.CavityNode); у решётки без них —
     один резонатор в конце пролёта (как всегда). ideal на резонаторе: δ ← заданное δ (mt.ideal_delta).
-    Разомкнутая линия: оборот = пролёт старт → финиш, дальше ПОРТАЛ (состояние финиша — на старт)."""
+    Разомкнутая линия: оборот = пролёт старт → финиш, дальше ПОРТАЛ (состояние финиша — на старт).
+    Импульсные кикеры опыта (kicker_timing.csv, beam_injection.KickerNode) бьют по абсолютному времени KickClock;
+    в результате — kickers [(id, s_k, θx, θy, delay)]."""
     import beam_injection as bi
     d_ideal = mt.ideal_delta(rf)                               # δ после идеального резонатора (None — не ideal)
     is_sine = isinstance(rf, dict) and rf.get("type", "sine") == "sine"
     use_rf = d_ideal is not None or is_sine
     plane, ordered, states, info = bi.inject(lattice, group, source=source, settings=settings, exp_id=exp_id,
-                                             rf=use_rf)
+                                             rf=use_rf, kick=True)
     if states_override is not None:
         states = [tuple(map(float, s)) for s in states_override]
     finish = info["finish"]; closed = bool(info["closed"])
@@ -428,11 +488,13 @@ def long_trajectories(lattice, group, source="physical", settings=None, n_turns=
     end_share = info.get("end_share")
     has_cav = bool(info.get("cavities"))
     n_turns = max(1, int(n_turns))
+    clock, kick_begin, kick_end, kick_summary = _kick_setup(info)   # импульсные кикеры опыта (нет — None)
 
-    def one_turn(st, hook=None):                               # старт → путь → финиш (hook — кик резонатора)
-        prev = plane
+    def one_turn(st, hook=None, clock=None):                   # старт → путь → финиш (hook — кик резонатора,
+        prev = plane                                           # clock — часы импульсных кикеров)
         for m in ordered:
             st = mt.modified_drift(st, prev, m); st = m.body(st)
+            st = _event(m, st, clock)
             if hook is not None and getattr(m, "is_cavity", False):
                 st = hook(m, st)
             prev = m
@@ -444,7 +506,7 @@ def long_trajectories(lattice, group, source="physical", settings=None, n_turns=
                       end_share=end_share)
     tt_all = []; surv_turns = []; finals = []
     for st0 in states:
-        st = tuple(map(float, st0)); done = 0
+        st = tuple(map(float, st0)); done = 0; T = st[4]          # T — абсолютное время опыта (часы кикеров)
         tt = [(st[0], st[1], st[2], st[3])]                     # состояние у плоскости на старте
         if d_ideal is not None:
             hook = (lambda m, s: (s[0], s[1], s[2], s[3], s[4], d_ideal)) if has_cav else None
@@ -455,7 +517,15 @@ def long_trajectories(lattice, group, source="physical", settings=None, n_turns=
                 t0 = st[4]                                     # t в начале оборота (часы ВЧ)
                 if sine is not None:
                     sine.start(t0)
-                st = one_turn(st, hook)
+                if clock is not None:                          # начало пролёта: кикеры в старте разомкнутой линии
+                    clock.start(st, T)
+                    for k in kick_begin:
+                        st = k.kick(st, T)
+                st = one_turn(st, hook, clock)
+                if clock is not None:                          # конец пролёта (до ВЧ): кикеры в плоскости финиша
+                    T = clock.end(st)
+                    for k in kick_end:
+                        st = k.kick(st, T)
                 if d_ideal is not None:                        # ВЧ в конце пролёта: заданная энергия
                     if end_share:
                         st = (st[0], st[1], st[2], st[3], st[4], d_ideal)
@@ -470,7 +540,7 @@ def long_trajectories(lattice, group, source="physical", settings=None, n_turns=
                 rf_phase_rad=(sine.phase if sine is not None else None),
                 elem_names=["плоскость инжекции"] + [m.dev for m in ordered], closed=closed,
                 cavities=[(c.cavity_id, c.s_c, c.share) for c in info.get("cavities", [])], end_share=end_share,
-                ring_len=ring_len, lattice=lattice, group=group, **_radiation_meta(rf))
+                kickers=kick_summary, ring_len=ring_len, lattice=lattice, group=group, **_radiation_meta(rf))
 
 
 def write_bin(particles_pts, path):

@@ -134,6 +134,21 @@ class ScreenRecorder(Recorder):
         return {"E_keV": np.asarray(Es, float), "flux": np.asarray(flux, float),
                 "u_mm": float(u), "v_mm": float(v), "E1_keV": E1}
 
+    def point_spectrum(self, gap_mm, D=None):
+        """Спектр в выбранной точке экрана при зазоре gap_mm (одноэлектрон + смаз пучком); None — не посчитать."""
+        import sys
+        sys.path.insert(0, os.path.join(_ROOT, "undulators"))
+        import undulator_sr as sr
+        from undulator_field import trajectory, calibrate
+        from screen_spectrum import beam_params
+        D = self._screen_dist(self.params) if D is None else D
+        K = sr.K_of_B0(sr.B0_of_gap(gap_mm))
+        try:
+            tr = trajectory(K, sr.P.lam_u, sr.P.N, sr.gamma(), 64); scale, _ = calibrate(tr)
+            return self.spectrum_at(tr, scale, beam_params(sr.P, BETA_X, BETA_Y, sr.P.kappa, sr.P.sig_E), D, K)
+        except Exception:
+            return None
+
     def sample(self, state, widx, plant):
         px = state.observables.get("photon.x"); py = state.observables.get("photon.y")
         if px is not None and py is not None and len(np.ravel(px)):
@@ -215,12 +230,7 @@ class ScreenRecorder(Recorder):
         else:
             Imeas, pk_m, _, _, _ = pattern_at(gap_end, jx, jy)           # измеренный (джиттер) при конечном зазоре
 
-        Kend = sr.K_of_B0(sr.B0_of_gap(gap_end))                          # спектр в выбранной точке (конечный зазор)
-        try:
-            tr_e = trajectory(Kend, sr.P.lam_u, sr.P.N, g, 64); scale_e, _ = calibrate(tr_e)
-            spec = self.spectrum_at(tr_e, scale_e, beam0, D, Kend)
-        except Exception:
-            spec = None
+        spec = self.point_spectrum(gap_end, D)                            # спектр в выбранной точке (конечный зазор)
 
         series = np.asarray([[w, gp, e1_of(gp)] for w, gp in self._gapser], float) if self._gapser \
             else np.zeros((0, 3))

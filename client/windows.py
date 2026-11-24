@@ -20,8 +20,10 @@ from typing import Dict, List, Optional
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal, QRectF
-from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
-                               QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget)
+from PySide6.QtGui import QPainterPath
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+                               QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QPushButton, QSpinBox,
+                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from . import addresses as A
 
@@ -54,16 +56,145 @@ def _colormap(name="inferno"):
 
 
 def _export_png(plotwidget, suggested):
-    """Сохранить график/карту в PNG через диалог. Возврат — путь или ''."""
-    path, _ = QFileDialog.getSaveFileName(plotwidget, "Сохранить график", suggested, "PNG (*.png)")
+    """Сохранить график/карту через диалог: PNG (растр) или SVG (вектор — кривые и подписи остаются линиями и
+    текстом; тепловая карта внутри SVG — картинкой). Формат — по выбранному фильтру/расширению. Возврат — путь или ''."""
+    path, flt = QFileDialog.getSaveFileName(plotwidget, "Сохранить график", suggested,
+                                            "PNG (*.png);;SVG — вектор (*.svg)")
     if path:
+        if "svg" in (flt or "").lower() and not path.lower().endswith(".svg"):
+            path = path.rsplit(".", 1)[0] + ".svg"
         try:
-            from pyqtgraph.exporters import ImageExporter
+            from pyqtgraph.exporters import ImageExporter, SVGExporter
             item = plotwidget.getPlotItem() if hasattr(plotwidget, "getPlotItem") else plotwidget.scene()
-            ImageExporter(item).export(path)
+            (SVGExporter if path.lower().endswith(".svg") else ImageExporter)(item).export(path)
         except Exception:
             return ""
     return path or ""
+
+
+def _thin_cross() -> QPainterPath:
+    """Символ «тонкое перекрестье»: две линии без заливки (штатный «+» pyqtgraph — толстый залитый крест)."""
+    path = QPainterPath()
+    path.moveTo(-0.5, 0.0); path.lineTo(0.5, 0.0)
+    path.moveTo(0.0, -0.5); path.lineTo(0.0, 0.5)
+    return path
+
+
+_SI_POW = {"y": -24, "z": -21, "a": -18, "f": -15, "p": -12, "n": -9, "µ": -6, "u": -6, "m": -3,
+           "k": 3, "M": 6, "G": 9, "T": 12, "P": 15, "E": 18, "Z": 21, "Y": 24}
+_RU_PREFIX = {-12: "п", -9: "н", -6: "мк", -3: "м", 3: "к", 6: "М", 9: "Г", 12: "Т"}
+_BASE_UNITS = {"м", "с", "рад", "Гц", "Вт", "А", "В", "Т", "эВ", "Дж", "Па", "К", "Гс"}   # можно приставку
+_SUP = str.maketrans("-0123456789", "⁻⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+
+class SciAxis(pg.AxisItem):
+    """Ось без латинской SI-приставки перед русскими единицами (pyqtgraph писал «m1/м²», «Еф/с/…», «µм» — читается
+    как другие единицы). Простая единица (м, с, рад…) — русская приставка: мс, мкм, мрад; составная или уже с
+    приставкой — множитель: «×10⁻³ 1/м²». Лог-ось — без множителя (деления подписаны абсолютными степенями)."""
+
+    def updateAutoSIPrefix(self):
+        super().updateAutoSIPrefix()
+        if self.logMode:
+            self.autoSIPrefixScale, self.labelUnitPrefix = 1.0, ""
+        else:
+            p = _SI_POW.get(self.labelUnitPrefix)
+            if p:
+                if self.labelUnits in _BASE_UNITS and p in _RU_PREFIX:
+                    self.labelUnitPrefix = _RU_PREFIX[p]
+                else:
+                    self.labelUnitPrefix = "×10" + str(p).translate(_SUP) + (" " if self.labelUnits else "")
+        self._updateLabel()
+
+    def labelString(self) -> str:
+        s = super().labelString()
+        if self.labelUnits == "" and self.autoSIPrefix and self.autoSIPrefixScale not in (0.0, 1.0):
+            p = int(round(-np.log10(self.autoSIPrefixScale)))       # безразмерная: «(×10⁻⁶)» вместо «(x1e-06)»
+            s = s.replace(f"(x{1.0 / self.autoSIPrefixScale:g})", "(×10" + str(p).translate(_SUP) + ")")
+        return s
+
+
+def _plot() -> "pg.PlotWidget":
+    """PlotWidget клиента с осями SciAxis (подписи единиц без латинских приставок)."""
+    return pg.PlotWidget(axisItems={"left": SciAxis("left"), "bottom": SciAxis("bottom")})
+
+
+def _place_tip(tip, vb, x, y) -> None:
+    """Подсказка у точки (x, y) в координатах вида, развёрнутая внутрь графика (не обрезается краем)."""
+    (x0, x1), (y0, y1) = vb.viewRange()
+    tip.setAnchor((1 if x > 0.5 * (x0 + x1) else 0, 0 if y > 0.5 * (y0 + y1) else 1))
+    tip.setPos(x, y)
+
+
+def _fmt_num(v) -> str:
+    v = float(v)
+    return f"{v:.4g}" if 1e-3 <= abs(v) < 1e5 or v == 0 else f"{v:.3e}"
+
+
+class CurveHover:
+    """Значение под курсором для кривых pyqtgraph: ближайшая точка данных (mode="x" — по оси x, для рядов
+    во времени и спектров; "xy" — по расстоянию на экране, для траекторий) подсвечивается кружком, рядом —
+    подсказка с подписью и значениями. Лог-оси учитываются (данные берутся исходные, не логарифмы).
+    curves — функция → [(PlotDataItem, подпись, fmt_x, fmt_y)], чтобы набор кривых мог меняться."""
+
+    def __init__(self, plot, curves, mode="x"):
+        self.pi = plot.getPlotItem(); self.vb = self.pi.vb
+        self.curves = curves if callable(curves) else (lambda: curves)
+        self.mode = mode
+        self.text = pg.TextItem(anchor=(0, 1), color="#111", fill=pg.mkBrush(255, 255, 255, 225),
+                                border=pg.mkPen("#888"))
+        self.dot = pg.PlotDataItem([], [], pen=None, symbol="o", symbolSize=9, symbolBrush=None,
+                                   symbolPen=pg.mkPen("#111", width=1.5))
+        for it, z in ((self.dot, 900), (self.text, 1000)):
+            it.setZValue(z)
+            self.pi.addItem(it, ignoreBounds=True)
+        self.text.hide()
+        plot.scene().sigMouseMoved.connect(self._move)
+
+    def _log(self):
+        try:
+            return bool(self.pi.ctrl.logXCheck.isChecked()), bool(self.pi.ctrl.logYCheck.isChecked())
+        except Exception:
+            return False, False
+
+    def hide(self):
+        self.text.hide(); self.dot.setData([], [])
+
+    def _move(self, pos):
+        if not self.vb.sceneBoundingRect().contains(pos):
+            self.hide()
+            return
+        p = self.vb.mapSceneToView(pos)
+        pw, ph = self.vb.viewPixelSize()
+        lx, ly = self._log()
+        best = None
+        for curve, label, fx, fy in self.curves():
+            x, y = curve.getOriginalDataset()
+            if x is None or y is None or len(x) == 0:
+                continue
+            x = np.asarray(x, float); y = np.asarray(y, float)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                xd = np.log10(x) if lx else x
+                yd = np.log10(np.clip(y, 1e-300, None)) if ly else y
+            ok = np.isfinite(xd) & np.isfinite(yd)
+            if not ok.any():
+                continue
+            dx = (xd - p.x()) / (pw or 1.0); dy = (yd - p.y()) / (ph or 1.0)
+            if self.mode == "x":
+                i = int(np.nanargmin(np.where(ok, np.abs(dx), np.inf)))
+                d = abs(dx[i]) * 1e3 + abs(dy[i])                     # сначала по x, потом ближайшая по y кривая
+            else:
+                d2 = np.where(ok, dx * dx + dy * dy, np.inf); i = int(np.argmin(d2)); d = float(d2[i])
+            if best is None or d < best[0]:
+                best = (d, x[i], y[i], xd[i], yd[i], label, fx, fy)
+        if best is None:
+            self.hide()
+            return
+        _, x, y, xd, yd, label, fx, fy = best
+        self.dot.setData([x], [y])
+        head = f"<b>{label}</b><br>" if label else ""
+        self.text.setHtml(f'<div style="font-size:9pt">{head}{fx(x)}<br>{fy(y)}</div>')
+        _place_tip(self.text, self.vb, xd, yd)
+        self.text.show()
 
 
 def _save_button(plotwidget, name):
@@ -144,7 +275,7 @@ class GraphWindow(SubscriberWindow):
         self._t = deque(maxlen=self.history)
         self._y = deque(maxlen=self.history)
 
-        self.plot = pg.PlotWidget()
+        self.plot = _plot()
         self.plot.setTitle(m.name)
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         self.plot.setLabel("left", m.name, units=m.units or None)
@@ -152,6 +283,8 @@ class GraphWindow(SubscriberWindow):
         self.plot.setDownsampling(mode="peak")          # лёгкий рендер длинной истории
         self.plot.setClipToView(True)
         self.curve = self.plot.plot(pen=pg.mkPen(self.color, width=2))
+        self._hover = CurveHover(self.plot, [(self.curve, m.name, lambda t: f"t = {_fmt_num(t)} с",
+                                              lambda v, u=m.units: f"{_fmt_num(v)} {u or ''}")], mode="x")
 
         ctl = QHBoxLayout()
         ctl.addWidget(QLabel("история"))
@@ -199,7 +332,7 @@ class PointWindow(SubscriberWindow):
         self._x = deque(maxlen=self.trail)
         self._y = deque(maxlen=self.trail)
 
-        self.plot = pg.PlotWidget()
+        self.plot = _plot()
         self.plot.setTitle(f"{A.meta(x_addr).name} × {A.meta(y_addr).name}")
         self.plot.showGrid(x=True, y=True, alpha=0.25)
         self.plot.setLabel("left", A.meta(y_addr).name, units=A.meta(y_addr).units or None)
@@ -208,6 +341,9 @@ class PointWindow(SubscriberWindow):
         self.trace = self.plot.plot(pen=pg.mkPen("#bbb", width=1))
         self.dot = pg.ScatterPlotItem(size=11, pen=pg.mkPen("#b01c22", width=1), brush=pg.mkBrush("#e15759"))
         self.plot.addItem(self.dot)
+        mx, my = A.meta(x_addr), A.meta(y_addr)
+        self._hover = CurveHover(self.plot, [(self.trace, "", lambda v: f"{mx.name} = {_fmt_num(v)} {mx.units or ''}",
+                                              lambda v: f"{my.name} = {_fmt_num(v)} {my.units or ''}")], mode="xy")
 
         ctl = QHBoxLayout()
         ctl.addStretch(1)
@@ -311,51 +447,128 @@ class InfoWindow(SubscriberWindow):
 
 
 # ------------------------------------------------------------------ экран (цветная карта + спектр в точке)
-class ScreenWindow(SubscriberWindow):
-    """Картина на экране за ондулятором. Тяжёлый расчёт делает ДВИЖОК на медленном такте (ScreenRecorder)
-    и шлёт как значение `screen.<id>` = {heatmap, extent(мм), spectrum, gap, e1, error?}. Окно рисует:
-    ЦВЕТНУЮ карту (inferno, как HTML-отчёты) с мм-осями и цветовой шкалой, и СПЕКТР излучения (поток vs
-    энергия) в ВЫБРАННОЙ ТОЧКЕ — клик по карте выбирает точку (движок пересчитает спектр), команда
-    set_screen(addr, area, res, point). Разрешение (mesh) — ручка скорость↔точность."""
-    KIND = "screen"
+SCREEN_QUANTITIES = (("flux", "поток на E₁", "поток, ф/с/мрад²/0.1%BW"),
+                     ("power", "мощность, Вт/мм²", "плотность мощности, Вт/мм²"))
 
-    def __init__(self, screen_id: str, mesh: int = 121, point=None, title: str = ""):
+
+class ScreenWindow(SubscriberWindow):
+    """Картина на экране за ондулятором. Тяжёлый расчёт делает ДВИЖОК на медленном такте и шлёт как значение
+    `screen.<id>` = {heatmap, extent(мм), spectrum, gap, e1, quantity, error?}. Окно рисует ЦВЕТНУЮ карту
+    (inferno, как HTML-отчёты) с мм-осями и цветовой шкалой и СПЕКТР излучения (поток vs энергия) в ВЫБРАННОЙ
+    ТОЧКЕ — клик по карте выбирает точку (движок пересчитает спектр). Что на карте — переключатель «величина»:
+      поток на E₁ — интерференционная картина на энергии первой гармоники в узком окне вокруг оси (центральный
+                    конус, круглое пятно ~±0,3 мм; ScreenRecorder);
+      мощность    — плотность мощности СИ, Вт/мм², по Льенару на ВСЁМ экране (вытянута по горизонтали ±K/γ,
+                    + веера соседних диполей; screen_analysis.live_power_map, быстрый режим, живые зазоры).
+    «лог. шкала» — цвет по log₁₀ (LOG_DECADES декад от пика): видны слабые веера диполей и хвосты. Наведение
+    курсора — значение в точке (карта и спектр). Метки спектра: двойной клик по спектру ставит метку (с «к пику» —
+    на ближайший максимум), её вертикаль можно тащить; в таблице имя и энергия редактируются, метки удаляются;
+    легенда на графике повторяет таблицу. Команда set_screen(addr, area, res, point, quantity)."""
+    KIND = "screen"
+    LOG_DECADES = 5
+
+    def __init__(self, screen_id: str, mesh: int = 121, point=None, title: str = "", quantity: str = "flux",
+                 log: bool = False, marks=None, snap: bool = True):
         super().__init__(title or f"экран {screen_id}")
         self.screen_id = screen_id
         self.mesh = int(mesh)
+        self.quantity = "power" if quantity == "power" else "flux"
+        self.log = bool(log)
+        self._last = None                                            # последнее значение screen.<id>
+        self._hm_ref = self._sp_ref = None                           # уже нарисованные карта/спектр (по ссылке)
+        self._arr = self._ext = None                                 # карта [u, v] и её extent (мм) — для подсказки
+        self._zoom_pending = self.quantity == "power"                # мощность: первый кадр — зум на пятно ИД
         self._point = tuple(float(p) for p in (point or (0.0, 0.0)))   # точка на экране (мм); (0,0)=на оси
         self._link = None
+        self._marks: List[dict] = []
+        self._mark_seq = 0
+        self._updating = False
 
         # --- тепловая карта: PlotWidget + ImageItem(inferno) + мм-оси + colorbar ---
         self.heat = pg.PlotWidget()
         self.heat.setAspectLocked(True)
         self.heat.setLabel("bottom", "u (горизонт.)", units="мм")
         self.heat.setLabel("left", "v (верт.)", units="мм")
+        for ax in ("bottom", "left"):                               # мм без авто-приставок («ммм» = мкм путало)
+            self.heat.getAxis(ax).enableAutoSIPrefix(False)
         self.item = pg.ImageItem()
         self._cmap = _colormap("inferno")
         self.cbar = None
         if self._cmap is not None:
             self.item.setColorMap(self._cmap)
         self.heat.addItem(self.item)
-        self.marker = pg.ScatterPlotItem(size=22, symbol="+", pen=pg.mkPen("#17c3d6", width=2),
-                                         brush=pg.mkBrush("#17c3d6"))      # перекрестье точки спектра (не круг)
+        self.marker = pg.ScatterPlotItem(size=16, symbol=_thin_cross(), pen=pg.mkPen("#17c3d6", width=1.2),
+                                         brush=None)               # тонкое перекрестье точки спектра
         self.marker.setData([self._point[0]], [self._point[1]])
         self.heat.addItem(self.marker)
         if self._cmap is not None:
-            self.cbar = pg.ColorBarItem(colorMap=self._cmap, label="поток, ф/с/мрад²/0.1%BW")
+            self.cbar = pg.ColorBarItem(colorMap=self._cmap, label=self._cbar_label())
             self.cbar.setImageItem(self.item, insert_in=self.heat.getPlotItem())
+        self.heat_tip = pg.TextItem(anchor=(0, 1), color="#111", fill=pg.mkBrush(255, 255, 255, 225),
+                                    border=pg.mkPen("#888"))
+        self.heat_tip.setZValue(1000)
+        self.heat.getPlotItem().addItem(self.heat_tip, ignoreBounds=True)
+        self.heat_tip.hide()
         self.heat.getPlotItem().scene().sigMouseClicked.connect(self._on_heat_click)
+        self.heat.scene().sigMouseMoved.connect(self._heat_move)
 
-        # --- спектр излучения в точке: поток vs энергия (log y) ---
-        self.spec = pg.PlotWidget()
+        # --- спектр излучения в точке: поток vs энергия (log y) + метки с легендой ---
+        self.spec = _plot()
         self.spec.showGrid(x=True, y=True, alpha=0.25)
         self.spec.setLogMode(x=False, y=True)
         self.spec.setLabel("left", "поток", units="ф/с/мрад²/0.1%BW")
         self.spec.setLabel("bottom", "энергия фотона", units="кэВ")
         self.specline = self.spec.plot(pen=pg.mkPen("#e15759", width=2))
-        self.info = QLabel("ожидание расчёта экрана…  (клик по карте — спектр в точке)")
+        self.legend = pg.LegendItem(offset=(-10, 10), labelTextSize="8pt", brush=pg.mkBrush(255, 255, 255, 200),
+                                    pen=pg.mkPen("#bbb"))
+        self.legend.setParentItem(self.spec.getPlotItem().vb)
+        self.legend.hide()
+        self._spec_hover = CurveHover(self.spec, [(self.specline, "спектр", lambda e: f"E = {e:.3f} кэВ",
+                                                   lambda f: f"{_fmt_num(f)} ф/с/мрад²/0.1%BW")])
+        self.spec.scene().sigMouseClicked.connect(self._on_spec_click)
+        self.info = QLabel("ожидание расчёта экрана…  (клик по карте — спектр в точке; двойной клик по спектру — метка)")
+
+        # --- таблица меток спектра ---
+        self.marks_tbl = QTableWidget(0, 3)
+        self.marks_tbl.setHorizontalHeaderLabels(["метка", "E, кэВ", "поток, ф/с/мрад²/0.1%BW"])
+        self.marks_tbl.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.marks_tbl.verticalHeader().setVisible(False)
+        self.marks_tbl.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.marks_tbl.setMaximumHeight(120)
+        self.marks_tbl.itemChanged.connect(self._mark_edited)
+        self.marks_tbl.hide()
+        mrow = QHBoxLayout()
+        mrow.addWidget(QLabel("метки спектра: двойной клик по спектру — добавить"))
+        self.chk_snap = QCheckBox("к пику")
+        self.chk_snap.setToolTip("новая метка встаёт на ближайший максимум спектра (±1% по энергии)")
+        self.chk_snap.setChecked(bool(snap))
+        mrow.addWidget(self.chk_snap)
+        mrow.addStretch(1)
+        self.btn_del = QPushButton("удалить метку")
+        self.btn_del.clicked.connect(self._delete_selected)
+        self.btn_clr = QPushButton("очистить")
+        self.btn_clr.clicked.connect(self._clear_marks)
+        mrow.addWidget(self.btn_del)
+        mrow.addWidget(self.btn_clr)
+        try:
+            from PySide6.QtGui import QKeySequence, QShortcut
+            QShortcut(QKeySequence.Delete, self.marks_tbl, activated=self._delete_selected)
+        except Exception:
+            pass
 
         ctl = QHBoxLayout()
+        ctl.addWidget(QLabel("величина"))
+        self.qcmb = QComboBox()
+        for key, name, _ in SCREEN_QUANTITIES:
+            self.qcmb.addItem(name, key)
+        self.qcmb.setCurrentIndex(0 if self.quantity == "flux" else 1)
+        self.qcmb.currentIndexChanged.connect(self._set_quantity)
+        ctl.addWidget(self.qcmb)
+        self.chk_log = QCheckBox("лог. шкала")
+        self.chk_log.setToolTip(f"цвет по log₁₀ — {self.LOG_DECADES} декад от пика: видны слабые веера диполей")
+        self.chk_log.setChecked(self.log)
+        self.chk_log.toggled.connect(self._set_log)
+        ctl.addWidget(self.chk_log)
         ctl.addWidget(QLabel("разрешение (mesh)"))
         self.cmb = QComboBox()
         for v in (61, 121, 201, 301):
@@ -371,8 +584,17 @@ class ScreenWindow(SubscriberWindow):
         lay.addWidget(self.info)
         lay.addWidget(self.heat, 3)
         lay.addWidget(self.spec, 2)
+        lay.addLayout(mrow)
+        lay.addWidget(self.marks_tbl)
         lay.addLayout(ctl)
 
+        for m in (marks or []):                                      # метки из раскладки
+            try:
+                self._add_mark(float(m["E"]), m.get("name"), snap=False)
+            except (KeyError, TypeError, ValueError):
+                continue
+
+    # ---- ручки ----
     def bind_link(self, link):
         self._link = link
         self._push_screen_cfg()
@@ -380,6 +602,50 @@ class ScreenWindow(SubscriberWindow):
     def _set_mesh(self):
         self.mesh = int(self.cmb.currentData())
         self._push_screen_cfg()
+
+    def _qlabel(self) -> str:
+        return next(lab for key, _, lab in SCREEN_QUANTITIES if key == self.quantity)
+
+    def _cbar_label(self) -> str:
+        return ("log₁₀ " if self.log else "") + self._qlabel()
+
+    def _set_cbar_label(self):
+        if self.cbar is not None:
+            try:
+                self.cbar.getAxis("left").setLabel(self._cbar_label())
+            except Exception:
+                pass
+
+    def _set_quantity(self):
+        self.quantity = str(self.qcmb.currentData())
+        self._set_cbar_label()
+        self.info.setText("пересчёт: " + self.qcmb.currentText() + "…")
+        self._zoom_pending = True                                    # новый кадр — свой масштаб вида
+        self._hm_ref = None
+        self._push_screen_cfg()
+
+    def _set_log(self, on):
+        self.log = bool(on)
+        self._set_cbar_label()
+        self._draw_heat()
+
+    def _zoom_view(self, arr, ext) -> None:
+        """Вид на новый кадр. Поток — вся картина (она и так в узком окне у оси). Мощность — пятно ИД: область
+        выше 10% пика ×3 (не меньше ±1 мм), иначе на экране 50 мм пятно в пару мм теряется; колесо/«View All»
+        показывают весь экран с веерами диполей."""
+        x0, x1, y0, y1 = ext
+        if self.quantity != "power" or arr.max() <= 0:
+            self.heat.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0)
+            return
+        nu, nv = arr.shape
+        m = arr >= 0.1 * float(arr.max())
+        iu = np.where(m.any(axis=1))[0]; iv = np.where(m.any(axis=0))[0]
+        du = (x1 - x0) / max(nu - 1, 1); dv = (y1 - y0) / max(nv - 1, 1)
+        ulo, uhi = x0 + iu[0] * du, x0 + iu[-1] * du
+        vlo, vhi = y0 + iv[0] * dv, y0 + iv[-1] * dv
+        hu = max(1.5 * (uhi - ulo), 1.0); hv = max(1.5 * (vhi - vlo), 1.0)
+        cu, cv = 0.5 * (ulo + uhi), 0.5 * (vlo + vhi)
+        self.heat.setRange(xRange=(cu - hu, cu + hu), yRange=(cv - hv, cv + hv), padding=0)
 
     def _on_heat_click(self, ev):
         vb = self.heat.getPlotItem().vb
@@ -392,8 +658,177 @@ class ScreenWindow(SubscriberWindow):
 
     def _push_screen_cfg(self):
         if self._link is not None:
-            self._link.set_screen(f"screen.{self.screen_id}", area=None, res=self.mesh, point=self._point)
+            self._link.set_screen(f"screen.{self.screen_id}", area=None, res=self.mesh, point=self._point,
+                                  quantity=self.quantity)
 
+    # ---- тепловая карта: отрисовка (лин./лог.) и значение под курсором ----
+    def _draw_heat(self):
+        arr = self._arr
+        if arr is None or not arr.size:
+            return
+        hi = float(np.nanmax(arr))
+        if self.log and hi > 0:
+            lo = hi * 10.0 ** (-self.LOG_DECADES)
+            img = np.log10(np.clip(arr, lo, None)); lv = (np.log10(lo), np.log10(hi))
+        else:
+            img = arr; lv = (float(np.nanmin(arr)), hi)
+        self.item.setImage(img, autoLevels=False)                  # карты [u, v] = (x, y), как ждёт col-major pyqtgraph
+        if lv[1] > lv[0]:
+            self.item.setLevels(lv)
+            if self.cbar is not None:
+                try:
+                    self.cbar.setLevels(lv)
+                except Exception:
+                    pass
+        if self._ext is not None:                                  # пиксель i — с центром в узле сетки i
+            x0, x1, y0, y1 = self._ext
+            nu, nv = arr.shape
+            du = (x1 - x0) / max(nu - 1, 1); dv = (y1 - y0) / max(nv - 1, 1)
+            self.item.setRect(QRectF(x0 - du / 2, y0 - dv / 2, (x1 - x0) + du, (y1 - y0) + dv))
+
+    def _heat_value(self, u, v):
+        """Значение карты в узле, ближайшем к (u, v) мм; None — вне карты."""
+        if self._arr is None or self._ext is None:
+            return None
+        x0, x1, y0, y1 = self._ext
+        nu, nv = self._arr.shape
+        iu = int(round((u - x0) / ((x1 - x0) / max(nu - 1, 1)))); iv = int(round((v - y0) / ((y1 - y0) / max(nv - 1, 1))))
+        if 0 <= iu < nu and 0 <= iv < nv:
+            return float(self._arr[iu, iv])
+        return None
+
+    def _heat_move(self, pos):
+        vb = self.heat.getPlotItem().vb
+        if not vb.sceneBoundingRect().contains(pos):
+            self.heat_tip.hide()
+            return
+        p = vb.mapSceneToView(pos)
+        val = self._heat_value(p.x(), p.y())
+        if val is None:
+            self.heat_tip.hide()
+            return
+        unit = "Вт/мм²" if self.quantity == "power" else "ф/с/мрад²/0.1%BW"
+        self.heat_tip.setHtml(f'<div style="font-size:9pt">u = {p.x():.3f} мм, v = {p.y():.3f} мм<br>'
+                              f'<b>{_fmt_num(val)}</b> {unit}</div>')
+        _place_tip(self.heat_tip, vb, p.x(), p.y())
+        self.heat_tip.show()
+
+    # ---- метки спектра ----
+    def _spec_data(self):
+        x, y = self.specline.getOriginalDataset()
+        if x is None or y is None or len(x) == 0:
+            return None, None
+        return np.asarray(x, float), np.asarray(y, float)
+
+    def _snap(self, E):
+        """Ближайший максимум спектра в окне ±1% по энергии (не уже 2 шагов сетки)."""
+        Es, Fs = self._spec_data()
+        if Es is None:
+            return E
+        w = max(0.01 * abs(E), 2.0 * float(np.median(np.diff(Es))) if Es.size > 1 else 0.0)
+        m = np.abs(Es - E) <= w
+        if not m.any():
+            return E
+        return float(Es[m][int(np.argmax(Fs[m]))])
+
+    def _flux_at(self, E):
+        Es, Fs = self._spec_data()
+        if Es is None or not (Es[0] <= E <= Es[-1]):
+            return None
+        return float(np.exp(np.interp(E, Es, np.log(np.clip(Fs, 1e-300, None)))))
+
+    def _on_spec_click(self, ev):
+        if not ev.double() or ev.button() != Qt.LeftButton:
+            return
+        vb = self.spec.getPlotItem().vb
+        if not vb.sceneBoundingRect().contains(ev.scenePos()):
+            return
+        self._add_mark(float(vb.mapSceneToView(ev.scenePos()).x()), snap=self.chk_snap.isChecked())
+        ev.accept()
+
+    def _add_mark(self, E, name=None, snap=True):
+        if snap:
+            E = self._snap(E)
+        self._mark_seq += 1
+        color = _PALETTE[(self._mark_seq - 1) % len(_PALETTE)]
+        line = pg.InfiniteLine(pos=E, angle=90, movable=True, pen=pg.mkPen(color, width=1, style=Qt.DashLine),
+                               hoverPen=pg.mkPen(color, width=2.5))
+        dot = pg.PlotDataItem([], [], pen=None, symbol="o", symbolSize=8, symbolBrush=color, symbolPen=None)
+        mk = dict(name=str(name or f"метка {self._mark_seq}"), E=float(E), color=color, line=line, dot=dot)
+        line.setToolTip("тащите — сдвинуть метку")
+        line.sigPositionChanged.connect(lambda _l, mk=mk: self._mark_moved(mk))
+        self.spec.getPlotItem().addItem(line, ignoreBounds=True)
+        self.spec.getPlotItem().addItem(dot, ignoreBounds=True)
+        self._marks.append(mk)
+        self._refresh_marks()
+        return mk
+
+    def _mark_moved(self, mk):
+        if self._updating:
+            return
+        mk["E"] = float(mk["line"].value())
+        self._refresh_marks()
+
+    def _remove_mark(self, mk):
+        for it in (mk["line"], mk["dot"]):
+            self.spec.getPlotItem().removeItem(it)
+        self._marks.remove(mk)
+
+    def _delete_selected(self):
+        rows = sorted({i.row() for i in self.marks_tbl.selectedIndexes()} or
+                      ({self.marks_tbl.currentRow()} if self.marks_tbl.currentRow() >= 0 else set()), reverse=True)
+        for r in rows:
+            if 0 <= r < len(self._marks):
+                self._remove_mark(self._marks[r])
+        self._refresh_marks()
+
+    def _clear_marks(self):
+        for mk in list(self._marks):
+            self._remove_mark(mk)
+        self._refresh_marks()
+
+    def _mark_edited(self, item):
+        if self._updating or not (0 <= item.row() < len(self._marks)):
+            return
+        mk = self._marks[item.row()]
+        if item.column() == 0:
+            mk["name"] = item.text().strip() or mk["name"]
+        elif item.column() == 1:
+            try:
+                mk["E"] = float(item.text().replace(",", ".").strip())
+            except ValueError:
+                pass
+            self._updating = True
+            mk["line"].setValue(mk["E"])
+            self._updating = False
+        self._refresh_marks()
+
+    def _refresh_marks(self):
+        """Точки меток на кривой, легенда на графике и таблица — по текущему спектру."""
+        self._updating = True
+        try:
+            self.legend.clear()
+            self.marks_tbl.setRowCount(len(self._marks))
+            for r, mk in enumerate(self._marks):
+                F = self._flux_at(mk["E"])
+                mk["dot"].setData([mk["E"]], [F]) if F is not None else mk["dot"].setData([], [])
+                self.legend.addItem(mk["dot"], f"{mk['name']} — {mk['E']:.3f} кэВ")
+                cells = (mk["name"], f"{mk['E']:.4f}", "—" if F is None else f"{F:.3e}")
+                for c, txt in enumerate(cells):
+                    it = self.marks_tbl.item(r, c)
+                    if it is None:
+                        it = QTableWidgetItem()
+                        self.marks_tbl.setItem(r, c, it)
+                    it.setText(txt)
+                    flags = it.flags() | Qt.ItemIsEnabled | Qt.ItemIsSelectable
+                    it.setFlags(flags | Qt.ItemIsEditable if c < 2 else flags & ~Qt.ItemIsEditable)
+                self.marks_tbl.item(r, 0).setForeground(pg.mkBrush(mk["color"]))
+            self.legend.setVisible(bool(self._marks))
+            self.marks_tbl.setVisible(bool(self._marks))
+        finally:
+            self._updating = False
+
+    # ---- кадр ----
     def addresses(self) -> List[str]:
         return [f"screen.{self.screen_id}"]
 
@@ -404,28 +839,29 @@ class ScreenWindow(SubscriberWindow):
         if d.get("error"):
             self.info.setText(f"экран: {d['error']}")
             return
-        hm = d.get("heatmap")
-        if hm is not None:
+        if d.get("quantity", "flux") != self.quantity and not d.get("computing"):
+            return                                                 # кадр другой величины (до пересчёта) — не рисуем
+        self._last = d
+        hm = d.get("heatmap") if d.get("quantity", "flux") == self.quantity else None
+        if hm is not None and hm is not self._hm_ref:              # новая карта (тот же кадр не перерисовываем)
             arr = np.asarray(hm, float)
             if arr.ndim == 2 and arr.size:
-                self.item.setImage(arr.T, autoLevels=False)        # .T: pyqtgraph ждёт (x,y)
-                lo, hi = float(np.nanmin(arr)), float(np.nanmax(arr))
-                if hi > lo:
-                    self.item.setLevels((lo, hi))
-                    if self.cbar is not None:
-                        try:
-                            self.cbar.setLevels((lo, hi))
-                        except Exception:
-                            pass
+                self._hm_ref = hm
+                self._arr = arr
                 ext = d.get("extent")
-                if ext and len(ext) == 4:                          # [x0,x1,y0,y1] в мм — раньше ИГНОРИРОВАЛОСЬ
-                    x0, x1, y0, y1 = (float(e) for e in ext)
-                    self.item.setRect(QRectF(x0, y0, x1 - x0, y1 - y0))
+                self._ext = tuple(float(e) for e in ext) if ext and len(ext) == 4 else None
+                self._draw_heat()
+                if self._ext is not None and self._zoom_pending and not d.get("computing"):
+                    self._zoom_pending = False
+                    self._zoom_view(arr, self._ext)
         sp = d.get("spectrum")
-        if isinstance(sp, dict) and sp.get("E_keV"):               # НАСТОЯЩИЙ спектр (flux vs энергия) в точке
+        if isinstance(sp, dict) and sp.get("E_keV") and sp.get("flux") is not self._sp_ref:
+            self._sp_ref = sp.get("flux")                          # НАСТОЯЩИЙ спектр (flux vs энергия) в точке
             E = np.asarray(sp["E_keV"], float)
             F = np.clip(np.asarray(sp["flux"], float), 1e-30, None)   # log-ось: без нулей/отрицательных
             self.specline.setData(E, F)
+            if self._marks:
+                self._refresh_marks()
         gap = d.get("gap")
         e1 = d.get("e1")
         bits = []
@@ -433,6 +869,11 @@ class ScreenWindow(SubscriberWindow):
             bits.append(f"зазор {float(gap):.2f} мм")
         if e1 is not None:
             bits.append(f"E₁ {float(e1):.2f} кэВ")
+        if d.get("quantity") == "power" and self.quantity == "power" and d.get("peak") is not None:
+            bits.append(f"пик {float(d['peak']):.1f} Вт/мм²")
+            bits.append(f"перехвачено {float(d.get('total') or 0):.0f} Вт"
+                        + (f" (ИД {float(d.get('und_W') or 0):.0f} + веера {int(d.get('n_bend') or 0)} диполей "
+                           f"{float(d.get('bend_W') or 0):.0f})" if d.get("n_bend") else ""))
         bits.append(f"точка ({self._point[0]:.2f}, {self._point[1]:.2f}) мм")
         bits.append(f"mesh {self.mesh}")
         if d.get("computing"):                                     # движок пересчитывает картину в фоне
@@ -440,7 +881,9 @@ class ScreenWindow(SubscriberWindow):
         self.info.setText(" · ".join(bits))
 
     def params(self) -> dict:
-        return {"screen_id": self.screen_id, "mesh": self.mesh, "point": list(self._point)}
+        return {"screen_id": self.screen_id, "mesh": self.mesh, "point": list(self._point), "quantity": self.quantity,
+                "log": self.log, "snap": self.chk_snap.isChecked(),
+                "marks": [{"name": mk["name"], "E": mk["E"]} for mk in self._marks]}
 
 
 # ------------------------------------------------------------------ справка по экрану (→ тепловая карта)
@@ -608,7 +1051,7 @@ class OrbitModesWindow(SubscriberWindow):
         self._sig = None
 
         def mkplot(title, left, units, bottom):
-            p = pg.PlotWidget()
+            p = _plot()
             p.setTitle(title)
             p.showGrid(x=False, y=True, alpha=0.25)
             p.setLabel("left", left, units=units)
@@ -630,6 +1073,12 @@ class OrbitModesWindow(SubscriberWindow):
                                    symbolBrush=_C_ETA, symbolPen=None)
         self.thr = pg.InfiniteLine(angle=0, pen=pg.mkPen(_C_INK2, width=1, style=Qt.DashLine))
         self.p_sv.addItem(self.thr)
+        bpm = lambda v: f"BPM {int(round(v))}"
+        self._hovers = [CurveHover(self.p_eta, [(self.c_eta, "η-узор", bpm, lambda v: f"x = {_fmt_num(v)} мкм")]),
+                        CurveHover(self.p_bet, [(self.c_bet, "бетатронная волна", bpm,
+                                                 lambda v: f"x = {_fmt_num(v)} мкм")]),
+                        CurveHover(self.p_sv, [(self.c_sv, "мода SVD", lambda v: f"мода {int(round(v))}",
+                                                lambda v: f"σ/σ_max = {_fmt_num(v)}")])]
 
         self.info = QLabel("ожидание данных от движка…")
         self.info.setWordWrap(True)

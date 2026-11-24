@@ -145,7 +145,8 @@ def plot_footprint(scr, fp, emitters, path, ec):
     im = ax.imshow(fp["S"].T, origin="lower", extent=fp["extent"], aspect="auto", cmap="inferno")
     ax.set_xlabel("u (горизонт.), мм"); ax.set_ylabel("v (верт.), мм")
     dev = emitters[0]["dev"] if emitters else "?"
-    ax.set_title(f"{scr['sid']} ← диполь {dev} (ε_c={ec:.2f} кэВ): веер поворотного СИ\n"
+    mode = " [точный]" if fp.get("calc") == "accurate" else ""
+    ax.set_title(f"{scr['sid']} ← диполь {dev} (ε_c={ec:.2f} кэВ): веер поворотного СИ{mode}\n"
                  f"пик {fp['peak']:.2f} Вт/мм², перехвачено {fp['total']:.1f} Вт", fontsize=8.5)
     cb = fig.colorbar(im, ax=ax, shrink=0.9); cb.set_label("Вт/мм²", fontsize=8)
     fig.tight_layout(); fig.savefig(path, dpi=120); plt.close(fig)
@@ -171,6 +172,12 @@ def main():
     ap.add_argument("--ws", default=None)
     ap.add_argument("--E", type=float, default=6.0); ap.add_argument("--I", type=float, default=0.2)
     ap.add_argument("--mesh", type=int, default=161)
+    ap.add_argument("--calc", choices=["fast", "accurate"], default="fast",
+                    help="fast — веер из точки отбора (как раньше); accurate — Льенар по траектории (sr_trace)")
+    ap.add_argument("--effects", default="all", help="эффекты точного режима: all | none | extended,poles,fringe,beam | all,-beam")
+    ap.add_argument("--breakdown", action="store_true", help="точный режим: вклад каждого эффекта")
+    ap.add_argument("--gap", type=float, default=5.0, help="точный режим: зазор ИД (если ондулятор достаёт экран)")
+    ap.add_argument("--cull", type=float, default=40.0, help="точный режим: отсев точек траектории (запас cull/γ)")
     a = ap.parse_args()
 
     scr = next((s for s in load_screens(a.lattice) if s["sid"] == a.screen), None)
@@ -199,8 +206,14 @@ def main():
 
     os.makedirs(RESDIR, exist_ok=True); sfx = "" if not a.ws else "_pert"
     fp = footprint(scr, emitters, gamma, a.I, a.mesh)
+    acc = None
+    if a.calc == "accurate":                                   # точный: Льенар по траектории цепочек диполей
+        import sr_trace as st
+        ctx = st.make_context(a.lattice, a.ws, None, a.gap, E=a.E, I=a.I, ci=ci, byid=byid)
+        acc = st.footprint_accurate(scr, ctx, a.effects, a.mesh, a.cull, breakdown=a.breakdown)
+        sfx += "_acc"
     fpng = os.path.join(RESDIR, f"L{a.lattice}_{a.screen}_bendfoot{sfx}.png")
-    plot_footprint(scr, fp, emitters, fpng, bound["ec"])
+    plot_footprint(scr, acc or fp, emitters, fpng, bound["ec"])
 
     # спектр в центре экрана (верт. угол ψ_c относительно плоскости орбиты источника)
     dC = _unit(scr["C"] - bound["P"]); psi_c = math.asin(max(-1.0, min(1.0, float(np.dot(dC, bound["vhat"])))))
@@ -212,6 +225,11 @@ def main():
 
     print(f"  веер: пик {fp['peak']:.2f} Вт/мм², перехвачено {fp['total']:.1f} Вт, "
           f"центроид (u={fp['cu']:+.3f}, v={fp['cv']:+.3f}) мм")
+    if acc is not None:
+        print(f"  {st.compare_line(fp, acc)}")
+        print(f"    источники: цепочки {', '.join(acc['chains']) or '—'}; ИД {', '.join(acc['illuminators']) or '—'}")
+        for line in st.breakdown_lines(acc):
+            print(line)
     print(f"  спектр в центре (ψ={psi_c*1e6:+.0f} мкрад): пик {Fa.max():.3e} ф/с/мрад²/0.1%; "
           f"поток/гор при ε_c {Fh:.3e} ф/с/мрад/0.1%")
     print(f"\n[OK] {fpng}\n[OK] {spng}")

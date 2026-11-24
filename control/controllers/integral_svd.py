@@ -40,3 +40,8 @@ class IntegralSVD(Controller):
     def reset(self):
         if hasattr(self, "u"):
             self.u[:] = 0.0
+
+    def track(self, contribution):
+        """Безударное включение: интегратор = текущий вклад контура (а не накопленное до выключения)."""
+        if hasattr(self, "act"):
+            self.u = np.array([float(contribution.get(pid, 0.0)) for pid in self.act])

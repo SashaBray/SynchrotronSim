@@ -185,12 +185,15 @@ def angular_power_table(K, p=P, step=0.04, span=8.0):
 
 
 _TAB_CACHE = {}
+_TAB_CACHE_MAX = 32                                            # таблиц (~1–2 МБ каждая)
 
 
 def angular_power_cached(K, p=P):
     """angular_power_table с кэшем по (K, E, I, N, λ_u) — таблица одна на зазор."""
     key = (round(float(K), 9), p.E, p.I, p.N, p.lam_u)
     if key not in _TAB_CACHE:
+        while len(_TAB_CACHE) >= _TAB_CACHE_MAX:              # живой зазор (кокпит) рождает новые K — не копить
+            _TAB_CACHE.pop(next(iter(_TAB_CACHE)))
         _TAB_CACHE[key] = angular_power_table(K, p)
     return _TAB_CACHE[key]
 

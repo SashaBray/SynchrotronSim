@@ -8,7 +8,7 @@
 
 Направления (эскиз из docs/CLIENT_PLAN.md §1):
   клиент→движок:  subscribe(addr) / unsubscribe(addr) / command(addr, value)
-                  control("run"|"stop"|"restart"|"shutdown") / set_screen(addr, area, res)
+                  control("run"|"stop"|"restart"|"shutdown") / set_screen(addr, area, res, point, quantity)
   движок→клиент:  poll_snapshot() -> Snapshot{ values:{addr:val}, meta:{model_time, wall_time,
                                                speed, cycle, seq} }   # только подписанное + мета
 
@@ -44,7 +44,8 @@ class Message:
       subscribe/unsubscribe: addr — адрес сигнала.
       command:   addr — адрес ручки, value — новое значение (число/строка/bool).
       control:   value — действие ("run"/"stop"/"restart"/"shutdown"), addr пуст.
-      set_screen: addr — адрес экрана, value — {"area":..., "res":...} (медленный такт)."""
+      set_screen: addr — адрес экрана, value — {"area", "res", "point", "quantity"} (медленный такт);
+                 quantity — что рисовать: "flux" (поток на E₁, интерференция) | "power" (мощность, Вт/мм²)."""
     kind: str
     addr: str = ""
     value: Any = None
@@ -75,7 +76,7 @@ class Link(ABC):
     def control(self, action: str) -> None: ...
 
     @abstractmethod
-    def set_screen(self, addr: str, area: Any, res: Any, point: Any = None) -> None: ...
+    def set_screen(self, addr: str, area: Any, res: Any, point: Any = None, quantity: Any = None) -> None: ...
 
     @abstractmethod
     def poll_snapshot(self) -> Optional[Snapshot]: ...
@@ -119,8 +120,8 @@ class InProcLink(Link):
     def control(self, action: str) -> None:
         self._q.put(Message(CONTROL, "", action))
 
-    def set_screen(self, addr: str, area: Any, res: Any, point: Any = None) -> None:
-        self._q.put(Message(SET_SCREEN, addr, {"area": area, "res": res, "point": point}))
+    def set_screen(self, addr: str, area: Any, res: Any, point: Any = None, quantity: Any = None) -> None:
+        self._q.put(Message(SET_SCREEN, addr, {"area": area, "res": res, "point": point, "quantity": quantity}))
 
     def poll_snapshot(self) -> Optional[Snapshot]:
         with self._snap_lock:

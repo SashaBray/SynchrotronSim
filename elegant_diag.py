@@ -208,44 +208,77 @@ def _patch_defs(desc, overrides=None, integrator=None, csbend_extra=None):
     return desc
 
 
-def _splice_rf(names, par, rf, freq):
-    """Резонаторы RFCA в точках s = rf['at_s'] линии (s — от начала линии, как s elegant): дрейф, в который
-    попала точка, режется на два (EDRIFT/DRIF той же природы); точка на стыке — RFCA между элементами; точка
-    внутри магнита — ошибка. Напряжение резонатора i — V·shares[i] (по умолчанию поровну), фаза общая.
-    Возврат (новая последовательность имён, определения RFCA и кусков дрейфов)."""
-    at = [float(v) for v in rf["at_s"]]
-    shares = list(rf.get("shares") or [1.0 / len(at)] * len(at))
-    defs = [f'RFC{i}: RFCA, L=0, VOLT={rf["volt_mv"] * sh * 1e6:.12g}, FREQ={freq:.15g}, '
-            f'PHASE={rf["phase_deg"]:.12g}, FIDUCIAL="light"' for i, sh in enumerate(shares)]
-    pend = sorted((sv, i) for i, sv in enumerate(at))
+def _kicker_def(name, k):
+    """Импульсный кикер SynchrotronSim → elegant BUMPER (L = 0: xp += ANGLE·A(t)/(1+δ), kicker.c) + файл волны.
+    k: theta_x, theta_y (рад), shape half_sine|trapezoid, duration, rise (с), period (с|None), time_offset (с —
+    TIME_OFFSET elegant: время волны = t_частицы − t_fiducial − TIME_OFFSET, t_fiducial — среднее время пучка у
+    кикера на первом пролёте). Волна — таблица (линейная интерполяция elegant), 4001 точка на импульс."""
+    import beam_injection as bi
+    D = float(k["duration"]); rise = float(k.get("rise") or 0.0); per = k.get("period")
+    t = np.linspace(0.0, D, 4001)
+    a = np.array([bi.pulse_shape(k.get("shape", "half_sine"), D, rise, float(v)) for v in t])
+    if per:                                          # период: нули до конца периода (PERIODIC повторяет таблицу)
+        t = np.append(t, float(per)); a = np.append(a, 0.0)
+    fn = f"{name}_wf.sdds"
+    with open(os.path.join(DIAG, fn), "w", encoding="ascii", newline="\n") as f:
+        f.write("SDDS1\n&column name=t, units=s, type=double, &end\n&column name=A, type=double, &end\n"
+                "&data mode=ascii, &end\n! page number 1\n" + str(len(t)) + "\n")
+        for tv, av in zip(t, a):
+            f.write(f"{tv:.17g} {av:.17g}\n")
+    thx, thy = float(k.get("theta_x") or 0.0), float(k.get("theta_y") or 0.0)
+    return (f'{name}: BUMPER, L=0, ANGLE={math.hypot(thx, thy):.17g}, TILT={math.atan2(thy, thx):.17g}, '
+            f'TIME_OFFSET={float(k.get("time_offset") or 0.0):.17g}, PERIODIC={1 if per else 0}, '
+            f'WAVEFORM="{fn}=t+A"')
+
+
+def _splice_rf(names, par, rf, freq, kickers=()):
+    """Резонаторы RFCA в точках s = rf['at_s'] линии (s — от начала линии, как s elegant) и импульсные кикеры
+    BUMPER в точках kickers[i]['at_s'] (_kicker_def): дрейф, в который попала точка, режется на два (EDRIFT/DRIF
+    той же природы); точка на стыке — элемент между элементами; точка внутри магнита — ошибка. Напряжение
+    резонатора i — V·shares[i] (по умолчанию поровну), фаза общая. В одной точке — резонаторы, затем кикеры.
+    Возврат (новая последовательность имён, определения вставок и кусков дрейфов)."""
+    defs = []; pts = []
+    if rf and rf.get("at_s"):
+        at = [float(v) for v in rf["at_s"]]
+        shares = list(rf.get("shares") or [1.0 / len(at)] * len(at))
+        defs += [f'RFC{i}: RFCA, L=0, VOLT={rf["volt_mv"] * sh * 1e6:.12g}, FREQ={freq:.15g}, '
+                 f'PHASE={rf["phase_deg"]:.12g}, FIDUCIAL="light"' for i, sh in enumerate(shares)]
+        pts += [(sv, f"RFC{i}") for i, sv in enumerate(at)]
+    for i, k in enumerate(kickers or ()):
+        defs.append(_kicker_def(f"PK{i}", k)); pts.append((float(k["at_s"]), f"PK{i}"))
+    pend = [(sv, j, nm) for j, (sv, nm) in enumerate(pts)]
+    pend.sort(key=lambda p: (p[0], p[1]))
     out = []; s = 0.0; seg = 0
     for n in names:
         q = par[n.upper()]; L = float(q.get("L", 0.0) or 0.0); typ = q["type"].upper()
         while pend and abs(pend[0][0] - s) <= 1e-9:
-            out.append(f"RFC{pend[0][1]}"); pend.pop(0)
+            out.append(pend[0][2]); pend.pop(0)
         inside = [p for p in pend if s + 1e-9 < p[0] < s + L - 1e-9]
         if inside:
             if typ not in ("EDRIFT", "DRIF", "DRIFT"):
-                raise ValueError(f"резонатор s = {inside[0][0]:.6f} м внутри {n} ({typ}) — нужен промежуток")
+                raise ValueError(f"{inside[0][2]} s = {inside[0][0]:.6f} м внутри {n} ({typ}) — нужен промежуток")
             a = s
-            for sv, i in inside:
-                seg += 1; defs.append(f"RFD{seg}: {typ}, L={sv - a:.15g}"); out += [f"RFD{seg}", f"RFC{i}"]; a = sv
+            for sv, _j, nm in inside:
+                if sv - a > 1e-12:                   # несколько вставок в одной точке — без дрейфа нулевой длины
+                    seg += 1; defs.append(f"RFD{seg}: {typ}, L={sv - a:.15g}"); out.append(f"RFD{seg}")
+                out.append(nm); a = sv
             seg += 1; defs.append(f"RFD{seg}: {typ}, L={s + L - a:.15g}"); out.append(f"RFD{seg}")
             pend = [p for p in pend if p not in inside]
         else:
             out.append(n)
         s += L
     while pend and abs(pend[0][0] - s) <= 1e-9:
-        out.append(f"RFC{pend[0][1]}"); pend.pop(0)
+        out.append(pend[0][2]); pend.pop(0)
     if pend:
-        raise ValueError(f"резонатор s = {pend[0][0]:.6f} м за пределами линии ({s:.6f} м)")
+        raise ValueError(f"{pend[0][2]} s = {pend[0][0]:.6f} м за пределами линии ({s:.6f} м)")
     return out, defs
 
 
 def _write_foreign(name, source, beamline, watch=None, rf=None, extra_elements="", use_beamline="SSRING",
-                   overrides=None, integrator=None, csbend_extra=None):
+                   overrides=None, integrator=None, csbend_extra=None, kickers=None):
     """Чужой .lte целиком + линия use_beamline = (WATCH, <линия файла>, RFCA). rf['at_s'] — резонаторы внутри
-    линии: тогда линия файла разворачивается в имена и дрейфы режутся в этих точках (_splice_rf)."""
+    линии, kickers — импульсные кикеры (_kicker_def): тогда линия файла разворачивается в имена и дрейфы режутся
+    в этих точках (_splice_rf)."""
     txt = _patch_defs(open(source, encoding="utf-8").read().rstrip(), overrides, integrator, csbend_extra)
     defs = [f"! собрано elegant_diag.py из {os.path.relpath(source, ROOT)}", txt]
     head = []; tail = []; body = [beamline]
@@ -253,17 +286,18 @@ def _write_foreign(name, source, beamline, watch=None, rf=None, extra_elements="
         defs.append(f'W0: WATCH, FILENAME="{watch["filename"]}", MODE="{watch.get("mode", "coordinate")}", '
                     f'INTERVAL={watch.get("interval", 1)}')
         head.append("W0")
+    freq = None
     if rf:
         c = rf.get("circumference") or line_length(source=source, beamline=beamline)
         freq = float(rf.get("freq_hz") or 0.0) or rf["harmonic"] * C_LIGHT / c   # freq_hz — расстроенный ВЧ
-        if rf.get("at_s"):
-            body, more = _splice_rf(line_names(source=source, beamline=beamline), element_params(source=source),
-                                    rf, freq)
-            defs += more
-        else:
-            defs.append(f'RF0: RFCA, L=0, VOLT={rf["volt_mv"] * 1e6:.12g}, FREQ={freq:.15g}, '
-                        f'PHASE={rf["phase_deg"]:.12g}, FIDUCIAL="light"')
-            tail.append("RF0")
+    if (rf and rf.get("at_s")) or kickers:
+        body, more = _splice_rf(line_names(source=source, beamline=beamline), element_params(source=source),
+                                rf, freq, kickers)
+        defs += more
+    if rf and not rf.get("at_s"):                    # ВЧ в конце линии
+        defs.append(f'RF0: RFCA, L=0, VOLT={rf["volt_mv"] * 1e6:.12g}, FREQ={freq:.15g}, '
+                    f'PHASE={rf["phase_deg"]:.12g}, FIDUCIAL="light"')
+        tail.append("RF0")
     if extra_elements:
         defs.append(extra_elements)
     seq = head + body + tail
@@ -276,18 +310,21 @@ def _write_foreign(name, source, beamline, watch=None, rf=None, extra_elements="
 
 def write_lattice(name="syla_closed.lte", config=CONFIG, watch=None, rf=None, extra_elements="",
                   overrides=None, integrator=None, csbend_extra=None, source=None, beamline=None,
-                  use_beamline="RING"):
+                  use_beamline="RING", kickers=None):
     """Собрать .lte: описание + RING. watch — dict(filename, mode, interval) ⇒ WATCH в начале линии;
     rf — dict(volt_mv, harmonic, phase_deg[, freq_hz]) ⇒ RFCA в конце линии (FREQ = freq_hz или h·c/C,
     FIDUCIAL="light");
     integrator — (N_SLICES, INTEGRATION_ORDER) для всех интегрируемых элементов; csbend_extra — добавка к
     каждому CSBEND (напр. "SYNCH_RAD=1,ISR=1"); overrides — {имя: 'строка определения'} заменяет устройства.
 
+    kickers — импульсные кикеры [dict(at_s, theta_x, theta_y, shape, duration, rise, period, time_offset)] ⇒
+    BUMPER с волной в точках at_s (_kicker_def, дрейф режется как у резонаторов).
+
     source/beamline — ЧУЖАЯ решётка: файл берётся целиком, RING оборачивает его линию beamline."""
     os.makedirs(DIAG, exist_ok=True)
     if source:
         return _write_foreign(name, source, beamline, watch, rf, extra_elements, use_beamline,
-                              overrides, integrator, csbend_extra)
+                              overrides, integrator, csbend_extra, kickers)
     desc = _patch_defs(open(os.path.join(config, "SYLA_desc.lte"), encoding="utf-8").read().strip(),
                        overrides, integrator, csbend_extra)
     names = line_names(config)
@@ -297,11 +334,11 @@ def write_lattice(name="syla_closed.lte", config=CONFIG, watch=None, rf=None, ex
         defs.append(f'W0: WATCH, FILENAME="{watch["filename"]}", MODE="{watch.get("mode", "coordinate")}", '
                     f'INTERVAL={watch.get("interval", 1)}')
         head.append("W0")
-    if rf and rf.get("at_s"):                        # резонаторы ВНУТРИ линии (резонаторы установки, rf_cavities)
-        freq = float(rf.get("freq_hz") or 0.0) or rf["harmonic"] * C_LIGHT / line_length(config)
-        names, more = _splice_rf(names, element_params(config), rf, freq)
+    if (rf and rf.get("at_s")) or kickers:           # резонаторы/кикеры ВНУТРИ линии (rf_cavities, pulsed_kickers)
+        freq = (float(rf.get("freq_hz") or 0.0) or rf["harmonic"] * C_LIGHT / line_length(config)) if rf else None
+        names, more = _splice_rf(names, element_params(config), rf, freq, kickers)
         defs += more
-    elif rf:                                         # в КОНЦЕ линии: запись WATCH до ВЧ, выход — после (как SynchrotronSim)
+    if rf and not rf.get("at_s"):                                         # в КОНЦЕ линии: запись WATCH до ВЧ, выход — после (как SynchrotronSim)
         freq = float(rf.get("freq_hz") or 0.0) or rf["harmonic"] * C_LIGHT / line_length(config)
         defs.append(f'RF0: RFCA, L=0, VOLT={rf["volt_mv"] * 1e6:.12g}, FREQ={freq:.15g}, '
                     f'PHASE={rf["phase_deg"]:.12g}, FIDUCIAL="light"')
@@ -441,7 +478,7 @@ def elegant_me(lte, beamline, e_mev):
 
 
 # ============================================================================ трекер elegant
-_MAGNET_TYPES_SKIP = {"EDRIFT", "DRIF", "MONI", "MARK", "WATCH", "RFCA", "MAXAMP"}
+_MAGNET_TYPES_SKIP = {"EDRIFT", "DRIF", "MONI", "MARK", "WATCH", "RFCA", "MAXAMP", "BUMPER"}
 
 
 class ElegantRing:

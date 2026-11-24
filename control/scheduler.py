@@ -54,10 +54,21 @@ class Scheduler:
         return self.loops[controller.name]
 
     def set_enabled(self, name, on, mode=None):
+        """Вкл/выкл контура. Включение БЕЗУДАРНОЕ: регулятор подхватывает текущий вклад своего слота (после
+        «отпустить» — нули, после «заморозить» — удержанный вклад) вместо накопленного до выключения состояния —
+        иначе первый апдейт добавляет полную коррекцию к старому интегралу и даёт бросок (перерегулирование)."""
         spec = self.loops[name]
-        spec.enabled = on
+        was = spec.enabled
+        spec.enabled = bool(on)
         if mode:
             spec.mode = mode
+        if spec.enabled and not was:
+            slot = self.state.slot(name)
+            ids = list(getattr(spec.controller, "writes", None) or [])
+            try:
+                spec.controller.track({pid: slot[pid] for pid in ids})
+            except (KeyError, ValueError, AttributeError):
+                spec.controller.track({})
 
     def step(self):
         view = StateView(self.state, self.arbiter)

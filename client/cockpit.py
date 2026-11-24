@@ -18,7 +18,7 @@ from collections import Counter
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt, QTimer, QObject, Signal
-from PySide6.QtGui import QCursor
+from PySide6.QtGui import QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout,
                                QInputDialog, QLabel, QMainWindow, QMessageBox, QPushButton, QToolBar,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -292,6 +292,17 @@ class Cockpit(QMainWindow):
 
         self._make_toolbar()
         self.statusBar().showMessage("инициализация…")
+        # навигация камеры по элементам: Ctrl+←/→ — соседний, Shift (или Ctrl+Shift)+←/→ — соседний того же типа;
+        # → — по движению пучка, ← — навстречу. На уровне приложения: работает, даже если фокус в плавающем окне
+        # (поля ввода свои Ctrl/Shift+стрелки перехватывают сами — правка текста не ломается).
+        self._nav_keys = []
+        for seq, step, same in (("Ctrl+Right", 1, False), ("Ctrl+Left", -1, False),
+                                ("Shift+Right", 1, True), ("Shift+Left", -1, True),
+                                ("Ctrl+Shift+Right", 1, True), ("Ctrl+Shift+Left", -1, True)):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.ApplicationShortcut)
+            sc.activated.connect(lambda st=step, sm=same: self._nav(st, sm))
+            self._nav_keys.append(sc)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -364,6 +375,10 @@ class Cockpit(QMainWindow):
         except Exception:
             pass
         try:
+            scene.focused.connect(self.set_status)        # перелёт камеры (Ctrl/Shift+←/→) → элемент в статусе
+        except Exception:
+            pass
+        try:
             scene.picked_screen.connect(self._open_screen_info, Qt.QueuedConnection)       # ЛКМ по экрану
         except Exception:
             pass
@@ -375,6 +390,13 @@ class Cockpit(QMainWindow):
             scene.picked_sensor.connect(self._open_sensor_info, Qt.QueuedConnection)         # ЛКМ по сенсору
         except Exception:
             pass
+
+    def _nav(self, step: int, same_type: bool):
+        if self.scene is not None:
+            try:
+                self.scene.nav_step(step, same_type)
+            except Exception as e:                       # noqa: BLE001 — навигация опциональна
+                self.set_status(f"навигация: {type(e).__name__}: {e}")
 
     def _on_hover(self, name: str):
         if name:

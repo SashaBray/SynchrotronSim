@@ -220,6 +220,16 @@ static void printPath(const mc::Injection& inj) {
         if (nd.cavity) std::printf("# rf cavity %s: s=%.9g m from start, share=%.9g\n", nd.dev.c_str(), nd.s_c, nd.cav_share);
     if (inj.end_share > 0) std::printf("# rf cavity at the end of the pass: share=%.9g\n", inj.end_share);
     for (auto& id : inj.skipped) std::printf("# rf cavity %s: off the start->finish path, skipped\n", id.c_str());
+    auto pk = [&](int i, const char* where) {
+        const mc::KickerPulse& k = inj.kickers[i];
+        std::printf("# pulsed kicker %s%s: s=%.9g m from start, theta=(%.9g, %.9g) rad, %s D=%.9g s rise=%.9g s, "
+                    "delay=%.12g s, period=%.9g s\n", k.id.c_str(), where, k.s_k, k.thx, k.thy,
+                    k.shape == 0 ? "half_sine" : "trapezoid", k.D, k.rise, k.delay, k.period > 0 ? k.period : 0.0);
+    };
+    for (int i : inj.kick_begin) pk(i, " (start plane, beginning of the pass)");
+    for (auto& nd : inj.ordered) if (nd.kicker) pk(nd.kick_idx, "");
+    for (int i : inj.kick_end) pk(i, " (finish plane, end of the pass)");
+    for (auto& id : inj.kick_skipped) std::printf("# pulsed kicker %s: off the start->finish path, skipped\n", id.c_str());
 }
 
 // --track <exp_id> <turns> [x0_mm y0_mm] — АВТОНОМНЫЙ трек опыта из БД: пролёты старт → финиш (у разомкнутой
@@ -230,7 +240,7 @@ static int runTrack(const std::string& ws, int exp, int turns, double x0_mm, dou
     if (!readExpCfg(ws, exp, c, err)) { std::cerr << err << "\n"; return 1; }
     mc::Injection inj; mc::RfSpec rf;
     try {
-        inj = mc::inject(ws, c.lattice, c.group, c.planes, c.design, c.sr, c.stg, c.rr.type != "none");
+        inj = mc::inject(ws, c.lattice, c.group, c.planes, c.design, c.sr, c.stg, c.rr.type != "none", exp);
         rf = makeRf(c.rr, inj, c.design);
     } catch (const std::exception& e) { std::cerr << e.what() << "\n"; return 1; }
     if (x0_mm != 0.0 || y0_mm != 0.0) {                        // ОДНА частица со смещением (скан апертуры/затухания)
@@ -239,7 +249,7 @@ static int runTrack(const std::string& ws, int exp, int turns, double x0_mm, dou
     }
     std::printf("# exp %d lattice %d group %d: %zu particles, %s, %zu elements, sr=%d rf=%s design=%.0f turns=%d\n",
                 exp, c.lattice, c.group, inj.states.size(), inj.closed ? "closed" : "open",
-                inj.ordered.size() - inj.n_cav, (int)c.sr, rf.name(), c.design, turns);
+                inj.ordered.size() - inj.n_cav - inj.n_kick, (int)c.sr, rf.name(), c.design, turns);
     printPath(inj);
     if (rf.type == mc::RfSpec::IDEAL)
         std::printf("# rf ideal: delta after cavity = %.17g (E = %.9g MeV)\n", rf.ideal_delta,
@@ -291,7 +301,7 @@ static int runFull(const std::string& ws, int exp, int turns, double x0_mm, doub
     if (!readExpCfg(ws, exp, c, err)) { std::cerr << err << "\n"; return 1; }
     const int TARGET = 30000;
     mc::Injection inj;
-    try { inj = mc::inject(ws, c.lattice, c.group, c.planes, c.design, c.sr, c.stg); }
+    try { inj = mc::inject(ws, c.lattice, c.group, c.planes, c.design, c.sr, c.stg, false, exp); }
     catch (const std::exception& e) { std::cerr << e.what() << "\n"; return 1; }
     if (x0_mm != 0.0 || y0_mm != 0.0) {
         inj.states.clear(); inj.states.push_back({ x0_mm * 1e-3, 0.0, y0_mm * 1e-3, 0.0, 0.0, 0.0 });

@@ -69,6 +69,38 @@ def spectrum(traces, ylog=True, xlog=False, height=360, ylabel="ф/с/мрад²
     return fig
 
 
+_EFF_RU = dict(extended="протяжённый источник", poles="структура полюсов ИД", fringe="мягкий край диполей",
+               beam="размер пучка")
+
+
+def calc_table(fast, fp):
+    """Блок «режим счёта»: быстрый vs точный и (если есть) вклады эффектов точного режима."""
+    if fp.get("calc") != "accurate":
+        return ('<p class="note">Тепловая карта — быстрый режим (точечный эмиттер). Точный режим (Льенар по '
+                'траектории: протяжённый источник, полюса ИД, мягкий край диполей, пучок) — флаг --calc accurate.</p>')
+
+    def pct(a, b):
+        return f"{(a / b - 1) * 100:+.2f}%" if b else "—"
+    rows = (f"<tr><td>быстрый (точечный эмиттер)</td><td>{fast['peak']:.2f}</td><td>{fast['total']:.1f}</td>"
+            f"<td>({fast['cu']:+.3f}, {fast['cv']:+.3f})</td></tr>"
+            f"<tr><td><b>точный</b> (Льенар по траектории)</td><td><b>{fp['peak']:.2f}</b> ({pct(fp['peak'], fast['peak'])})</td>"
+            f"<td><b>{fp['total']:.1f}</b> ({pct(fp['total'], fast['total'])})</td>"
+            f"<td>({fp['cu']:+.3f}, {fp['cv']:+.3f})</td></tr>")
+    br = ""
+    if fp.get("breakdown"):
+        br = ("<h3>Вклад эффектов точного режима (итог минус итог без эффекта)</h3><table><tr><th>эффект</th>"
+              "<th>Δ пик, Вт/мм²</th><th>Δ мощность, Вт</th><th>Δ центроид, мм</th></tr>"
+              + "".join(f"<tr><td>{_EFF_RU.get(e, e)}</td><td>{fp['peak'] - r['peak']:+.3f}</td>"
+                        f"<td>{fp['total'] - r['total']:+.2f}</td>"
+                        f"<td>({fp['cu'] - r['cu']:+.4f}, {fp['cv'] - r['cv']:+.4f})</td></tr>"
+                        for e, r in fp["breakdown"].items()) + "</table>")
+    eff = ", ".join(_EFF_RU.get(e, e) for e in fp["effects"]) or "—"
+    return (f"<h3>Режим счёта тепловой карты: точный</h3><table><tr><th>режим</th><th>пик, Вт/мм²</th>"
+            f"<th>перехвачено, Вт</th><th>центроид (u, v), мм</th></tr>{rows}</table>{br}"
+            f'<p class="note">Эффекты: {eff}. {fp["n_samples"]} точек траектории, {fp["time_s"]:.0f} с. '
+            f"Пучковые εx, κ, σδ — допущения.</p>")
+
+
 def kpi(label, val, unit=""):
     return f'<div class="kpi"><div class="l">{label}</div><div class="v">{val}</div><div class="u">{unit}</div></div>'
 
@@ -111,7 +143,14 @@ def undulator_report(scr, lattice, gap, args):
     pole_insts = set().union(*groups.values()) if groups else set()
     bends = find_bends(scr, ci, byid, pole_insts, args.E, et)
     fp = power_footprint(scr, [emits[gid] for gid in found], 301, bends, args.E, args.I)  # мелкая сетка → зум чёткий
+    fast = fp
+    if args.calc == "accurate":
+        import sr_trace as st
+        ctx = st.make_context(lattice, None, et, gap, E=args.E, I=args.I, ci=ci, byid=byid, groups=groups)
+        fp = st.footprint_accurate(scr, ctx, args.effects, 301, args.cull, sr.P.emit_x, args.kappa, args.sigE,
+                                   args.breakdown)
     heat_div = fig_div(heatmap(fp["S"], fp["extent"], "Вт/мм²"))
+    calc_html = calc_table(fast, fp)
 
     # ── спектр на оси (B) с качеством ИД (#1) ──
     tr = trajectory(K, sr.P.lam_u, sr.P.N, g, args.ppp); scale, E1 = calibrate(tr)
@@ -166,6 +205,7 @@ def undulator_report(scr, lattice, gap, args):
                       "энергию по частотам, не по углам. Полосы — поворотное СИ соседних диполей (сумма мощностей). "
                       + ("Ось конуса и веера — по замкнутой орбите электрона." if et is not None
                          else "Ось конуса и веера — по рамке железа."))
+            + calc_html
             + UNIT_NOTE
             + section("Спектр на оси", spec_div,
                       "Гармоники (острые — один электрон; размытые — пучок с реальными β, σ_E и качеством ИД).",
@@ -190,6 +230,12 @@ def bend_report(scr, lattice, gap, args):
             continue
         emitters.append(emitter_geom(d, scr["C"], g))
     fp = bend_footprint(scr, emitters, g, args.I, 241)
+    fast = fp
+    if args.calc == "accurate":
+        import sr_trace as st
+        ctx = st.make_context(lattice, None, None, gap, E=args.E, I=args.I, ci=ci, byid=byid)
+        fp = st.footprint_accurate(scr, ctx, args.effects, 241, args.cull, sr.P.emit_x, args.kappa, args.sigE,
+                                   args.breakdown)
     foot_div = fig_div(heatmap(fp["S"], fp["extent"], "Вт/мм²", equal=False))
 
     dc = _unit(scr["C"] - bound["P"]); psi = math.asin(max(-1, min(1, float(np.dot(dc, bound["vhat"])))))
@@ -212,6 +258,7 @@ def bend_report(scr, lattice, gap, args):
             + section("Веер поворотного СИ", foot_div,
                       f"Горизонтальная полоса (развёртка дуги), вертикаль ~1/γ; перехвачено {fp['total']:.0f} Вт. "
                       f"Зум (колесо/рамка) — рассмотреть вертикальный профиль.")
+            + calc_table(fast, fp)
             + UNIT_NOTE
             + section("Спектр поворотного СИ в центре экрана", spec_div,
                       f"Сплошной спектр, пик у ε_c={bound['ec']:.2f} кэВ (пунктир), завал выше.")
@@ -231,6 +278,11 @@ def main():
     ap.add_argument("--source", choices=["orbit", "magnet"], default="orbit",
                     help="направление света в тепловой карте: по орбите электрона или по рамке железа")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--calc", choices=["fast", "accurate"], default="fast",
+                    help="тепловая карта: fast — точечный эмиттер; accurate — Льенар по траектории (sr_trace), медленно")
+    ap.add_argument("--effects", default="all", help="эффекты точного режима: all | none | extended,poles,fringe,beam | all,-beam")
+    ap.add_argument("--breakdown", action="store_true", help="точный режим: таблица вкладов эффектов")
+    ap.add_argument("--cull", type=float, default=40.0, help="точный режим: отсев точек траектории (запас cull/γ)")
     a = ap.parse_args()
 
     scr = next((s for s in load_screens(a.lattice) if s["sid"] == a.screen), None)

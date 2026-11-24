@@ -66,6 +66,7 @@ struct Node {
     double theta0_0 = 0, edge1_0 = 0, edge2_0 = 0;   // исходные угол/грани изгиба (база BSCALE — живой зазор ИД)
     bool   cavity = false;                           // узел-резонатор пути (плоскость, кик делает трекер ВЧ)
     double cav_share = 0, s_c = 0;                   // доля напряжения, опорная дуга от старт-плоскости
+    bool   kicker = false; int kick_idx = -1;        // узел-импульсный кикер (индекс в Injection::kickers)
     // Плоскость инжекции — тело=тождество; иначе физдвижок (Element::body сам даёт дрейф для не-sector/не-kick).
     State  body(const State& s, IsrRng* rng = nullptr) const { return is_plane ? s : phys.body(s, rng); }
 };
@@ -340,6 +341,92 @@ inline std::vector<CavitySpec> readCavities(const std::string& ws, int lattice) 
     return out;
 }
 
+// ---- Импульсные кикеры (beam_injection.KickerNode / load_kickers) ----------------------------------------
+// «Железо» — pulsed_kickers.csv (по lattice_id: плоскость, shape half_sine|trapezoid, duration_s, rise_s), импульс —
+// kicker_timing.csv (по exp_id: theta_x_rad, theta_y_rad, delay_s, period_s). Удар (elegant KICKER при L = 0):
+// px += θx·f(τ), py += θy·f(τ), τ = T/c − delay (с периодом — по модулю), T — абсолютное время опыта (c·t, м).
+inline double pulseShape(int shape, double D, double rise, double tau) {
+    const double PI = 3.14159265358979323846;
+    if (tau < 0.0 || tau > D) return 0.0;
+    if (shape == 0) return std::sin(PI * tau / D);                     // half_sine
+    if (rise > 0.0) {                                                   // trapezoid
+        if (tau < rise) return tau / rise;
+        if (tau > D - rise) return (D - tau) / rise;
+    }
+    return 1.0;
+}
+
+struct KickerPulse {
+    std::string id; PlaneSpec pl; int shape = 0;                        // 0 half_sine, 1 trapezoid
+    double D = 0, rise = 0, thx = 0, thy = 0, delay = 0, period = -1.0, s_k = 0;   // period ≤ 0 — один импульс
+    double amplitude(double T) const {
+        double tau = T / C_LIGHT - delay;
+        if (period > 0) { if (tau < 0.0) return 0.0; tau = std::fmod(tau, period); }
+        return pulseShape(shape, D, rise, tau);
+    }
+    void apply(State& s, double T) const {
+        double f = amplitude(T);
+        if (f == 0.0) return;
+        s.px = s.px + thx * f; s.py = s.py + thy * f;
+    }
+};
+
+// Импульсы опыта exp: строки kicker_timing.csv + «железо» pulsed_kickers.csv[lattice]. Нет файлов/строк ⇒ пусто.
+inline std::vector<KickerPulse> readKickers(const std::string& ws, int lattice, int exp) {
+    std::vector<KickerPulse> out;
+    if (exp < 0) return out;
+    auto exists = [&](const std::string& p) { std::ifstream f(p); return (bool)f; };
+    std::string ptim = ws + "tables/kicker_timing.csv", pkik = ws + "tables/pulsed_kickers.csv";
+    if (!exists(ptim)) return out;
+    Table tm = readTable(ptim);
+    int te = tm.col("exp_id"), tk = tm.col("kicker_id"), tx = tm.col("theta_x_rad"), ty = tm.col("theta_y_rad"),
+        td = tm.col("delay_s"), tp = tm.col("period_s");
+    std::vector<const std::vector<std::string>*> mine;
+    for (auto& r : tm.rows) if (cell(r, te) == std::to_string(exp)) mine.push_back(&r);
+    if (mine.empty()) return out;
+    if (!exists(pkik)) throw std::runtime_error("kicker_timing: у опыта есть импульсы, но нет pulsed_kickers.csv");
+    Table hw = readTable(pkik);
+    int hk = hw.col("kicker_id"), hl = hw.col("lattice_id"), hs = hw.col("shape"), hd = hw.col("duration_s"),
+        hr = hw.col("rise_s");
+    static const char* const C6[6] = { "x", "y", "z", "nx", "ny", "nz" };
+    auto num = [](const std::string& s, double dflt) { return (s.empty() || s == "-") ? dflt : std::stod(s); };
+    for (auto* r : mine) {
+        KickerPulse k; k.id = cell(*r, tk);
+        const std::vector<std::string>* h = nullptr;
+        for (auto& rr : hw.rows) if (cell(rr, hk) == k.id && cell(rr, hl) == std::to_string(lattice)) { h = &rr; break; }
+        if (!h) throw std::runtime_error("kicker_timing: опыт включает кикер " + k.id + ", которого нет у решётки в pulsed_kickers.csv");
+        if (!readPlane(hw, *h, "", C6, k.pl)) throw std::runtime_error("pulsed_kickers: у кикера " + k.id + " нет плоскости");
+        std::string sh = cell(*h, hs);
+        for (auto& ch : sh) ch = (char)std::tolower((unsigned char)ch);
+        if (sh.empty() || sh == "half_sine") k.shape = 0;
+        else if (sh == "trapezoid") k.shape = 1;
+        else throw std::runtime_error("pulsed_kickers: кикер " + k.id + " — неизвестная форма " + sh);
+        k.D = num(cell(*h, hd), 0.0);
+        if (!(k.D > 0)) throw std::runtime_error("pulsed_kickers: кикер " + k.id + " — duration_s должна быть > 0");
+        k.rise = num(cell(*h, hr), 0.0);
+        if (k.shape == 1 && (k.rise < 0 || 2.0 * k.rise > k.D))
+            throw std::runtime_error("pulsed_kickers: кикер " + k.id + " — rise_s вне [0; duration_s/2]");
+        k.thx = num(cell(*r, tx), 0.0); k.thy = num(cell(*r, ty), 0.0); k.delay = num(cell(*r, td), 0.0);
+        std::string ps = cell(*r, tp);
+        if (!(ps.empty() || ps == "-")) {
+            k.period = std::stod(ps);
+            if (!(k.period >= k.D)) throw std::runtime_error("kicker_timing: кикер " + k.id + " — период короче импульса");
+        }
+        out.push_back(k);
+    }
+    return out;
+}
+
+// Часы импульсных кикеров — matrix_traj_export.KickClock: T = T0 + Σ Δt_raw/β(δ) по отрезкам между узлами-событиями
+// (кикеры и резонаторы, до кика резонатора); конец пролёта — плюс остаток. β по проектной энергии опыта.
+struct KickClock {
+    double design = 6000.0, T0 = 0, raw = 0, acc = 0;
+    double beta(double d) const { double pc = design * (1.0 + d); return pc / std::sqrt(pc * pc + MC2_MEV * MC2_MEV); }
+    void start(const State& s, double T) { T0 = T; raw = s.t; acc = 0.0; }
+    double advance(const State& s) { acc = acc + (s.t - raw) / beta(s.delta); raw = s.t; return T0 + acc; }
+    double end(const State& s) const { return T0 + (acc + (s.t - raw) / beta(s.delta)); }
+};
+
 // Положение плоскости в линии — beam_injection.locate_plane: slot k — промежуток ПОСЛЕ mags[k] (N−1 — шов
 // или луч после последнего), −1 — луч ДО первого; along — путь от выхода mags[k] (у −1 — от входа mags[0]).
 inline void locatePlane(const std::vector<Node>& mags, const PlaneSpec& pl, int& slot, double& along) {
@@ -395,14 +482,19 @@ inline bool samePlane(const PlaneSpec& p, const PlaneSpec& q, const Settings& st
 
 // Результат сборки опыта: старт, путь (элементы + узлы-резонаторы), финиш, канон. состояния, кольцо/линия,
 // опорная длина пролёта, дуги входов. end_share — доля резонаторов в плоскости финиша (< 0 ⇒ нет).
+// kickers — импульсы на пути (узлы ordered ссылаются по kick_idx), kick_begin/kick_end — индексы кикеров в старте
+// разомкнутой линии (начало пролёта) / в плоскости финиша (конец пролёта); design — энергия часов кикеров.
 struct Injection { Node plane; std::vector<Node> ordered; Node finish; std::vector<State> states;
                    bool closed; double ring_len = 0.0; std::vector<double> entry_arc;
-                   double end_share = -1.0; int n_cav = 0; std::vector<std::string> skipped; };
+                   double end_share = -1.0; int n_cav = 0; std::vector<std::string> skipped;
+                   std::vector<KickerPulse> kickers; std::vector<int> kick_begin, kick_end; int n_kick = 0;
+                   std::vector<std::string> kick_skipped; double design = 6000.0; };
 
 // Путь опыта без пучка — beam_injection.build_path: старт/финиш, элементы (с переходом через шов кольца),
-// резонаторы cav в своих промежутках или в плоскости финиша. rf ⇒ при пустом cav ВЧ в конце пролёта.
+// резонаторы cav и импульсные кикеры kick в своих промежутках или в плоскостях финиша/старта. rf ⇒ при пустом
+// cav ВЧ в конце пролёта.
 inline Injection buildPath(const std::vector<Node>& mags, const ExpPlanes& ep, const std::vector<CavitySpec>& cav,
-                           const Settings& stg, bool rf) {
+                           const Settings& stg, bool rf, const std::vector<KickerPulse>& kick = {}) {
     if (mags.empty()) throw std::runtime_error("решётка пуста");
     int N = (int)mags.size();
     Injection inj;
@@ -431,56 +523,78 @@ inline Injection buildPath(const std::vector<Node>& mags, const ExpPlanes& ep, c
     for (int i : order) slot_of_gap.push_back(i);
     size_t G = order.size();
     std::vector<std::vector<std::pair<double, Node>>> ins(G + 1);
-    if (rf && cav.empty()) inj.end_share = 1.0;                        // прежнее правило: ВЧ в конце пролёта
-    for (auto& cv : cav) {
-        if (samePlane(cv.pl, inj.closed ? ep.start : ep.finish, stg)) {
-            inj.end_share = (inj.end_share < 0 ? 0.0 : inj.end_share) + cv.share; continue;
-        }
-        if (!inj.closed && samePlane(cv.pl, ep.start, stg)) { inj.skipped.push_back(cv.id); continue; }
-        int kc = 0; double ac = 0; locatePlane(mags, cv.pl, kc, ac);
-        long hit = -1;
+    // где плоскость события на пути: −2 — финиш, −3 — старт разомкнутой линии, −1 — вне пути, g ≥ 0 — промежуток g
+    auto place = [&](const PlaneSpec& pl, double& along) -> long {
+        if (samePlane(pl, inj.closed ? ep.start : ep.finish, stg)) return -2;
+        if (!inj.closed && samePlane(pl, ep.start, stg)) return -3;
+        int kc = 0; double ac = 0; locatePlane(mags, pl, kc, ac);
         for (size_t g = 0; g <= G; ++g) {
             if (slot_of_gap[g] != kc) continue;
             double lo = (g == 0) ? as : -INFINITY, hi = (g == G) ? af : INFINITY;
-            if (lo < ac && ac < hi) { hit = (long)g; break; }
+            if (lo < ac && ac < hi) { along = ac; return (long)g; }
         }
-        if (hit < 0) { inj.skipped.push_back(cv.id); continue; }
+        return -1;
+    };
+    if (rf && cav.empty()) inj.end_share = 1.0;                        // прежнее правило: ВЧ в конце пролёта
+    for (auto& cv : cav) {
+        double ac = 0; long hit = place(cv.pl, ac);
+        if (hit == -2) { inj.end_share = (inj.end_share < 0 ? 0.0 : inj.end_share) + cv.share; continue; }
+        if (hit < 0) { inj.skipped.push_back(cv.id); continue; }        // вне пути или в старте разомкнутой линии
         Node nd = makePlane(cv.pl.c, cv.pl.n);
         nd.cavity = true; nd.cav_share = cv.share; nd.dev = "RF_CAVITY_" + cv.id;
         ins[hit].push_back({ ac, nd });
     }
+    for (auto& kp : kick) {
+        double ak = 0; long hit = place(kp.pl, ak);
+        if (hit == -1) { inj.kick_skipped.push_back(kp.id); continue; }
+        int idx = (int)inj.kickers.size(); inj.kickers.push_back(kp);
+        if (hit == -2) { inj.kick_end.push_back(idx); continue; }
+        if (hit == -3) { inj.kick_begin.push_back(idx); continue; }
+        Node nd = makePlane(kp.pl.c, kp.pl.n);
+        nd.kicker = true; nd.kick_idx = idx; nd.dev = "PULSE_KICKER_" + kp.id;
+        ins[hit].push_back({ ak, nd });
+    }
     if (rf && !cav.empty() && inj.end_share < 0) {
-        bool any = false; for (auto& v : ins) if (!v.empty()) any = true;
+        bool any = false; for (auto& v : ins) for (auto& pr : v) if (pr.second.cavity) any = true;
         if (!any) throw std::runtime_error("ни один резонатор установки (rf_cavities.csv) не стоит на пути старт → финиш");
     }
     for (size_t g = 0; g <= G; ++g) {
         std::stable_sort(ins[g].begin(), ins[g].end(),
                          [](const std::pair<double, Node>& a, const std::pair<double, Node>& b) { return a.first < b.first; });
-        for (auto& pr : ins[g]) { inj.ordered.push_back(pr.second); ++inj.n_cav; }
+        for (auto& pr : ins[g]) { inj.ordered.push_back(pr.second); if (pr.second.kicker) ++inj.n_kick; else ++inj.n_cav; }
         if (g < G) inj.ordered.push_back(mags[order[g]]);
     }
     // опорная арк-длина входа каждого узла (entry_arc) + длина пролёта (ring_len) — как beam_injection.build_path.
     auto& O = inj.ordered;
     inj.entry_arc.resize(O.size());
     inj.entry_arc[0] = dot(O[0].fr_in.p - inj.plane.fr_out.p, inj.plane.fr_out.axis);   // gap_in
-    if (O[0].cavity) O[0].s_c = inj.entry_arc[0];
+    auto mark = [&](size_t j) {
+        if (O[j].cavity) O[j].s_c = inj.entry_arc[j];
+        if (O[j].kicker) inj.kickers[O[j].kick_idx].s_k = inj.entry_arc[j];
+    };
+    mark(0);
     for (size_t j = 1; j < O.size(); ++j) {
         double ord_gap = dot(O[j].fr_in.p - O[j - 1].fr_out.p, O[j - 1].fr_out.axis);
         inj.entry_arc[j] = inj.entry_arc[j - 1] + O[j - 1].phys.Leff + ord_gap;
-        if (O[j].cavity) O[j].s_c = inj.entry_arc[j];
+        mark(j);
     }
     double gap_out = dot(inj.finish.fr_in.p - O.back().fr_out.p, O.back().fr_out.axis);
     inj.ring_len = inj.entry_arc.back() + O.back().phys.Leff + gap_out;
+    for (int i : inj.kick_begin) inj.kickers[i].s_k = 0.0;
+    for (int i : inj.kick_end) inj.kickers[i].s_k = inj.ring_len;
     return inj;
 }
 
-// Опыт → путь + канонические состояния пучка (rf ⇒ резонаторы установки встают в путь).
+// Опыт → путь + канонические состояния пучка (rf ⇒ резонаторы установки встают в путь; exp ≥ 0 ⇒ импульсные
+// кикеры опыта из kicker_timing.csv).
 inline Injection inject(const std::string& ws, int lattice, int group, const ExpPlanes& ep, double design_mev,
-                        bool sr, const Settings& stg, bool rf = false) {
+                        bool sr, const Settings& stg, bool rf = false, int exp = -1) {
     std::vector<Node> mags = buildLine(ws, lattice, design_mev, sr, stg);
     std::vector<LocalPart> parts = loadGroup(ws, group);
     if (parts.empty()) throw std::runtime_error("beam group not found");
-    Injection inj = buildPath(mags, ep, rf ? readCavities(ws, lattice) : std::vector<CavitySpec>(), stg, rf);
+    Injection inj = buildPath(mags, ep, rf ? readCavities(ws, lattice) : std::vector<CavitySpec>(), stg, rf,
+                              readKickers(ws, lattice, exp));
+    inj.design = design_mev;
     for (auto& p : parts) inj.states.push_back(localToCanonical(p));
     return inj;
 }
@@ -525,16 +639,34 @@ struct RfSpec {
     }
 };
 
-// Один пролёт старт → путь → финиш; rf != nullptr ⇒ кики резонаторов на пути (конец пролёта — RfSpec::endPass).
-inline State lineTurn(const Injection& inj, State s, const RfSpec* rf = nullptr, RfClock* k = nullptr) {
+// Один пролёт старт → путь → финиш; rf != nullptr ⇒ кики резонаторов на пути (конец пролёта — RfSpec::endPass);
+// kc != nullptr ⇒ часы и удары импульсных кикеров на пути (начало/конец пролёта — kickPassBegin/kickPassEnd).
+inline State lineTurn(const Injection& inj, State s, const RfSpec* rf = nullptr, RfClock* k = nullptr,
+                      KickClock* kc = nullptr) {
     const Frame* prev = &inj.plane.fr_out;
     for (const Node& nd : inj.ordered) {
         s = modified_drift(s, *prev, nd.fr_in, nd.same_plane_as_prev);
         s = nd.body(s);
+        if (kc && (nd.kicker || nd.cavity)) {                  // часы кикеров — до кика резонатора
+            double T = kc->advance(s);
+            if (nd.kicker) inj.kickers[nd.kick_idx].apply(s, T);
+        }
         if (nd.cavity && rf) rf->atCavity(s, nd, *k);
         prev = &nd.fr_out;
     }
     return modified_drift(s, *prev, inj.finish.fr_in, inj.finish.same_plane_as_prev);
+}
+
+// Начало пролёта: часы кикеров с абсолютного времени T + удары кикеров в старте разомкнутой линии.
+inline void kickPassBegin(const Injection& inj, State& s, KickClock& kc, double T) {
+    kc.start(s, T);
+    for (int i : inj.kick_begin) inj.kickers[i].apply(s, T);
+}
+// Конец пролёта (до ВЧ): T в плоскости финиша + удары кикеров в ней; возврат — T старта следующего пролёта.
+inline double kickPassEnd(const Injection& inj, State& s, const KickClock& kc) {
+    double T = kc.end(s);
+    for (int i : inj.kick_end) inj.kickers[i].apply(s, T);
+    return T;
 }
 
 // Длина ВЧ-оборота и (при auto) синхронная фаза φs = π − asin(U0/V) по потере опорной частицы (нули).
@@ -560,10 +692,13 @@ struct TrackResult { State final_state; int surv_turns; bool lost; };
 
 inline TrackResult trackParticle(const Injection& inj, const State& st0, int n_turns, const RfSpec& rf) {
     State s = st0; int done = 0; RfClock k;
+    bool kick = !inj.kickers.empty(); KickClock kc; kc.design = inj.design; double T = s.t;   // T — абсолютное время
     try {
         for (int turn = 0; turn < n_turns; ++turn) {
             k.start(s.t);
-            s = lineTurn(inj, s, &rf, &k);
+            if (kick) kickPassBegin(inj, s, kc, T);
+            s = lineTurn(inj, s, &rf, &k, kick ? &kc : nullptr);
+            if (kick) T = kickPassEnd(inj, s, kc);
             rf.endPass(s, k);
             done = turn + 1;
         }
@@ -579,11 +714,14 @@ struct LongResult { std::vector<std::array<double, 4>> tt; int surv_turns = 0; S
 
 inline LongResult trackLong(const Injection& inj, const State& st0, int n_turns, const RfSpec& rf) {
     LongResult r; State s = st0; RfClock k;
+    bool kick = !inj.kickers.empty(); KickClock kc; kc.design = inj.design; double T = s.t;   // T — абсолютное время
     r.tt.push_back({ s.x, s.px, s.y, s.py });
     try {
         for (int turn = 0; turn < n_turns; ++turn) {
             k.start(s.t);
-            s = lineTurn(inj, s, &rf, &k);
+            if (kick) kickPassBegin(inj, s, kc, T);
+            s = lineTurn(inj, s, &rf, &k, kick ? &kc : nullptr);
+            if (kick) T = kickPassEnd(inj, s, kc);
             rf.endPass(s, k);
             r.tt.push_back({ s.x, s.px, s.y, s.py });
             r.surv_turns = turn + 1;
@@ -615,22 +753,30 @@ inline FullResult trackFull(const Injection& inj, const State& st0, int n_turns,
         r.py.push_back(p.py); r.ct.push_back(p.t); r.delta.push_back(p.delta); r.elem.push_back(el);
         double X, Y, Z; gp(fr, p.x, p.y, X, Y, Z); r.X.push_back(X); r.Y.push_back(Y); r.Z.push_back(Z);
     };
+    bool kick = !inj.kickers.empty(); KickClock kc; kc.design = inj.design; double T = st.t;  // часы кикеров
+    auto event = [&](const Node& nd) {                                   // удар импульсного кикера после тела узла
+        if (!kick || !(nd.kicker || nd.cavity)) return;
+        double Tn = kc.advance(st);
+        if (nd.kicker) inj.kickers[nd.kick_idx].apply(st, Tn);
+    };
     rec(0.0, st, 0, inj.plane.fr_out);                                   // старт у плоскости
     try {
         for (int turn = 0; turn < n_turns; ++turn) {
             double base = turn * inj.ring_len;
+            if (kick) kickPassBegin(inj, st, kc, T);
             st = modified_drift(st, inj.plane.fr_out, O[0].fr_in, O[0].same_plane_as_prev);
             rec(base + ea[0], st, 1, O[0].fr_in);                        // вход эл.0
-            st = O[0].body(st);
+            st = O[0].body(st); event(O[0]);
             rec(base + ea[0] + O[0].phys.Leff, st, 1, O[0].fr_out);      // выход эл.0
             for (size_t j = 1; j < O.size(); ++j) {
                 st = modified_drift(st, O[j - 1].fr_out, O[j].fr_in, O[j].same_plane_as_prev);
                 rec(base + ea[j], st, (int64_t)(j + 1), O[j].fr_in);
-                st = O[j].body(st);
+                st = O[j].body(st); event(O[j]);
                 rec(base + ea[j] + O[j].phys.Leff, st, (int64_t)(j + 1), O[j].fr_out);
             }
             // финиш — явная плоскость опыта (кольцо: = старт, элемент 0; линия: элемент N+1, дальше портал)
             st = modified_drift(st, O.back().fr_out, inj.finish.fr_in, inj.finish.same_plane_as_prev);
+            if (kick) T = kickPassEnd(inj, st, kc);
             rec(base + inj.ring_len, st, inj.closed ? 0 : (int64_t)(O.size() + 1), inj.finish.fr_in);
             r.surv_turns = turn + 1;
         }

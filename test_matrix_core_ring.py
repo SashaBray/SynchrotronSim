@@ -8,7 +8,7 @@ C++ (build/MatrixTracker.exe --track <exp> <turns>) читает БД, инже�
 Экзерсизит весь геометрический слой: build_line, рамки frame/_rot, секторные дуги, modified_drift, инжекцию.
 Запуск: py -3.14 test_matrix_core_ring.py    Сборка: cmake --build build --target MatrixTracker
 """
-import os, sys, subprocess, unittest, shutil
+import os, sys, subprocess, unittest, shutil, contextlib
 
 os.environ["SS_SECTOR"] = "1"                    # секторный режим — ДО импорта matrix_tracker
 os.environ["SS_SR"] = "1"                        # СИ (exp1/2 в radiation_params.csv включают его)
@@ -240,6 +240,132 @@ class TestMatrixCoreRing(unittest.TestCase):
             shutil.move(bak, path)
             for g in guards:
                 self._npz_restore(*g)
+
+    def test_pulsed_kickers(self):
+        # ИМПУЛЬСНЫЕ КИКЕРЫ (временные строки pulsed_kickers.csv + kicker_timing.csv): exp 26 (sine + СИ) —
+        # полусинус 2 нс в середине кольца на пролёте 1; exp 3 (SP1, портал, без СИ) — периодическая трапеция
+        # в середине линии и в плоскости финиша на каждом пролёте. C++ ≡ Python по 6D, удар заметен.
+        import matrix_tracker as mt
+        import exp_planes as ep
+        import beam_injection as bi
+        guards = [self._npz_guard(e) for e in (3, 26)]
+
+        def mid(lat):
+            mags = ep._mags(lat); _r, _l, s_in, s_out, _C = ep._arcs(mags)
+            j = next(k for k in range(len(mags) // 2, len(mags) - 1) if s_in[k + 1] - s_out[k] > 0.3)
+            return ep.plane_at_s(lat, 0.5 * (s_out[j] + s_in[j + 1]), mags)
+
+        def worst_of(d, cpp, turns):
+            w = 0.0
+            for i, (fin, surv) in enumerate(zip(d["finals"], d["surv_turns"])):
+                self.assertEqual(surv == turns, cpp[i][0] != "LOST", f"ч{i}: выживание C++/Python")
+                if surv == turns:
+                    w = max(w, max(abs(a - b) for a, b in zip(fin, cpp[i][:6])))
+            return w
+        try:
+            with _temp_kick_tables():
+                spec = mt.rf_spec(mt.load_radiation(26))
+                ref = mte.long_trajectories(26, 1, n_turns=3, rf=spec)
+                k1 = ep.write_kicker(26, mid(26), 2e-9, note="тест")
+                ep.write_timing(26, k1, 1e-5, 3e-6, ep.reference_time(26, k1, 1) - 1e-9)
+                d = mte.long_trajectories(26, 1, n_turns=3, rf=spec)
+                w = worst_of(d, cpp_track(26, 3), 3)
+                eff = max(abs(a[0] - b[0]) for a, b in zip(d["finals"], ref["finals"]))
+                self.assertEqual(len(d["kickers"]), 1)
+                self.assertLess(w, 1e-9, f"кикер, exp 26: C++ vs Python {w:.2e}")
+                self.assertGreater(eff, 1e-6, "удар кикера не виден")
+                print(f"  [exp 26, sine + СИ, кикер s={d['kickers'][0][1]:.3f} м] 6D C++ vs Python: {w:.2e}, "
+                      f"эффект |Δx| {eff:.2e} м")
+                def sp1():                                         # у опыта 3 СИ нет — Python без СИ
+                    os.environ["SS_SR"] = ""
+                    try:
+                        return mte.long_trajectories(3, 1, n_turns=4)
+                    finally:
+                        os.environ["SS_SR"] = "1"
+                ref3 = sp1()
+                _st, fin = bi.planes_of(bi.experiment_row(3))
+                k2 = ep.write_kicker(3, mid(3), 4e-9, "trapezoid", 1e-9, note="тест")
+                k3 = ep.write_kicker(3, fin, 4e-9, "trapezoid", 1e-9, note="тест: финиш")
+                T1 = ep.reference_time(3, k2, 1) - ep.reference_time(3, k2, 0)
+                for k in (k2, k3):
+                    ep.write_timing(3, k, 2e-6, -1e-6, ep.reference_time(3, k, 0) - 2e-9, T1)
+                d3 = sp1()
+                w3 = worst_of(d3, cpp_track(3, 4), 4)
+                eff3 = max(abs(a[1] - b[1]) for a, b in zip(d3["finals"], ref3["finals"]))
+                self.assertEqual(len(d3["kickers"]), 2)
+                self.assertLess(w3, 1e-9, f"кикеры, SP1 портал: C++ vs Python {w3:.2e}")
+                self.assertGreater(eff3, 1e-6, "удар кикеров SP1 не виден")
+                print(f"  [SP1 exp 3, портал, 2 кикера (середина + финиш), каждый пролёт] 6D C++ vs Python: "
+                      f"{w3:.2e}, эффект |Δpx| {eff3:.2e}")
+        finally:
+            for g in guards:
+                self._npz_restore(*g)
+
+    def test_kick_twiss_response(self):
+        # Отклик на короткий импульс θ на пролёте 0 (СИЛА-26, временный опыт 990 без СИ/ВЧ): у старта
+        # x_n = θ·√(β_k·β_0)·sin(2πν·n − ψ_k), n ≥ 1, по Твиссу C++-кольца; до удара x не меняется.
+        import matrix_tracker as mt
+        import exp_planes as ep
+        import ring_cpp as rc
+        import ring_analysis as ra
+        LAT, EXP, TURNS, TH = 26, 990, 12, 1e-6
+        expf = os.path.join(mt.TB, "experiments.csv"); bak = expf + ".testbak"
+        npz = os.path.join(ROOT, "workspace", "results", f"trajectories_local_exp{EXP}.npz")
+        mags = ep._mags(LAT); _r, lead, s_in, s_out, _C = ep._arcs(mags)
+        j = next(k for k in range(len(mags) // 3, len(mags) - 1) if s_in[k + 1] - s_out[k] > 0.3)
+        d = 0.5 * (s_in[j + 1] - s_out[j])
+
+        def tbt():
+            subprocess.run([EXE, "--track", str(EXP), str(TURNS)], capture_output=True, text=True, check=True)
+            with np.load(npz) as z:
+                n0 = int(z["tt_counts"][0])
+                return np.array(z["tt_x"][:n0])
+        shutil.copy2(expf, bak)
+        try:
+            ep.write_experiment(EXP, lattice=LAT, group=1)
+            x0 = tbt()
+            with _temp_kick_tables():
+                kid = ep.write_kicker(LAT, ep.plane_at_s(LAT, s_out[j] + d, mags), 2e-9, note="тест")
+                ep.write_timing(EXP, kid, TH, 0.0, ep.reference_time(EXP, kid, 0) - 1e-9)
+                x1 = tbt()
+        finally:
+            shutil.move(bak, expf)
+            if os.path.exists(npz):
+                os.remove(npz)
+        R = rc.CppRing(lattice=LAT, start_before_first_m=lead)
+        try:
+            tw = ra.twiss(R)
+        finally:
+            R.close()
+        bj, aj, pj = tw["betax"][j], tw["alphax"][j], tw["psix"][j]
+        bk = bj - 2 * aj * d + (1 + aj * aj) / bj * d * d
+        pk = pj + np.arctan2(d, bj - aj * d)
+        n = np.arange(len(x1)); amp = TH * np.sqrt(bk * tw["betax"][-1])
+        pred = np.where(n >= 1, amp * np.sin(2 * np.pi * tw["nux"] * n - pk), 0.0)
+        err = float(np.max(np.abs((x1 - x0) - pred)))
+        self.assertEqual(float(x1[0] - x0[0]), 0.0)
+        self.assertLess(err / amp, 2e-3, f"отклик на кикер vs Твисс: {err / amp:.2e}")
+        print(f"  [СИЛА-26, θ = 1 мкрад, амплитуда {amp * 1e6:.3f} мкм, {TURNS} об.] |трек − Твисс|/A = {err / amp:.2e}")
+
+
+@contextlib.contextmanager
+def _temp_kick_tables():
+    """pulsed_kickers.csv / kicker_timing.csv — по выходе как были (не было файла — удаляется)."""
+    import matrix_tracker as mt
+    saved = []
+    for n in ("pulsed_kickers.csv", "kicker_timing.csv"):
+        p = os.path.join(mt.TB, n); had = os.path.exists(p)
+        if had:
+            shutil.copy2(p, p + ".testbak")
+        saved.append((p, had))
+    try:
+        yield
+    finally:
+        for p, had in saved:
+            if had:
+                shutil.move(p + ".testbak", p)
+            elif os.path.exists(p):
+                os.remove(p)
 
 
 if __name__ == "__main__":

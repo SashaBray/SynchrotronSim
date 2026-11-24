@@ -301,6 +301,7 @@ class ParticleLost(Exception):
 
 class Magnet:
     is_cavity = False                                     # узел-резонатор пути опыта — beam_injection.CavityNode
+    is_kicker = False                                     # узел-импульсный кикер — beam_injection.KickerNode
 
     def __init__(self, insts, eff, phys, coup, trans, source="physical", settings=None):
         r0 = insts[0]

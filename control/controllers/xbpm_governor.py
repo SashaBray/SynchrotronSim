@@ -43,3 +43,8 @@ class XBPMGovernor(Controller):
     def reset(self):
         if hasattr(self, "ts"):
             self.ts[:] = 0.0
+
+    def track(self, contribution):
+        """Безударное включение: медленный вклад = текущий вклад контура."""
+        if hasattr(self, "act"):
+            self.ts = np.array([float(contribution.get(pid, 0.0)) for pid in self.act])

@@ -235,7 +235,8 @@ class EngineThread(threading.Thread):
                 self._screen_val[addr] = {"error": f"{type(e).__name__}: {e}"}
             del self._screen_job[addr]; job = None
         cfg = self._screens.get(addr, {}) or {}
-        ckey = (int(cfg.get("res") or 121), tuple(float(v) for v in (cfg.get("point") or (0.0, 0.0))))
+        ckey = (int(cfg.get("res") or 121), tuple(float(v) for v in (cfg.get("point") or (0.0, 0.0))),
+                _quantity(cfg))
         try:
             from control.recorders import ScreenRecorder
             sid = addr.split(".", 1)[1] if "." in addr else addr
@@ -275,6 +276,8 @@ class EngineThread(threading.Thread):
         st = self.state if st is None else st
         mesh = int(cfg.get("res") or 121)
         pt = cfg.get("point") or (0.0, 0.0)                 # точка на экране (мм) для спектра; (0,0)=на оси
+        if _quantity(cfg) == "power":
+            return self._compute_power(sid, mesh, pt, st)
         try:
             from control.recorders import ScreenRecorder
             rec = ScreenRecorder(params=sid, mesh=mesh, point=pt)
@@ -299,9 +302,48 @@ class EngineThread(threading.Thread):
                                    "flux": np.asarray(sp["flux"], float).tolist(),
                                    "u_mm": float(sp["u_mm"]), "v_mm": float(sp["v_mm"]),
                                    "E1": float(sp["E1_keV"])}
+            out["quantity"] = "flux"
             return out
         except Exception as e:                      # экран опционален/тяжёл — ошибку отдаём окну, не падаем
             return {"error": f"{type(e).__name__}: {e}"}
+
+    def _compute_power(self, sid: str, mesh: int, pt, st) -> dict:
+        """Карта ПЛОТНОСТИ МОЩНОСТИ (Вт/мм², быстрый режим `screen_analysis.live_power_map`) на живых зазорах
+        всех ондуляторов + веера соседних диполей; геометрия экрана — как у сцены. Спектр в точке — тот же,
+        что в режиме потока (зазор источника)."""
+        try:
+            import os, sys
+            und = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "undulators")
+            if und not in sys.path:
+                sys.path.insert(0, und)
+            import screen_analysis as sa
+            import undulator_sr as sr
+            from control.recorders import ScreenRecorder
+            gaps = {gid: float(u.gap_mm) for gid, u in (getattr(st, "undulators", None) or {}).items()}
+            lattice = int(getattr(self.plant, "lattice", None) or 26)
+            fp = sa.live_power_map(lattice, sid, gaps, mesh)
+            if fp is None:
+                return {"error": f"карта мощности: экран {sid} не построить (источник — не ондулятор решётки {lattice})"}
+            rec = ScreenRecorder(params=sid, mesh=mesh, point=pt)
+            gap = float(rec._live_gap(st))
+            out = {"heatmap": np.asarray(fp["S"], float).tolist(), "extent": [float(e) for e in fp["extent"]],
+                   "mesh": mesh, "quantity": "power", "gap": gap,
+                   "e1": float(sr.harmonic_energy_keV(1, sr.K_of_B0(sr.B0_of_gap(gap)), 0.0)),
+                   "peak": fp["peak"], "total": fp["total"], "und_W": fp["und_W"], "bend_W": fp["bend_W"],
+                   "n_bend": fp["n_bend"], "centroid": [fp["cu"], fp["cv"]], "D": fp.get("D")}
+            sp = rec.point_spectrum(gap)                     # плечо — как в режиме потока (dist_m экрана)
+            if isinstance(sp, dict):
+                out["spectrum"] = {"E_keV": np.asarray(sp["E_keV"], float).tolist(),
+                                   "flux": np.asarray(sp["flux"], float).tolist(),
+                                   "u_mm": float(sp["u_mm"]), "v_mm": float(sp["v_mm"]), "E1": float(sp["E1_keV"])}
+            return out
+        except Exception as e:                      # экран опционален — ошибку отдаём окну, не падаем
+            return {"error": f"{type(e).__name__}: {e}"}
+
+
+def _quantity(cfg) -> str:
+    """Что рисует экран: "power" (мощность, Вт/мм²) или "flux" (поток на E₁, по умолчанию — как раньше)."""
+    return "power" if str((cfg or {}).get("quantity") or "").lower() == "power" else "flux"
 
 
 def build_session(lattice: int = 26, nsl: int = 8, settle_turns: int = 250, fofb: bool = True,

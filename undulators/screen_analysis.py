@@ -28,8 +28,15 @@
 Полюса ИД из поиска диполей исключены (они уже в эмиттере ИД).
 Зазор всех устройств задаётся --gap (как при вставке insert_undulators); позже — по инстансу.
 
+РЕЖИМЫ СЧЁТА (--calc). fast (по умолчанию) — всё описанное выше: точечный эмиттер ИД с табличной угловой
+мощностью и веера из точки отбора; ~1 с на экран. accurate — прямое интегрирование формулы Льенара по траектории
+электрона (undulators/sr_trace.py): протяжённый источник, реальная структура полюсов ИД (концевые полюса),
+мягкий край диполей по карте поля, свёртка с размером пучка; ~10–60 с на экран, --breakdown — вклад каждого
+эффекта (--effects all,-beam … — выключить эффект). В точном режиме строка быстрого печатается для сравнения.
+
 ЗАПУСК
   py -3.14 undulators/screen_analysis.py --lattice 27 --gap 5
+  py -3.14 undulators/screen_analysis.py --lattice 27 --calc accurate --breakdown   # точный режим + вклады
   py -3.14 undulators/screen_analysis.py --lattice 27 --ws <папка_возмущённой_машины>   # увод при перекосе
   py -3.14 undulators/screen_analysis.py --lattice 27 --model gauss --no-bends           # прежняя модель
 """
@@ -227,7 +234,72 @@ def footprint(scr, emitters, mesh, bends=None, E=None, I=None):
                 cu=cu, cv=cv, ru=ru, rv=rv)
 
 
-def save_png(scr, fp, path, gap):
+SCREEN_DEFAULT_DIST = 12.0                               # как у сцены кокпита (client.scene3d), если строки нет
+SCREEN_DEFAULT_SIZE_MM = 50.0
+_LIVE = {}                                               # (решётка, экран) → таблицы, геометрия экрана, веера
+
+
+def _screen_rows():
+    p = SCR if os.path.exists(SCR) else None
+    if p is None:
+        return []
+    with open(p, encoding="utf-8-sig") as f:
+        return list(csv.DictReader(f, delimiter=";"))
+
+
+def live_screen(lattice, screen_id, groups, ci, byid):
+    """Геометрия экрана для живой карты (кокпит). Есть замороженная строка этой решётки — она; иначе экран
+    строится так же, как его рисует сцена кокпита: по оси ондулятора-источника (по рамке железа решётки) на
+    расстоянии dist_m строки с тем же source_ref/screen_id из любой решётки (нет — 12 м), размер — из той же
+    строки (нет — 50×50 мм), плоскость поперёк оси. None — источник не ондулятор этой решётки."""
+    rows = _screen_rows()
+    for r in rows:
+        if r.get("lattice_id") == str(lattice) and r.get("screen_id") == screen_id:
+            return next(s for s in load_screens(lattice) if s["sid"] == screen_id)
+    row = next((r for r in rows if r.get("screen_id") == screen_id), None)
+    src = (row or {}).get("source_ref", "").strip() or (screen_id[4:] if screen_id.startswith("SCR_") else "")
+    if (row or {}).get("mode") == "bend" or src not in groups:
+        return None
+    P, axis, _, _ = emitter_frame(groups[src], ci, byid)
+    if P is None:
+        return None
+    f = lambda k, d: float((row or {}).get(k) or 0) or d
+    from build_screens import screen_frame
+    n = -axis; u, v = screen_frame(n)
+    return dict(sid=screen_id, src=src, C=P + f("dist_m", SCREEN_DEFAULT_DIST) * axis, n=n, u=u, v=v,
+                w=f("width_mm", SCREEN_DEFAULT_SIZE_MM), h=f("height_mm", SCREEN_DEFAULT_SIZE_MM), mode="axis")
+
+
+def live_power_map(lattice, screen_id, gaps, mesh=121, default_gap=5.0, bends=True):
+    """Карта ПЛОТНОСТИ МОЩНОСТИ (быстрый режим, Льенар) для живого кокпита: зазор КАЖДОГО ондулятора — из gaps
+    {gid: мм} (нет — default_gap), источник — по рамке железа (номинальная машина), веера соседних диполей —
+    как в footprint. Таблицы машины, геометрия экрана и веера кэшируются по (решётка, экран). Возврат — dict
+    footprint (S [Вт/мм²], extent, peak, total, und_W, bend_W, n_bend, центроид) + illuminators [(gid, зазор)],
+    src, D; None — экран не построить (не ондуляторный источник этой решётки)."""
+    key = (int(lattice), str(screen_id), bool(bends))
+    c = _LIVE.get(key)
+    if c is None:
+        ci, byid = load_lattice(lattice, None)
+        groups = load_groups(lattice)
+        scr = live_screen(lattice, screen_id, groups, ci, byid)
+        if scr is None:
+            return None
+        poles = set().union(*groups.values()) if groups else set()
+        c = dict(ci=ci, byid=byid, groups=groups, scr=scr, fans=find_bends(scr, ci, byid, poles) if bends else [])
+        _LIVE[key] = c
+    scr = c["scr"]; ems, ill = [], []
+    for gid, insts in c["groups"].items():
+        gap = float(gaps.get(gid, default_gap))
+        em = make_emitters({gid: insts}, c["ci"], c["byid"], gap)
+        if gid in em and find_illuminators(scr, em):
+            ems.append(em[gid]); ill.append((gid, gap))
+    fp = footprint(scr, ems, int(mesh), c["fans"])
+    srcP = emitter_frame(c["groups"][scr["src"]], c["ci"], c["byid"])[0] if scr["src"] in c["groups"] else None
+    fp.update(illuminators=ill, src=scr["src"], D=float(np.linalg.norm(scr["C"] - srcP)) if srcP is not None else None)
+    return fp
+
+
+def save_png(scr, fp, path, gap, calc="fast"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -235,7 +307,7 @@ def save_png(scr, fp, path, gap):
     im = ax.imshow(fp["S"].T, origin="lower", extent=fp["extent"], aspect="equal", cmap="inferno")
     ax.plot(fp["cu"], fp["cv"], "+", color="cyan", ms=10, mew=1.5)
     ax.set_xlabel("u (горизонт.), мм"); ax.set_ylabel("v (верт.), мм")
-    ax.set_title(f"{scr['sid']} ← {scr['src']}  (зазор {gap:g} мм)\n"
+    ax.set_title(f"{scr['sid']} ← {scr['src']}  (зазор {gap:g} мм, {'точный' if calc == 'accurate' else 'быстрый'})\n"
                  f"пик {fp['peak']:.1f} Вт/мм²,  перехвачено {fp['total']:.0f} Вт", fontsize=9)
     cb = fig.colorbar(im, ax=ax, shrink=0.85); cb.set_label("Вт/мм²", fontsize=8)
     fig.tight_layout(); fig.savefig(path, dpi=120); plt.close(fig)
@@ -255,6 +327,17 @@ def main():
                     help="направление света: по замкнутой орбите электрона (физично) или по рамке железа (прежнее)")
     ap.add_argument("--correct", action="store_true", help="с --source orbit: сначала скорректировать орбиту (SVD)")
     ap.add_argument("--no-png", action="store_true")
+    ap.add_argument("--calc", choices=["fast", "accurate"], default="fast",
+                    help="fast — точечный эмиттер (как раньше); accurate — Льенар по траектории (sr_trace), медленно")
+    ap.add_argument("--effects", default="all",
+                    help="эффекты точного режима: all | none | список extended,poles,fringe,beam | all,-beam")
+    ap.add_argument("--breakdown", action="store_true", help="точный режим: вклад каждого эффекта (счёт ×~3)")
+    ap.add_argument("--ppp", type=int, default=64, help="точный режим: точек траектории на период ИД")
+    ap.add_argument("--cull", type=float, default=40.0,
+                    help="точный режим: отсев точек траектории, не достающих экран с запасом cull/γ (0 — без отсева)")
+    ap.add_argument("--emit-x", type=float, default=sr.P.emit_x, help="точный режим: εx, м·рад (допущение)")
+    ap.add_argument("--kappa", type=float, default=sr.P.kappa, help="точный режим: связь εy/εx (допущение)")
+    ap.add_argument("--sigE", type=float, default=sr.P.sig_E, help="точный режим: σδ (допущение)")
     a = ap.parse_args()
 
     groups = load_groups(a.lattice)
@@ -268,6 +351,12 @@ def main():
     emit = make_emitters(groups, ci, byid, a.gap, a.model, et)   # эмиттер на устройство
     poles = set().union(*groups.values()) if groups else set()
 
+    ctx = None
+    if a.calc == "accurate":
+        import sr_trace as st
+        st.parse_effects(a.effects)                              # проверка списка до долгого счёта
+        ctx = st.make_context(a.lattice, a.ws, et, a.gap, ppp=a.ppp, ci=ci, byid=byid, groups=groups)
+
     os.makedirs(RESDIR, exist_ok=True)
     tag = "номинал" if not a.ws else os.path.basename(a.ws.rstrip("/\\"))
     print(f"решётка {a.lattice} [{tag}]: зазор {a.gap:g} мм → B0={B0:.3f} Т, K={K:.3f}; "
@@ -278,34 +367,50 @@ def main():
                f"по орбите электрона{' после коррекции' if et['corrected'] else ''} "
                f"(в рамках магнитов rms x={et['rms_x']*1e6:.2f}, y={et['rms_y']*1e6:.2f} мкм)")
     print(f"  источник света: {src_txt}")
+    if ctx is not None:
+        print(f"  режим: ТОЧНЫЙ (Льенар по траектории), эффекты {','.join(sorted(st.parse_effects(a.effects))) or '—'}; "
+              f"εx={a.emit_x:.3g} м·рад, κ={a.kappa:g}, σδ={a.sigE:g} (допущения); ppp={a.ppp}, cull={a.cull:g}/γ")
     print(f"  экранов: {len(screens)}; эмиттеров-ондуляторов: {len(emit)}\n")
     hdr = ["lattice_id", "screen_id", "source_ref", "n_illum", "illuminators", "gap_mm",
            "peak_W_mm2", "total_W", "centroid_u_mm", "centroid_v_mm", "rms_u_mm", "rms_v_mm",
-           "und_W", "bend_W", "n_bend", "model"]
+           "und_W", "bend_W", "n_bend", "model", "calc"]
     out_rows = []
     for scr in screens:
         found = find_illuminators(scr, emit, a.cone_cut)          # АВТОПОИСК: кто светит на этот экран
         bends = [] if a.no_bends else find_bends(scr, ci, byid, poles, et=et)
         emitters = [emit[g] for g in found]
-        if not emitters and not bends:
+        if not emitters and not bends and ctx is None:
             print(f"  {scr['sid']:12s} ← {scr['src']}: НЕТ осветителей (конус и веера мимо экрана)")
             out_rows.append([a.lattice, scr["sid"], scr["src"], 0, "", f"{a.gap:g}", 0, 0, 0, 0, 0, 0,
-                             0, 0, 0, a.model])
+                             0, 0, 0, a.model, a.calc])
             continue
         fp = footprint(scr, emitters, a.mesh, bends)
-        png = os.path.join(RESDIR, f"L{a.lattice}_{scr['sid']}{'' if not a.ws else '_pert'}.png")
+        model = a.model
+        if ctx is not None:                                      # быстрый — для сравнения, в CSV/PNG — точный
+            fast = fp
+            fp = st.footprint_accurate(scr, ctx, a.effects, a.mesh, a.cull, a.emit_x, a.kappa, a.sigE, a.breakdown)
+            found = fp["illuminators"]; model = "lienard-trace"
+        png = os.path.join(RESDIR, f"L{a.lattice}_{scr['sid']}{'' if not a.ws else '_pert'}"
+                                   f"{'_acc' if ctx is not None else ''}.png")
         if not a.no_png:
-            save_png(scr, fp, png, a.gap)
+            save_png(scr, fp, png, a.gap, a.calc)
         bend_txt = f" + {fp['n_bend']} диполь(ей) {fp['bend_W']:.0f} Вт" if fp["n_bend"] else ""
         print(f"  {scr['sid']:12s} ← {scr['src']}  осветит.: {','.join(found) or '—'}{bend_txt}  "
               f"пик {fp['peak']:7.1f} Вт/мм²  перехвач. {fp['total']:6.0f} Вт  "
               f"центроид ({fp['cu']:+.3f},{fp['cv']:+.3f}) мм  σ=({fp['ru']:.2f},{fp['rv']:.2f}) мм")
+        if ctx is not None:
+            print(f"      быстрый: пик {fast['peak']:7.2f} Вт/мм², перехв. {fast['total']:7.1f} Вт; " + st.compare_line(fast, fp))
+            if fp.get("chains"):
+                print(f"      цепочки диполей: {', '.join(fp['chains'])}")
+            for line in st.breakdown_lines(fp):
+                print(line)
         out_rows.append([a.lattice, scr["sid"], scr["src"], len(found), ",".join(found), f"{a.gap:g}",
                          f"{fp['peak']:.4f}", f"{fp['total']:.3f}", f"{fp['cu']:.5f}", f"{fp['cv']:.5f}",
                          f"{fp['ru']:.5f}", f"{fp['rv']:.5f}", f"{fp['und_W']:.3f}", f"{fp['bend_W']:.3f}",
-                         fp["n_bend"], a.model])
+                         fp["n_bend"], model, a.calc])
 
-    rp = os.path.join(RESDIR, f"screen_readings_L{a.lattice}{'' if not a.ws else '_pert'}.csv")
+    rp = os.path.join(RESDIR, f"screen_readings_L{a.lattice}{'' if not a.ws else '_pert'}"
+                              f"{'_acc' if ctx is not None else ''}.csv")
     with open(rp, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=";"); w.writerow(hdr); w.writerows(out_rows)
     print(f"\n[OK] {rp}")

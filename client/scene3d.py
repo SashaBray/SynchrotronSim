@@ -29,6 +29,11 @@ POLE_DEVS = {"und_UPM", "und_UPP", "und_UE0", "und_UE1"}
 HIDDEN_DEVS = {"und_UFC"}                 # прежний фокус-элемент ИД (в текущих решётках его нет)
 # типы, у которых рисуем ТЕЛО-блок (остальное — дрейфы/маркеры/мониторы — тел не имеют)
 DRAW_KINDS = {"dipole", "dq", "quad", "sext", "oct", "corrector", "kicker"}
+KIND_RU = {"dipole": "диполь", "dq": "диполь-квадруполь", "quad": "квадруполь", "sext": "секступоль",
+           "oct": "октуполь", "corrector": "корректор", "kicker": "корректор", "undulator": "ондулятор"}
+NAV_MERGE = 1e-3                          # м: строки в одной точке (обмотки, DQ I1..I3) — один шаг навигации
+NAV_LOCK = 0.05                           # м: камера «на элементе», если фокус от него ближе
+NAV_SNAP = 2.0                            # м: иначе берём ближайший к фокусу элемент, если он не дальше
 
 
 def _mag_names(plant):
@@ -81,7 +86,7 @@ def build_geometry(plant, state=None, *, decimate: int = 1) -> dict:
             nm = names[i] if i < len(names) else f"mag.{i}"
             kind = str(getattr(m, "kind", "") or "")
             cx, cy = float(m.center[0]), float(m.center[1])
-            entry = {"name": nm, "xy": [cx, cy], "kind": kind, "dev": dev}
+            entry = {"name": nm, "xy": [cx, cy], "kind": kind, "dev": dev, "s_idx": i}   # s_idx — порядок по пучку
             if kind in ("corrector", "kicker") and i in corr_pos:   # id реализованных H/V-киков корректора
                 j = corr_pos[i]
                 entry["aids"] = [f"corr.{j:03d}.hkick", f"corr.{j:03d}.vkick"]
@@ -131,8 +136,12 @@ def build_geometry(plant, state=None, *, decimate: int = 1) -> dict:
                 dv = str(getattr(mags[j], "dev", "") or "")
                 cells.append([float(mags[j].center[0]), float(mags[j].center[1]),
                               1 if dv in ("und_UE0", "und_UE1") else 0])
+            cen = (np.mean(np.asarray(cells, float)[:, :2], axis=0) if cells
+                   else np.array([float(m.center[0]), float(m.center[1])]))
             g["undulators"][gid] = {"xy": [float(m.center[0]), float(m.center[1])], "axis": axis,
-                                    "gap_mm": _gap_of(state, gid, default=plant.gap_mm), "poles": cells}
+                                    "gap_mm": _gap_of(state, gid, default=plant.gap_mm), "poles": cells,
+                                    "s_idx": int(seq[0]) if seq else idx,       # порядок по пучку (первый полюс)
+                                    "center": [float(cen[0]), float(cen[1])]}   # центр гребёнки — для камеры
     # доска могла знать ондуляторы, которых нет среди якорей (фейк-plant): добавить с нулём координат
     for gid in (getattr(state, "undulators", {}) or {}):
         g["undulators"].setdefault(gid, {"xy": [0.0, 0.0], "axis": [1.0, 0.0],
@@ -248,6 +257,65 @@ class SceneModel:
         pk = DRAW_KINDS | {"monitor"}                   # пикаем только «важные» элементы (не дрейфы/маркеры)
         self._pick_mask = (np.array([str(n.get("kind", "")) in pk for n in self.named], bool)
                            if self.named else np.zeros(0, bool))
+        self.nav = self._build_nav()
+        self._nav_xy = (np.asarray([it["xy"] for it in self.nav], float).reshape(-1, 2) if self.nav
+                        else np.zeros((0, 2)))
+
+    # ---- навигация камеры по элементам (Ctrl/Shift + ←/→) ----
+    def _build_nav(self) -> List[dict]:
+        """Элементы для перелёта камеры в ПОРЯДКЕ ДВИЖЕНИЯ ПУЧКА: тела магнитов (DRAW_KINDS) + ондуляторы целиком
+        (центр гребёнки полюсов). Строки в одной точке (обмотки корректора, DQ I1/I2/I3, пары секступолей)
+        склеиваются в один шаг — имя и тип по первой. type — тип устройства (dev; у ондулятора "undulator")."""
+        items = []
+        for k, n in enumerate(self.named):
+            kind = str(n.get("kind", ""))
+            if kind not in DRAW_KINDS:
+                continue
+            items.append({"name": str(n.get("name", "")), "xy": [float(n["xy"][0]), float(n["xy"][1])],
+                          "kind": kind, "type": str(n.get("dev", "") or kind), "s": float(n.get("s_idx", k))})
+        for gid, u in self.undulators.items():
+            if "s_idx" not in u:                       # нет положения по пучку (фейк-доска) — не в навигации
+                continue
+            c = u.get("center") or u.get("xy") or [0.0, 0.0]
+            items.append({"name": str(gid), "xy": [float(c[0]), float(c[1])], "kind": "undulator",
+                          "type": "undulator", "s": float(u["s_idx"]) - 0.5})
+        items.sort(key=lambda it: it["s"])
+        out = []
+        for it in items:
+            if out and np.hypot(it["xy"][0] - out[-1]["xy"][0], it["xy"][1] - out[-1]["xy"][1]) < NAV_MERGE:
+                continue
+            out.append(it)
+        return out
+
+    def nav_nearest(self, x: float, y: float):
+        """(индекс, расстояние) ближайшего элемента навигации к (x, y); None — навигации нет."""
+        if self._nav_xy.size == 0:
+            return None
+        d = np.hypot(self._nav_xy[:, 0] - float(x), self._nav_xy[:, 1] - float(y))
+        j = int(np.argmin(d))
+        return j, float(d[j])
+
+    def nav_step(self, i: int, step: int, same_type: bool = False) -> int:
+        """Соседний элемент от i: step=+1 — по движению пучка, −1 — навстречу; кольцо замкнуто (по кругу).
+        same_type — следующий элемент того же типа устройства (напр. следующий ондулятор)."""
+        n = len(self.nav)
+        if n == 0:
+            return i
+        t = self.nav[i]["type"]
+        j = i
+        for _ in range(n):
+            j = (j + (1 if step > 0 else -1)) % n
+            if not same_type or self.nav[j]["type"] == t:
+                return j
+        return i
+
+    def nav_label(self, i: int) -> str:
+        """Подпись для статус-строки: имя, вид и номер среди элементов того же типа."""
+        it = self.nav[i]
+        same = [k for k, x in enumerate(self.nav) if x["type"] == it["type"]]
+        return (f"{KIND_RU.get(it['kind'], it['kind'])} {it['name']} — {same.index(i) + 1} из {len(same)} "
+                f"({it['type']})" if it["kind"] != "undulator" else
+                f"ондулятор {it['name']} — {same.index(i) + 1} из {len(same)}")
 
     def ring_polyline(self) -> np.ndarray:
         """Точки обвода кольца (x,y,0), в порядке s. Пусто → (0,3)-массив."""
@@ -450,6 +518,7 @@ def make_ring_scene(parent=None, gap_scale: float = 1.0):
         picked_screen = Signal(str)      # (screen_id) — клик по плоскости экрана
         picked_undulator = Signal(str)   # (gid) — клик по модели ондулятора (гребёнка полюсов)
         picked_sensor = Signal(int)      # (idx = индекс ebpm) — клик по экрану-сенсору (BPM)
+        focused = Signal(str)            # камера перелетела на элемент (Ctrl/Shift+←/→) — подпись для статуса
 
         def __init__(self, parent=None, gap_scale=1.0):
             super().__init__(parent)
@@ -642,6 +711,9 @@ def make_ring_scene(parent=None, gap_scale: float = 1.0):
             self._dragging = False
             self._hover_name = None
             self._hover_actor = None
+            self._focus = None                           # индекс model.nav, на котором стоит камера
+            self._fly_timer = None
+            self.fly_steps = 10                          # кадров перелёта камеры (0 — мгновенно)
             self._prop_picker = None
             try:
                 import vtk
@@ -722,6 +794,9 @@ def make_ring_scene(parent=None, gap_scale: float = 1.0):
             nm = self._mag_at(hit)                            # магнит → центр элемента; иначе точка под курсором
             if nm:
                 self._center_on(nm[1], nm[2])
+                self._set_focus_at(nm[1], nm[2])
+            elif name.startswith(("und_up_", "und_lo_")) and self._focus_undulator(name[len("und_up_"):]):
+                pass                                          # ондулятор — центр его гребёнки (как при навигации)
             elif name.startswith(("screen_", "und_up_", "und_lo_", "sensors")):
                 self._center_on(hit[1], hit[2])
 
@@ -783,6 +858,98 @@ def make_ring_scene(parent=None, gap_scale: float = 1.0):
                         self.picked_sensor.emit(int(s["idx"]))
                     except Exception:
                         pass
+
+        # ---- навигация камеры: Ctrl+←/→ — соседний элемент, Shift+←/→ — соседний того же типа ----
+        def _set_focus_at(self, x, y):
+            """Запомнить элемент навигации в точке (x, y) как текущий фокус камеры."""
+            res = self.model.nav_nearest(x, y) if self.model is not None else None
+            self._focus = res[0] if res is not None and res[1] <= NAV_LOCK else None
+
+        def _focus_undulator(self, gid):
+            if self.model is None:
+                return False
+            for j, it in enumerate(self.model.nav):
+                if it["kind"] == "undulator" and it["name"] == gid:
+                    self._center_on(*it["xy"])
+                    self._focus = j
+                    return True
+            return False
+
+        def nav_step(self, step: int, same_type: bool = False):
+            """Перелёт камеры на соседний элемент (step=+1 — по пучку, −1 — навстречу; same_type — того же типа
+            устройства). Текущий — элемент, на котором стоит камера (последний клик/перелёт, если фокус не
+            сдвигали), иначе ближайший к фокусу камеры в пределах NAV_SNAP. Возврат — подпись или None."""
+            if self.model is None or not self.model.nav:
+                return None
+            try:
+                f = np.array(self.camera.focal_point, float)
+            except Exception:
+                return None
+            cur = None
+            if self._focus is not None and self._focus < len(self.model.nav):
+                xy = self.model.nav[self._focus]["xy"]
+                if np.hypot(xy[0] - f[0], xy[1] - f[1]) <= NAV_LOCK:
+                    cur = self._focus
+            if cur is None:
+                res = self.model.nav_nearest(f[0], f[1])
+                if res is not None and res[1] <= NAV_SNAP:
+                    cur = res[0]
+            if cur is None:
+                msg = "камера не на элементе — щёлкните по магниту или ондулятору, затем Ctrl/Shift + ←/→"
+                try:
+                    self.focused.emit(msg)
+                except Exception:
+                    pass
+                return None
+            j = self.model.nav_step(cur, step, same_type)
+            it = self.model.nav[j]
+            self._focus = j
+            self._fly_to(it["xy"][0], it["xy"][1])
+            self._hover_name = None
+            self._set_hover(it["name"] if it["kind"] != "undulator" else None, it["xy"][0], it["xy"][1])
+            label = self.model.nav_label(j)
+            try:
+                self.focused.emit("камера: " + label)
+            except Exception:
+                pass
+            return label
+
+        def _fly_to(self, mx, my):
+            """Плавно перевести фокус камеры в (mx, my, 0), сохраняя направление и дистанцию (как _center_on).
+            Новый перелёт поверх незаконченного начинается с текущего положения."""
+            if self._fly_timer is not None:
+                self._fly_timer.stop()
+                self._fly_timer = None
+            n = int(self.fly_steps)
+            if n <= 0:
+                self._center_on(mx, my)
+                return
+            try:
+                cam = self.camera
+                f0 = np.array(cam.focal_point, float); off = np.array(cam.position, float) - f0
+            except Exception:
+                return
+            f1 = np.array([float(mx), float(my), 0.0])
+            k = [0]
+            timer = QTimer(self)
+
+            def tick():
+                k[0] += 1
+                t = min(1.0, k[0] / n); w = t * t * (3.0 - 2.0 * t)          # smoothstep: мягкий старт/стоп
+                f = f0 + (f1 - f0) * w
+                try:
+                    cam.focal_point = tuple(float(v) for v in f)
+                    cam.position = tuple(float(v) for v in f + off)
+                    self.render()
+                except Exception:
+                    pass
+                if k[0] >= n:
+                    timer.stop()
+                    if self._fly_timer is timer:
+                        self._fly_timer = None
+            timer.timeout.connect(tick)
+            self._fly_timer = timer
+            timer.start(15)
 
         def _center_on(self, mx, my):
             """Центрировать камеру на (mx,my,0), СОХРАНЯЯ направление и дистанцию до фокуса (чистая панорама)."""
