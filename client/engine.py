@@ -28,7 +28,7 @@ from control import StateView
 
 from . import addresses as A
 from .link import (Link, Snapshot, RUN, STOP, RESTART, SHUTDOWN,
-                   COMMAND, CONTROL, SET_SCREEN)
+                   COMMAND, CONTROL, SET_SCREEN, WATCH, UNWATCH, RECORD)
 
 META_NAMES = ("model_time", "wall_time", "speed", "cycle", "seq", "running", "turn", "alive")
 
@@ -38,7 +38,8 @@ class EngineThread(threading.Thread):
     stop() (или control('shutdown')) гасит поток. Публикует снимок ТОЛЬКО подписанных адресов + мету."""
 
     def __init__(self, link: Link, scheduler, steps_per_cycle: int = 9, publish_every: int = 3,
-                 idle_sleep: float = 0.003, screen_period: float = 1.0, name: str = "engine"):
+                 idle_sleep: float = 0.003, screen_period: float = 1.0, name: str = "engine",
+                 run_root: Optional[str] = None):
         super().__init__(name=name, daemon=True)
         self.link = link
         self.sch = scheduler
@@ -62,6 +63,14 @@ class EngineThread(threading.Thread):
         self.screen_period = float(screen_period)  # период пересчёта экрана, с (медленный такт)
         self._unknown: Optional[str] = None  # последняя нераспознанная команда (диагностика)
         self._err: Optional[str] = None      # последнее исключение тела потока
+        # запись прогона (шаг 5 плана библиотеки): что писать (Watch-адреса), включена ли запись, лимит прохода
+        self.run_root = run_root             # корень проекта/рабочей папки для workspace/runs (None — проект)
+        self._watches: set = set()           # канонические адреса, которые пишутся в прогон
+        self._rec_on = False                 # запись включена: каждый проход (от рестарта до лимита) — свой Run
+        self._max_turns: Optional[int] = None  # лимит оборотов прохода (None — без лимита)
+        self._repeat = False                 # после лимита — новый проход (рестарт), иначе пауза
+        self._run = None                     # текущий synchrotronsim.run.Run или None
+        self._pass = 0                       # номер прохода (растёт на каждом рестарте)
 
     # ---- управление из главного потока ----
     def stop(self) -> None:
@@ -92,12 +101,21 @@ class EngineThread(threading.Thread):
                 if self._step % self.publish_every == 0:  # снимок раз в publish_every тактов (не каждый — дешевле)
                     self._cycle += 1
                     self._publish()
+                    self._record_tick()                   # запись прогона — с тем же темпом, что снимок
+                if self._max_turns and int(getattr(self.plant, "turn", 0) or 0) >= self._max_turns:
+                    self._end_pass("done")                # проход дошёл до лимита
+                    if self._repeat:
+                        self._restart()                   # новый проход с нуля (и новый прогон, если пишем)
+                    else:
+                        self._running = False
         except Exception as e:                            # поток не должен падать молча
             self._err = f"{type(e).__name__}: {e}"
             try:
                 self._publish()
             except Exception:
                 pass
+        finally:
+            self._end_pass("stopped")
 
     # ---- очередь команд ----
     def _drain(self) -> None:
@@ -108,6 +126,24 @@ class EngineThread(threading.Thread):
                 self._command(m.addr, m.value)
             elif m.kind == SET_SCREEN:
                 self._screens[m.addr] = dict(m.value or {})
+            elif m.kind == WATCH:
+                if A.is_address(m.addr):
+                    self._watches.add(A.canonical(m.addr))
+                else:
+                    self._mark_unknown(m.addr)
+            elif m.kind == UNWATCH:
+                self._watches.discard(A.canonical(m.addr))
+            elif m.kind == RECORD:
+                v = dict(m.value or {})
+                self._max_turns = int(v["max_turns"]) if v.get("max_turns") else None
+                self._repeat = bool(v.get("repeat"))
+                on = bool(v.get("on"))
+                if on and not self._rec_on:
+                    self._rec_on = True
+                    self._begin_pass()
+                elif not on and self._rec_on:
+                    self._rec_on = False
+                    self._end_pass("stopped")
 
     def _control(self, action: str) -> None:
         if action == RUN:
@@ -115,23 +151,87 @@ class EngineThread(threading.Thread):
         elif action == STOP:
             self._running = False
         elif action == RESTART:
-            was = self._running
-            self._running = False
-            self.plant.reset(self.state)                  # новый прогон с нуля (штатный reset плана)
-            self.state.t = 0.0
-            self._cycle = 0
-            self._step = 0
-            self._wall_run = 0.0
-            self.sch.tick = 0
-            for slot in self.state.target_slots.values():  # обнулить вклады контуров прошлого прогона
-                slot.v[:] = 0.0
-            self._running = was                           # рестарт сохраняет режим пуск/пауза
+            self._end_pass("stopped")                     # прерванный рестартом проход
+            self._restart()
         elif action == SHUTDOWN:
             self._stop.set()
+
+    def _restart(self) -> None:
+        """Новый проход с нуля (штатный reset плана); режим пуск/пауза сохраняется; при записи — новый прогон."""
+        was = self._running
+        self._running = False
+        self.plant.reset(self.state)
+        self.state.t = 0.0
+        self._cycle = 0
+        self._step = 0
+        self._wall_run = 0.0
+        self.sch.tick = 0
+        for slot in self.state.target_slots.values():      # обнулить вклады контуров прошлого прохода
+            slot.v[:] = 0.0
+        self._pass += 1
+        if self._rec_on:
+            self._begin_pass()
+        self._running = was
+
+    # ---- запись прогона (Run) ----
+    def _experiment_snapshot(self):
+        """Опыт этого кокпита (sch.experiment) с ТЕКУЩЕЙ подпиской и лимитом — в паспорт прогона."""
+        import dataclasses
+        exp = getattr(self.sch, "experiment", None)
+        if exp is None:
+            return {"engine": "cockpit", "plant": type(self.plant).__name__,
+                    "watches": sorted(self._watches), "max_turns": self._max_turns, "repeat": self._repeat}
+        from synchrotronsim.run import Watch
+        return dataclasses.replace(exp, record=[Watch(a, cadence="per_step") for a in sorted(self._watches)],
+                                   run=dataclasses.replace(exp.run, max_turns=self._max_turns, repeat=self._repeat))
+
+    def _begin_pass(self) -> None:
+        from synchrotronsim.run import Run
+        self._end_pass("stopped")
+        machine = None
+        lat = getattr(self.plant, "lattice", None)
+        if lat is not None:
+            try:
+                from synchrotronsim.db import open_db
+                machine = open_db().machine(int(lat))
+            except Exception:
+                machine = None
+        turn0 = int(getattr(self.plant, "turn", 0) or 0)
+        try:
+            exp = getattr(self.sch, "experiment", None)
+            self._run = Run.create("cockpit", config=self._experiment_snapshot(), machine=machine,
+                                   seed=getattr(exp, "seed", None), source="cockpit",
+                                   note=f"проход {self._pass}; старт с оборота {turn0}", root=self.run_root)
+        except Exception as e:                                # запись не должна ронять движок
+            self._run = None
+            self._err = f"запись прогона: {type(e).__name__}: {e}"
+
+    def _end_pass(self, status: str) -> None:
+        run, self._run = self._run, None
+        if run is not None:
+            try:
+                run.finish(status)
+            except Exception as e:
+                self._err = f"запись прогона: {type(e).__name__}: {e}"
+
+    def _record_tick(self) -> None:
+        """Точка прогона по каждому Watch-адресу: шаг = номер цикла публикации, время = модельное."""
+        run = self._run
+        if run is None or not self._watches:
+            return
+        view = StateView(self.state)
+        mt = float(self.state.t)
+        meta = {"model_time": mt, "wall_time": float(self._wall_run), "cycle": int(self._cycle),
+                "turn": int(getattr(self.plant, "turn", 0) or 0)}
+        for a in sorted(self._watches):
+            v = A.resolve(view, a, loops=self.sch.loops, meta=meta)
+            if v is not None:
+                run.record(a, self._cycle, v, t=mt)
 
     def _command(self, addr: str, value) -> None:
         """Применить ручку ШТАТНЫМ путём (команда → доска). Диспетчер по типу адреса. Неизвестное —
         записать в диагностику, не падать."""
+        addr = A.canonical(addr)                          # прежние имена (drive.*, actual.*) — псевдонимы
         kind = A.kind_of(addr)
         try:
             if kind == "undulator":
@@ -152,12 +252,13 @@ class EngineThread(threading.Thread):
                     return self._mark_unknown(addr)
                 if fld == "enabled":
                     self.sch.set_enabled(name, bool(value))
-                elif fld == "gain" and hasattr(spec.controller, "gain"):
-                    spec.controller.gain = float(value)
+                elif fld == "gain" and "gain" in (getattr(spec.controller, "params", None) or {}):
+                    spec.controller.params["gain"] = float(value)   # закон контура читает params["gain"]
                 else:
                     self._mark_unknown(addr)
-            elif kind == "drive":
-                aid, _, fld = addr[len("drive."):].rpartition(".")
+            elif kind == "act":                           # привод актуатора: act.<aid>.<поле>
+                p = A.parse(addr)
+                aid, fld = p.obj, p.attr
                 if fld == "slew":
                     self.state.limits.set(aid, slew=float(value))
                 elif fld == "lag_tau":
@@ -183,6 +284,11 @@ class EngineThread(threading.Thread):
         m = {"model_time": mt, "wall_time": float(self._wall_run), "speed": float(speed),
              "cycle": int(self._cycle), "seq": int(self._seq), "running": bool(self._running),
              "turn": int(getattr(self.plant, "turn", 0)), "alive": bool(getattr(self.plant, "alive", True))}
+        m["recording"] = self._run is not None
+        m["run_id"] = self._run.run_id if self._run is not None else ""
+        m["pass"] = int(self._pass)
+        m["max_turns"] = int(self._max_turns or 0)
+        m["watches"] = sorted(self._watches)
         if self._unknown:
             m["unknown_command"] = self._unknown
         if self._err:
@@ -409,49 +515,16 @@ def build_session(lattice: int = 26, nsl: int = 8, settle_turns: int = 250, fofb
     частота ВЧ; актуатор `rf.freq` в схеме), темп — как у FOFB (раз в цикл; внутри усреднение ≈ T_s).
     `id_pole_nsl` — срезов у полюсов ондуляторов в трекинге (1: вдвое быстрее, физика та же до 1e-8 по тюну;
     None — как у остальных элементов, nsl)."""
-    from control import ExperimentState, Limits, Scheduler
-    from control.controllers.integral_svd import IntegralSVD
-
-    loops = []                                                 # объекты контуров ПЕРВЫМИ (нужны для сборки Observer'ов)
-    if fofb:
-        loops += [IntegralSVD("fofb_x", sensor="ebpm.x", actuator_key="hkick", gain=0.5, rcond=1e-2),
-                  IntegralSVD("fofb_y", sensor="ebpm.y", actuator_key="vkick", gain=0.5, rcond=1e-2)]
-    if optics:
-        from control.controllers.optics_tune import TuneLoop
-        from control.controllers.optics_chroma import ChromaLoop
-        from control.controllers.optics_adts import AdtsLoop
-        loops += [TuneLoop(), ChromaLoop(), AdtsLoop()]
-    if rf:
-        from control.controllers.rf_frequency import RfFrequencyLoop
-        loops += [RfFrequencyLoop()]
-    tbt_serves = {"ebpm.x", "ebpm.y", "photon.x", "photon.y"} | ({"rf.delta"} if rf else set())
-
-    if optics:
-        from control.composite_plant import CompositePlant
-        from control.obs_assembly import observer_for
-        tbt_obs = observer_for(loops, serves=tbt_serves)
-        optics_obs = observer_for(loops, serves={"tune", "chroma", "adts"})
-        plant = CompositePlant(lattice=lattice, nsl=nsl, settle_turns=settle_turns, meas_noise=meas_noise,
-                               n_photon=n_photon, gap_mm=gap_mm, disturbance_spec=disturbance_spec,
-                               drift=optics_drift, order=optics_order, optics_nsl=optics_nsl,
-                               tbt_observer=tbt_obs, optics_observer=optics_obs, rf_actuator=rf,
-                               id_pole_nsl=id_pole_nsl, **plant_kw)
-    else:
-        from control.tbt_plant import TbtPlant
-        obs = None
-        if rf:
-            from control.obs_assembly import observer_for
-            obs = observer_for(loops, serves=tbt_serves)
-        plant = TbtPlant(lattice=lattice, nsl=nsl, settle_turns=settle_turns, meas_noise=meas_noise,
-                         n_photon=n_photon, gap_mm=gap_mm, disturbance_spec=disturbance_spec,
-                         rf_actuator=rf, observer=obs, id_pole_nsl=id_pole_nsl, **plant_kw)
-
-    dt = plant.stride * plant.TREV
-    schema = plant.schema()
-    state = ExperimentState(schema, limits=Limits(schema), history=plant.history())
-    sch = Scheduler(plant, state, dt)
-    rate_f = 1.0 / (dt * steps_per_cycle)                      # FOFB: раз в управляющий цикл (≈2 кГц)
-    rate_o = 1.0 / (dt * max(1, optics_period_ticks))         # оптика: медленный темп (квазистатика)
-    for lp in loops:
-        sch.add(lp, rate_hz=(rate_f if lp.name in ("fofb_x", "fofb_y", "rf") else rate_o), enabled=False)
+    # с шага 5 плана библиотеки — опыт-объект + ЕДИНЫЙ сборщик (synchrotronsim.simulation.build_session);
+    # параметры дословно прежние (Experiment.cockpit), опыт кладётся в планировщик для паспорта прогона
+    from synchrotronsim.experiment import Experiment
+    from synchrotronsim.simulation import build_session as _build
+    exp = Experiment.cockpit(lattice=lattice, nsl=nsl, settle_turns=settle_turns, fofb=fofb,
+                             disturbance_spec=disturbance_spec, gap_mm=gap_mm, steps_per_cycle=steps_per_cycle,
+                             meas_noise=meas_noise, n_photon=n_photon, optics=optics, optics_drift=optics_drift,
+                             optics_order=optics_order, optics_period_ticks=optics_period_ticks,
+                             optics_nsl=optics_nsl, rf=rf, id_pole_nsl=id_pole_nsl, **plant_kw)
+    S = _build(exp)
+    plant, state, sch = S.plant, S.state, S.sch
+    sch.experiment = exp
     return plant, state, sch

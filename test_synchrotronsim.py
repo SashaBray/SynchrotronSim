@@ -2769,9 +2769,10 @@ class TestClientAddresses(unittest.TestCase):
         from client import addresses as A
         addrs = set(A.enumerate_addresses(self.view))
         for expect in ("obs.ebpm.x", "obs.ebpm.x:rms", "obs.ebpm.y",
-                       "drive.corr.000.hkick.slew", "drive.corr.000.hkick.act",
+                       "act.corr.000.hkick.slew", "act.corr.000.hkick.act",      # канонические (шаг 4)
                        "undulator.und_01.gap", "undulator.und_01.K", "optics.nux"):
             self.assertIn(expect, addrs)
+        self.assertFalse(any(a.startswith(("drive.", "actual.")) for a in addrs))   # старые — только псевдонимы
 
     def test_resolve_observable_vector_and_reductions(self):
         from client import addresses as A
@@ -2831,7 +2832,8 @@ class TestClientAddresses(unittest.TestCase):
         self.assertEqual(A.meta("obs.ebpm.x").widget, A.W_VECTOR)
         self.assertEqual(A.meta("obs.ebpm.x:rms").widget, A.W_GRAPH)
         self.assertEqual(A.meta("undulator.und_01.gap").units, "мм")
-        self.assertEqual(A.meta("drive.corr.000.hkick.slew").kind, "drive")
+        self.assertEqual(A.meta("drive.corr.000.hkick.slew").kind, "act")        # псевдоним → область act
+        self.assertEqual(A.meta("drive.corr.000.hkick.slew").addr, "act.corr.000.hkick.slew")
 
 
 class TestClientDiagnostics(unittest.TestCase):
@@ -3396,7 +3398,7 @@ class TestClientScene(unittest.TestCase):
         self.assertEqual(byk["oct"].get("aids"), ["oct.und_OD1B.dk3"])
         # info_fields проводит его в живое поле actual.<famid> рядом с проектным element.k*
         rows = [r[0] for r in info_fields("quad", byk["quad"]["name"], byk["quad"]["aids"])]
-        self.assertIn("actual.quad.und_QF1A.dk", rows)                    # ЖИВАЯ Δk контура
+        self.assertIn("act.quad.und_QF1A.dk", rows)                       # ЖИВАЯ Δk контура (бывш. actual.*)
         self.assertIn(f"element.{byk['quad']['name']}.k1", rows)          # проектный градиент остаётся
         # нет семейного id в схеме → aids не присваивается (optics=False), поля actual нет
         class _P0(_P):
@@ -4924,6 +4926,615 @@ class TestPulsedKickers(unittest.TestCase):
                 p = os.path.join(ed.DIAG, n)
                 if os.path.exists(p):
                     os.remove(p)
+
+
+def _engine_ext_available():
+    try:
+        import synchrotronsim
+        return synchrotronsim.ENGINE_AVAILABLE
+    except Exception:
+        return False
+
+
+@unittest.skipUnless(_engine_ext_available() and os.path.exists(_EXE)
+                     and os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")),
+                     "нет собранного расширения synchrotronsim._engine / MatrixTracker / БД")
+class TestEngineExtension(unittest.TestCase):
+    """Шаг 0 плана библиотеки (docs/LIBRARY_ARCHITECTURE.md): C++-ядро как модуль расширения CPython против
+    сервера MatrixTracker --ring-serve — те же числа бит-в-бит (включая квантовое излучение ISR) при той же
+    последовательности запросов; разные кольца в разных потоках Python считаются параллельно и одинаково."""
+
+    LAT, MEV = 26, 6000.0
+    RF = {"volt_mv": 8.0, "harmonic": 1296.0, "phase_deg": 165.0}   # ВЧ СИЛА-26 (facility_report.info_of)
+
+    @staticmethod
+    def _bits_equal(a, b):
+        a = np.ascontiguousarray(a, float); b = np.ascontiguousarray(b, float)
+        return a.shape == b.shape and np.array_equal(a.view(np.uint64), b.view(np.uint64))
+
+    def _pair(self, source="db", **kw):
+        """Сервер (процесс, читает CSV сам) и расширение (по умолчанию — из массивов модели Machine)."""
+        import ring_cpp as rc
+        from synchrotronsim.engine import ExtRing
+        base = dict(lattice=self.LAT, design_mev=self.MEV, nsl=5, seed=4242)
+        base.update(kw)
+        s, e = rc.CppRing(backend="pipe", **base), ExtRing(source=source, **base)
+        self.addCleanup(s.close)
+        return s, e
+
+    def _states(self, n):
+        g = np.random.default_rng(11)
+        st = np.zeros((n, 6))
+        st[:, 0] = g.normal(0, 1e-4, n); st[:, 2] = g.normal(0, 3e-5, n); st[:, 5] = g.normal(0, 1e-3, n)
+        return st
+
+    def test_geometry_and_tracking_bitwise_sr_isr_rf(self):
+        """СИ + ISR + ВЧ, полюса ИД 1 срез: описание кольца и все виды трекинга — бит-в-бит."""
+        from control.ring_model import ID_POLE_DEVS
+        s, e = self._pair(sr=True, isr=True, rf=dict(self.RF), nsl_dev={d: 1 for d in ID_POLE_DEVS})
+        self.assertEqual((s.n_mag, s.n_pieces), (e.n_mag, e.n_pieces))
+        self.assertTrue(self._bits_equal([s.circumference], [e.circumference]))
+        self.assertTrue(self._bits_equal(s.s_in, e.s_in) and self._bits_equal(s.s_out, e.s_out))
+        self.assertEqual((s.kinds, s.names), (e.kinds, e.names))
+        st = self._states(12)
+        self.assertTrue(self._bits_equal(s.track(st, 2), e.track(st, 2)))
+        self.assertTrue(self._bits_equal(s.track_tbt(st, 6), e.track_tbt(st, 6)))
+        self.assertTrue(self._bits_equal(s.track_tbt(st * 30, 4, limit=1e-3), e.track_tbt(st * 30, 4, limit=1e-3)))
+        self.assertTrue(self._bits_equal(s.track_elements(st[:4]), e.track_elements(st[:4])))
+        self.assertTrue(self._bits_equal(s.track_pieces(st[:2]), e.track_pieces(st[:2])))
+        self.assertTrue(self._bits_equal(np.array(s.piece_meta(), float), np.array(e.piece_meta(), float)))
+
+    def test_live_perturbations_and_rf_bitwise(self):
+        """Возмущения (RESET + набор, кики без RESET, BSCALE, аддитивный DKV) и частота ВЧ на лету — бит-в-бит."""
+        s, e = self._pair(sr=True, rf=dict(self.RF))
+        quads = [j for j, k in enumerate(s.kinds) if k == "quad"][:3]
+        bends = [j for j, k in enumerate(s.kinds) if k in ("dipole", "dq")][:1]
+        pert = dict(kicks=[(quads[0], 2e-6)], vkicks=[(quads[1], -1e-6)], dks=[(quads[2], 1e-3)],
+                    dk2s=[(quads[0], 0.5)], dsks=[(quads[1], 1e-4)])
+        for r in (s, e):
+            r.apply_perturb(**pert)
+            r.set_kicks(kicks=[(quads[2], 3e-6)]); r.set_bend_scale([(bends[0], 0.97)])
+            r.add_perturb(dkvs=[(quads[0], 2e-4)])
+            r.set_rf(freq_hz=r.rf_frequency() + 50.0)
+        st = self._states(6)
+        self.assertTrue(self._bits_equal(s.track_tbt(st, 4), e.track_tbt(st, 4)))
+        self.assertTrue(self._bits_equal(s.track_elements(st[:3]), e.track_elements(st[:3])))
+        self.assertTrue(self._bits_equal(s.track_pieces(st[:2]), e.track_pieces(st[:2])))
+        A = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], float)
+        c, sn = math.cos(0.01), math.sin(0.01)
+        B = np.array([[0.5, 0.01, 0], [c, sn, 0], [-sn, c, 0], [0, 0, 1]], float)
+        self.assertTrue(self._bits_equal(s.junction(st, A, B), e.junction(st, A, B)))
+
+    def test_csv_source_bitwise(self):
+        """Расширение, читающее таблицы само (source=csv), — тоже бит-в-бит с сервером (и с источником db)."""
+        s, e = self._pair(source="csv", sr=True)
+        st = self._states(6)
+        self.assertTrue(self._bits_equal(s.track_tbt(st, 3), e.track_tbt(st, 3)))
+        self.assertTrue(self._bits_equal(np.array(s.piece_meta(), float), np.array(e.piece_meta(), float)))
+
+    def test_snapshot_restore_clone_reset(self):
+        """Шаг 2: снимок/откат возвращают кольцо бит-в-бит; клон независим; RESET без пересборки сохраняет ВЧ."""
+        from synchrotronsim.engine import ExtRing
+        e = ExtRing(lattice=self.LAT, design_mev=self.MEV, nsl=5, sr=True, rf=dict(self.RF))
+        st = self._states(4)
+        ref = e.track_tbt(st, 3)
+        q = [j for j, k in enumerate(e.kinds) if k == "quad"]
+        snap = e.snapshot()
+        e.apply_perturb(dks=[(q[0], 1e-3)]); e.set_kicks(kicks=[(q[1], 5e-6)])
+        self.assertFalse(self._bits_equal(e.track_tbt(st, 3), ref))
+        e.restore(snap)
+        self.assertTrue(self._bits_equal(e.track_tbt(st, 3), ref))
+        c = e.clone(); c.set_kicks(kicks=[(q[1], 5e-6)])
+        self.assertTrue(self._bits_equal(e.track_tbt(st, 3), ref))
+        self.assertFalse(self._bits_equal(c.track_tbt(st, 3), ref))
+        # RESET (откат к свежему) сохраняет ВЧ на лету — как команда RESET сервера
+        s, _ = self._pair(sr=True, rf=dict(self.RF))
+        for r in (s, e):
+            r.set_rf(freq_hz=r.rf_frequency() + 40.0)
+            r.apply_perturb(kicks=[(q[2], 1e-6)])
+        self.assertTrue(self._bits_equal(s.track_tbt(st, 3), e.track_tbt(st, 3)))
+
+    def test_cppring_backends_identical(self):
+        """CppRing на бэкенде ext (модуль, по умолчанию) и pipe (сервер): одинаковые числа и описание магнитов,
+        копии with_*/perturbed, apply_perturb; timeout ⇒ pipe (сторож процесса)."""
+        import ring_cpp as rc
+        kw = dict(lattice=self.LAT, design_mev=self.MEV, nsl=5, sr=True, rf=dict(self.RF))
+        p, x = rc.CppRing(backend="pipe", **kw), rc.CppRing(backend="ext", **kw)
+        self.addCleanup(p.close); self.addCleanup(x.close)
+        self.assertEqual((p.backend, x.backend), ("pipe", "ext"))
+        t = rc.CppRing(lattice=2, design_mev=3000.0, timeout=30)
+        self.addCleanup(t.close)
+        self.assertEqual(t.backend, "pipe")
+        st = self._states(4)
+        q = [j for j, k in enumerate(p.kinds) if k == "quad"]
+        for r in (p, x):
+            r.apply_perturb(dks=[(q[0], 1e-3)], kicks=[(q[1], 2e-6)])
+        self.assertTrue(self._bits_equal(p.track_elements(st[:2]), x.track_elements(st[:2])))
+        p2, x2 = p.with_kick(q[2], 3e-6), x.with_kick(q[2], 3e-6)
+        self.addCleanup(p2.close)
+        self.assertEqual(x2.backend, "ext")
+        self.assertTrue(self._bits_equal(p2.track_tbt(st, 3), x2.track_tbt(st, 3)))
+        self.assertTrue(self._bits_equal(p.track_tbt(st, 3), x.track_tbt(st, 3)))       # родители не задеты
+        y2 = x.perturbed(kicks=[(q[2], 3e-6)])
+        self.assertTrue(self._bits_equal(y2.track_tbt(st, 3), x2.track_tbt(st, 3)))
+        self.assertEqual(len(x.mags), len(p.mags))                                       # Python-описание
+        self.assertEqual([m.k1 for m in x.mags[:50]], [m.k1 for m in p.mags[:50]])
+
+    def test_description_from_engine(self):
+        """Шаг 3: CppRing.mags/plane — из ядра (DESCRIBE): раскладка C++ = Python; ext и pipe дают одно описание;
+        оно совпадает с Python-эталоном (геометрия ≤1e-15, силы и флаги точно, тюны ring_matrix одинаковы) и
+        следует за возмущениями ядра без повторного проигрывания."""
+        import io, contextlib
+        import ring_cpp as rc, ring_analysis as ra, ring_matrix as rmx
+        import synchrotronsim
+        self.assertEqual(rc.DESCRIBE_COLS, synchrotronsim._engine.DESCRIBE_COLS)
+        kw = dict(lattice=self.LAT, design_mev=self.MEV, nsl=5)
+        p, x = rc.CppRing(backend="pipe", **kw), rc.CppRing(backend="ext", **kw)
+        self.addCleanup(p.close); self.addCleanup(x.close)
+        dp, dx = p._be.describe(), x._be.describe()
+        for k in dp:
+            self.assertTrue(self._bits_equal(dp[k], dx[k]), k)
+        with contextlib.redirect_stdout(io.StringIO()):
+            ref = ra.Ring(self.LAT, design_mev=self.MEV)              # Python-эталон (своя сборка из CSV)
+        self.assertEqual(len(x.mags), len(ref.mags))
+        geo = max(float(np.max(np.abs(np.asarray(a.fr_out[q]) - np.asarray(b.fr_out[q]))))
+                  for a, b in zip(x.mags, ref.mags) for q in range(4))
+        self.assertLess(geo, 1e-12)
+        for a, b in zip(x.mags[:400], ref.mags[:400]):
+            self.assertEqual((a.theta0, a.k1, a.k1v, a.k2, a.k3, a.kEdge1, a.kEdge2, a.sector, a.kick_sector,
+                              a.nonzero, a.nsl, a.dev, a.kind),
+                             (b.theta0, b.k1, b.k1v, b.k2, b.k3, b.kEdge1, b.kEdge2, b.sector, b.kick_sector,
+                              b.nonzero, b.nsl, b.dev, b.kind))
+        tx, tr = rmx.twiss(x._python_ring()), rmx.twiss(ref)
+        self.assertAlmostEqual(tx["nux"], tr["nux"], places=11); self.assertAlmostEqual(tx["nuy"], tr["nuy"], places=11)
+        # описание следует за ядром: DK, BSCALE полюса ИД, кик «ящика» корректора, поворот (YAW)
+        from control.ring_model import ID_POLE_DEVS
+        q = [j for j, k in enumerate(x.kinds) if k == "quad"]
+        kk = [j for j, k in enumerate(x.kinds) if k == "kicker"]
+        pole = [j for j, nm in enumerate(x.names) if nm in ID_POLE_DEVS]
+        m0 = x.mags
+        x.apply_perturb(dks=[(q[0], 1e-3)], kicks=[(kk[0], 2e-6)], bscales=[(pole[0], 0.5)] if pole else ())
+        m1 = x.mags
+        self.assertEqual(m1[q[0]].k1, m0[q[0]].k1 + 1e-3)
+        if m1[kk[0]].kick_sector:
+            self.assertEqual(m1[kk[0]].hkick, 2e-6)
+        else:
+            self.assertEqual(m1[kk[0]].theta0, m0[kk[0]].theta0 + 2e-6)   # «ящик»: кик = θ0 box-тела
+        if pole:
+            self.assertEqual(m1[pole[0]].theta0, 0.5 * m0[pole[0]].theta0)
+            self.assertFalse(np.array_equal(m1[pole[0]].fr_out[1], m0[pole[0]].fr_out[1]))   # рамки заново
+        y = x.with_yaw(q[5], 1e-4)
+        self.assertGreater(float(np.linalg.norm(y.mags[q[5]].fr_in[1] - m1[q[5]].fr_in[1])), 9e-5)
+
+    def test_parallel_rings_in_python_threads(self):
+        """Копии машины в разных потоках Python: GIL отпущен — результаты те же, что у одиночного прогона."""
+        import threading
+        from synchrotronsim.engine import ExtRing
+        rings = [ExtRing(lattice=self.LAT, design_mev=self.MEV, nsl=5, sr=True) for _ in range(4)]
+        st = self._states(1)
+        ref = rings[0].track(st, 2)
+        out = [None] * len(rings)
+
+        def run(i):
+            out[i] = rings[i].track(st, 2)
+
+        th = [threading.Thread(target=run, args=(i,)) for i in range(len(rings))]
+        [t.start() for t in th]; [t.join() for t in th]
+        for o in out:
+            self.assertTrue(self._bits_equal(o, ref))
+
+
+@unittest.skipUnless(os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")), "нет БД")
+class TestDataModel(unittest.TestCase):
+    """Шаг 1 плана библиотеки: модель данных `synchrotronsim.model` и слой доступа `synchrotronsim.db`.
+    Магниты модели — бит-в-бит как `matrix_tracker.build_line` (склейка обмоток, фолбэки на тип устройства);
+    отпечаток стабилен, локален (чужая решётка его не меняет) и чувствителен; пути не зависят от текущей папки."""
+
+    @staticmethod
+    def _bits(a):
+        return np.ascontiguousarray(np.asarray(a, float)).view(np.uint64)
+
+    def _same(self, a, b, what):
+        self.assertTrue(np.array_equal(self._bits(a), self._bits(b)), what)
+
+    def test_elements_match_build_line(self):
+        import io, contextlib
+        import synchrotronsim as ss
+        db = ss.open_db()
+        eff, phys, coup, trans = mt.load_db()
+        for lat in (2, 3, 27):                     # 27 — многообмоточные магниты и ондуляторы
+            if lat not in db.lattices():
+                continue
+            with self.subTest(lattice=lat):
+                E = db.machine(lat).elements
+                with contextlib.redirect_stdout(io.StringIO()):
+                    mags = mt.build_line(lat, eff, phys, coup, trans)
+                self.assertEqual(len(E), len(mags))
+                self._same(E.centers, [q.center for q in mags], "центры")
+                for a in ("yaw", "pitch", "roll", "edge1", "edge2", "lf1", "lf2"):
+                    self._same(getattr(E, a), [getattr(q, a) for q in mags], a)
+                self._same(E.eff_length, [q.Leff for q in mags], "L_eff")
+                self._same(mt.QP * E.mat_B * E.eff_length, [q.theta0 for q in mags], "θ0")
+                for col, attr in (("mat_G", "k1"), ("mat_Gv", "k1v"), ("mat_S", "k2"), ("mat_O", "k3")):
+                    self._same(mt.QP * getattr(E, col), [getattr(q, attr) for q in mags], attr)
+                self.assertEqual(list(np.where(E.n_slices > 0, E.n_slices, mt.Settings().n_slices)),
+                                 [q.nsl for q in mags])
+                self.assertEqual(list(E.kind), [q.kind for q in mags])
+                m = db.machine(lat)
+                self.assertEqual([list(m.instances.device_type[E.members(i)]) for i in range(len(E))],
+                                 [q.devs for q in mags])
+                self.assertEqual(int(E.member_count.sum()), len(m.instances))          # обмотки — разбиение строк
+                self.assertTrue(np.array_equal(E.member_start[1:], np.cumsum(E.member_count)[:-1]))
+
+    def test_fingerprint_stable_local_and_sensitive(self):
+        import csv, shutil, tempfile
+        import synchrotronsim as ss
+        lat = 3
+        fp = ss.open_db().machine(lat).fingerprint
+        self.assertEqual(fp, ss.open_db().machine(lat).fingerprint)
+        self.assertEqual(len(fp), 64)
+        src = os.path.join(mt.TB, "lattice_configs.csv")
+        with open(src, encoding="utf-8", newline="") as fh:
+            rows = list(csv.reader(fh, delimiter=";"))
+        h = {c: i for i, c in enumerate(rows[0])}
+        tmp = tempfile.mkdtemp(prefix="ss_overlay_")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        os.makedirs(os.path.join(tmp, "tables"))
+        dst = os.path.join(tmp, "tables", "lattice_configs.csv")
+
+        def write(mod_lat, col):
+            out = [list(r) for r in rows]
+            for r in out[1:]:
+                if r[h["lattice_id"]] == str(mod_lat) and r[h[col]] not in ("", "0"):
+                    r[h[col]] = repr(float(r[h[col]]) * (1 + 1e-9)); break
+            with open(dst, "w", encoding="utf-8", newline="") as fh:
+                csv.writer(fh, delimiter=";").writerows(out)
+
+        write(2, "x")                                                      # правка ЧУЖОЙ решётки
+        self.assertEqual(ss.open_db(overlay=tmp).machine(lat).fingerprint, fp)
+        write(lat, "x")                                                    # правка своей — на 1e-9 отн.
+        m2 = ss.open_db(overlay=tmp).machine(lat)
+        self.assertNotEqual(m2.fingerprint, fp)
+        self.assertEqual(m2.source, os.path.join(tmp, "tables"))
+        self.assertEqual(len(m2.devices), len(ss.open_db().machine(lat).devices))   # прочие таблицы — основные
+
+    def test_independent_of_cwd(self):
+        import tempfile
+        import synchrotronsim as ss
+        ref = ss.open_db().machine(3)
+        cwd = os.getcwd()
+        tmp = tempfile.mkdtemp(prefix="ss_cwd_")
+        try:
+            os.chdir(tmp)
+            m = ss.open_db().machine(3)
+        finally:
+            os.chdir(cwd); os.rmdir(tmp)
+        self.assertEqual(m.fingerprint, ref.fingerprint)
+
+    def test_units_devices_immutability(self):
+        import dataclasses, csv
+        import synchrotronsim as ss
+        import facility_report as fr
+        db = ss.open_db()
+        m = db.machine(27 if 27 in db.lattices() else 26)
+        if m.screens:                                                       # мм/мрад таблицы → м/рад модели
+            with open(os.path.join(mt.TB, "screens.csv"), encoding="utf-8") as fh:
+                raw = {r["screen_id"]: r for r in csv.DictReader(fh, delimiter=";") if r["lattice_id"] == str(m.lattice_id)}
+            s = m.screens[0]
+            self.assertAlmostEqual(s.width, float(raw[s.screen_id]["width_mm"]) * 1e-3, places=15)
+            self.assertAlmostEqual(s.dist, float(raw[s.screen_id]["dist_m"]), places=15)
+        ids = set(m.instances.instance_id.tolist())
+        for g in m.groups:
+            self.assertTrue(set(g.instance_ids) <= ids, g.group_id)
+        for dev in m.instances.device_type:
+            self.assertIn(dev, m.devices)
+        err = db.error_model()
+        if "quad" in err:
+            with open(os.path.join(mt.TB, "element_errors.csv"), encoding="utf-8") as fh:
+                pct = {r["kind"]: float(r["field_pct"]) for r in csv.DictReader(fh, delimiter=";")}
+            self.assertAlmostEqual(err["quad"].field_rel, pct["quad"] / 100.0, places=15)
+        import synchrotronsim.machines as smach
+        self.assertIs(fr.LATTICE_INFO, smach.LATTICE_INFO)                  # один источник паспортных данных
+        self.assertEqual(m.meta.design_energy_mev if m.meta else 6000.0, 6000.0)
+        with self.assertRaises(ValueError):
+            m.elements.mat_G[0] = 1.0                                       # столбцы только для чтения
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            m.lattice_id = 1
+
+
+class TestAddressRegistry(unittest.TestCase):
+    """Шаг 4: единый реестр адресов `synchrotronsim.addresses` — грамматика, псевдонимы прежних имён (drive.*,
+    actual.*, голые id актуаторов), метаданные (писать ли, цена, владелец), восстановление старых раскладок."""
+
+    def test_canonical_aliases_and_idempotence(self):
+        from synchrotronsim import addresses as AD
+        cases = {"drive.corr.000.hkick.slew": "act.corr.000.hkick.slew",
+                 "actual.corr.000.hkick": "act.corr.000.hkick",
+                 "corr.000.vkick": "act.corr.000.vkick", "quad.QF1A.dk": "act.quad.QF1A.dk",
+                 "sext.SD1A.dk2": "act.sext.SD1A.dk2", "rf.freq": "act.rf.freq",
+                 "actual.rf.freq": "act.rf.freq",
+                 "obs.ebpm.x:rms": "obs.ebpm.x:rms", "undulator.und_01.gap": "undulator.und_01.gap"}
+        for old, new in cases.items():
+            self.assertEqual(AD.canonical(old), new, old)
+            self.assertEqual(AD.canonical(new), new, new)               # каноническое не меняется
+        p = AD.parse("drive.corr.000.hkick.lag_tau")
+        self.assertEqual((p.area, p.obj, p.attr), ("act", "corr.000.hkick", "lag_tau"))
+        self.assertEqual(AD.parse("act.quad.QF1A.dk").attr, "")          # реализованное значение — без поля
+        self.assertEqual(AD.parse("optics.beta_x@QF1A_03").at, "QF1A_03")
+        self.assertEqual(AD.parse("element.SP03.COR05.k1").obj, "SP03.COR05")
+        self.assertEqual(AD.parse("obs.ebpm.x:rms").red, "rms")
+        self.assertTrue(AD.is_address("rec.orbit_rms.x"))
+        for bad in ("sf", "bogus.x", "screen", "obs"):
+            self.assertFalse(AD.is_address(bad), bad)
+
+    def test_old_and_new_names_resolve_same(self):
+        from control import StateView
+        from synchrotronsim import addresses as AD
+        st = _seed_client_state(); view = StateView(st)
+        st.actual["corr.000.hkick"] = 1.5e-4
+        for old, new in (("drive.corr.000.hkick.slew", "act.corr.000.hkick.slew"),
+                         ("drive.corr.000.hkick.act", "act.corr.000.hkick.act"),
+                         ("actual.corr.000.hkick", "act.corr.000.hkick"),
+                         ("corr.000.hkick", "act.corr.000.hkick")):
+            self.assertEqual(AD.resolve(view, old), AD.resolve(view, new), old)
+            self.assertIsNotNone(AD.resolve(view, new), new)
+
+    def test_meta_writable_owner_cost(self):
+        from synchrotronsim import addresses as AD
+        self.assertTrue(AD.meta("undulator.und_01.gap_target").writable)
+        self.assertFalse(AD.meta("undulator.und_01.K").writable)
+        self.assertTrue(AD.meta("drive.corr.000.hkick.slew").writable)
+        self.assertFalse(AD.meta("act.corr.000.hkick").writable)          # реализованное — только чтение
+        self.assertTrue(AD.meta("loop.fofb_x.gain").writable)
+        s = AD.meta("screen.SCR_U01")
+        self.assertEqual((s.cost, s.owner, s.widget), ("heavy", "engine", AD.W_SCREEN))
+        r = AD.meta("rec.orbit_rms.x")
+        self.assertEqual((r.units, r.owner), ("мкм", "recorder"))
+        self.assertEqual(AD.meta("rec.rf.df_hz").units, "Гц")
+
+    def test_old_layout_window_is_canonicalized(self):
+        """Раскладка со старыми адресами (drive.*, actual.*) открывается: окно получает каноническую форму."""
+        try:
+            from client import windows as W
+        except Exception as e:                                           # нет Qt/pyqtgraph — пропуск
+            self.skipTest(f"нет GUI-зависимостей: {e}")
+        import os as _os
+        _os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QApplication
+        QApplication.instance() or QApplication([])
+        w = W.make_window({"kind": "graph", "params": {"addr": "actual.corr.000.hkick"}})
+        self.assertEqual(w.addresses(), ["act.corr.000.hkick"])
+        pw = W.make_window({"kind": "point", "params": {"x_addr": "drive.corr.000.hkick.slew",
+                                                         "y_addr": "obs.ebpm.x:rms"}})
+        self.assertEqual(pw.addresses()[0], "act.corr.000.hkick.slew")
+
+
+class TestRunAndWatch(unittest.TestCase):
+    """Шаг 4: прогон `synchrotronsim.run.Run` (папка с паспортом, ряды, артефакты, индекс runs.csv) и подписка
+    `Watch`; WatchRecorder пишет любой адрес из fb_record."""
+
+    def setUp(self):
+        import tempfile, shutil
+        self.tmp = tempfile.mkdtemp(prefix="ss_runs_")
+        os.makedirs(os.path.join(self.tmp, "tables"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_run_roundtrip_and_provenance(self):
+        import json, csv
+        from synchrotronsim.run import Run, list_runs
+        run = Run.create("test", config={"a": 1, "arr": np.arange(3)}, seed=7, source="unit", root=self.tmp)
+        self.assertEqual(run.status, "in_progress")
+        self.assertEqual(list_runs(self.tmp)[-1]["status"], "in_progress")   # прерванный — так и останется
+        for i in range(5):
+            run.record("obs.ebpm.x:rms", i, 1e-6 * (i + 1), t=1e-3 * i)
+            run.record("obs.ebpm.x", i, [1e-6, -2e-6, 3e-6 * i])           # векторный ряд
+        run.record_rows([("orbit_rms.x", 0, 3.5), ("orbit_rms.x", 1, 2.5)], t_of_step={0: 0.0, 1: 0.01})
+        run.record("drive.corr.000.hkick.slew", 0, 1.5)                    # псевдоним → каноническое имя
+        run.artifact("bpm", {"x": np.ones(4), "spec": {"E": np.arange(2)}, "none": None}, meta="тест")
+        run.finish("done")
+        r2 = Run.open(run.run_id, root=self.tmp)
+        self.assertEqual(r2.status, "done")
+        st, t, v = r2.series("obs.ebpm.x:rms")
+        np.testing.assert_array_equal(st, np.arange(5)); np.testing.assert_allclose(v, 1e-6 * np.arange(1, 6))
+        np.testing.assert_allclose(t, 1e-3 * np.arange(5))
+        self.assertEqual(r2.series("obs.ebpm.x")[2].shape, (5, 3))
+        self.assertEqual(list(r2.series("rec.orbit_rms.x")[2]), [3.5, 2.5])
+        self.assertIn("act.corr.000.hkick.slew", r2.names())
+        self.assertEqual(set(r2.load_artifact("bpm")), {"x", "spec.E"})
+        man = json.load(open(os.path.join(r2.path, "manifest.json"), encoding="utf-8"))
+        self.assertEqual(man["config"], {"a": 1, "arr": [0, 1, 2]})
+        self.assertIn("sha", man["provenance"]["git"])
+        self.assertIn("python", man["provenance"])
+        self.assertEqual(man["signals"]["rec.orbit_rms.x"]["units"], "мкм")
+        with open(os.path.join(r2.path, "tables", "signals.csv"), encoding="utf-8-sig") as f:
+            rows = list(csv.reader(f, delimiter=";"))
+        self.assertIn("2,5", [r[5] for r in rows[1:]])                     # человеку — десятичная запятая
+        self.assertFalse(any(r[0] == "obs.ebpm.x" for r in rows[1:]))      # векторы — только в signals.npz
+        idx = list_runs(self.tmp)
+        self.assertEqual([r["run_id"] for r in idx].count(run.run_id), 1)
+        self.assertEqual(idx[-1]["status"], "done")
+
+    def test_watch_validation(self):
+        from synchrotronsim.run import Watch
+        w = Watch("actual.corr.000.hkick")
+        self.assertEqual(w.addr, "act.corr.000.hkick")
+        self.assertEqual(w.meta.units, "рад")
+        for bad in (dict(addr="bogus.x"), dict(addr="obs.tune", cadence="hourly"), dict(addr="obs.tune", every=0)):
+            with self.assertRaises(ValueError):
+                Watch(**bad)
+        self.assertEqual(Watch("screen", recorder="screen", params="SCR_U19").addr, "screen")   # рекордер
+
+    def test_watch_recorder_from_fb_record(self):
+        """fb_record: signal-адрес → WatchRecorder (ряд под каноническим адресом); имя рекордера → как раньше."""
+        from control import fb_config, recorders
+        R = fb_config.Record
+        recs = recorders.build([R("orbit_rms", "", "per_window", True),
+                                R("obs.ebpm.x:rms", "every=2", "per_window", True),
+                                R("actual.corr.000.hkick", "", "final", True),
+                                R("sf", "", "post", True)])
+        self.assertEqual([type(r).__name__ for r in recs], ["OrbitRmsRecorder", "WatchRecorder", "WatchRecorder"])
+        st = _seed_client_state(); st.actual["corr.000.hkick"] = 2e-4
+        for w in range(4):
+            for r in recs[1:]:
+                r.sample(st, w, None)
+        for r in recs[1:]:
+            r.finalize(st, None)
+        self.assertEqual([s for s, _, _ in recs[1].series_rows()], ["obs.ebpm.x:rms"] * 2)   # каждое второе окно
+        self.assertEqual([st_ for _, st_, _ in recs[1].series_rows()], [0, 2])
+        self.assertEqual(recs[2].result_rows(), [("act.corr.000.hkick", 0, 2e-4)])
+        self.assertEqual(recs[0].prefix, "rec."); self.assertEqual(recs[1].prefix, "")
+
+
+@unittest.skipUnless(os.path.exists(os.path.join(mt.TB, "fb_experiments.csv")), "нет таблиц fb_*")
+class TestExperimentAndSimulation(unittest.TestCase):
+    """Шаг 5: опыт-объект `synchrotronsim.experiment.Experiment` (из fb_*, кокпит, JSON, пакет), единый сборщик
+    `synchrotronsim.simulation` (контуры по LoopSpec, темпы, подписка), запись прогона и лимит в движке кокпита."""
+
+    def test_from_fb_matches_fb_config_and_json_roundtrip(self):
+        import tempfile, shutil
+        from control import fb_config
+        from synchrotronsim.experiment import Experiment
+        cfg = fb_config.load(3)
+        e = Experiment.from_fb(3)
+        self.assertEqual((e.lattice_id, e.seed, e.source, e.plant.kind), (cfg.lattice_id, cfg.seed, "fb_exp_id=3", "tbt"))
+        self.assertEqual(e.plant.kwargs["settle_turns"], cfg.settle)
+        self.assertEqual([l.name for l in e.loops], [l.name for l in cfg.enabled_loops()])
+        self.assertEqual(e.run.steps, cfg.steps)
+        sm = Experiment.from_fb(3, smoke=True)
+        self.assertEqual((sm.run.steps, sm.plant.kwargs["settle_turns"], sm.run.record_mesh),
+                         (min(cfg.steps, 36), min(cfg.settle, 120), 81))
+        self.assertIn("rf.delta", e.plant.extra_sensors)                 # подписка rf без контура ВЧ → датчик δ̂
+        self.assertEqual({w.recorder for w in e.record}, {"orbit_rms", "rf"})
+        tmp = tempfile.mkdtemp(prefix="ss_exp_"); self.addCleanup(shutil.rmtree, tmp, True)
+        p = e.to_json(os.path.join(tmp, "e.json"))
+        self.assertEqual(Experiment.from_json(p).to_dict(), e.to_dict())
+        o = Experiment.from_fb(2)                                         # оптический опыт
+        self.assertEqual((o.plant.kind, o.plant.kwargs["observe"]), ("optics", ("tune", "chroma", "adts")))
+        self.assertEqual(Experiment.from_json(o.to_json(os.path.join(tmp, "o.json"))).plant.kwargs["observe"],
+                         ("tune", "chroma", "adts"))                       # кортеж переживает JSON
+
+    def test_cockpit_experiment_and_loops(self):
+        from synchrotronsim.experiment import Experiment
+        from synchrotronsim.simulation import make_loop, loop_rate_hz
+        e = Experiment.cockpit(optics=True, rf=True, n_part=4)
+        self.assertEqual([l.name for l in e.loops], ["fofb_x", "fofb_y", "tune", "chroma", "adts", "rf"])
+        self.assertFalse(any(l.enabled for l in e.loops))                 # контуры кокпита — ВЫКЛ на старте
+        self.assertEqual(e.plant.kind, "composite"); self.assertEqual(e.plant.kwargs["n_part"], 4)
+        classes = [type(make_loop(l)).__name__ for l in e.loops]
+        self.assertEqual(classes, ["IntegralSVD", "IntegralSVD", "TuneLoop", "ChromaLoop", "AdtsLoop", "RfFrequencyLoop"])
+        t = make_loop(e.loops[2])
+        self.assertEqual((t.sensor, t.actuator_key, t.ref, t.params["gain"]), ("tune", "quad.", "tune.target", 0.7))  # умолчания класса
+        dt, window = 1e-4, 9
+        self.assertAlmostEqual(loop_rate_hz(e.loops[0], dt, window, e.run), 1.0 / (dt * e.run.steps_per_cycle))
+        self.assertAlmostEqual(loop_rate_hz(e.loops[2], dt, window, e.run), 1.0 / (dt * e.run.optics_period_ticks))
+        f = Experiment.from_fb(3)
+        self.assertAlmostEqual(loop_rate_hz(f.loops[0], dt, window, f.run), 1.0 / (dt * window))   # auto = окно
+        self.assertEqual(make_loop(f.loops[0]).ref, None)                 # пустая ячейка ref → без уставки
+
+    def test_bundle_reproduces_machine(self):
+        import tempfile, shutil, zipfile
+        from synchrotronsim.experiment import Experiment
+        from synchrotronsim import open_db
+        e = Experiment.cockpit(lattice=3)
+        tmp = tempfile.mkdtemp(prefix="ss_bundle_"); self.addCleanup(shutil.rmtree, tmp, True)
+        path = e.save_bundle(os.path.join(tmp, "b.zip"))
+        names = zipfile.ZipFile(path).namelist()
+        self.assertIn("tables/lattice_configs.csv", names); self.assertIn("experiment.json", names)
+        e2, db2 = Experiment.load_bundle(path, os.path.join(tmp, "ws"))
+        self.assertEqual(e2.to_dict(), e.to_dict())
+        self.assertEqual(db2.machine(3).fingerprint, open_db().machine(3).fingerprint)
+        self.assertEqual(db2.lattices(), [3])                             # в пакете — только своя машина
+
+    def test_engine_records_run_and_turn_limit(self):
+        """Кокпит: адреса «● запись» → Watch движка; запись → прогон на каждый проход; лимит оборотов
+        завершает проход (done) и, при «повторять», начинает новый с нуля."""
+        import tempfile, shutil, time as _t
+        from client import InProcLink
+        from client.engine import EngineThread
+        from control import ExperimentState, Scheduler
+        from synchrotronsim.run import Run, list_runs
+        tmp = tempfile.mkdtemp(prefix="ss_cockpit_runs_"); self.addCleanup(shutil.rmtree, tmp, True)
+        os.makedirs(os.path.join(tmp, "tables"))
+        plant = _FakeInfinitePlant()
+        state = ExperimentState(plant.schema())
+        sch = Scheduler(plant, state, dt=1.0e-3)
+        plant.reset(state)
+        link = InProcLink()
+        eng = EngineThread(link, sch, steps_per_cycle=1, publish_every=1, idle_sleep=0.002, run_root=tmp)
+        link.watch("obs.ebpm.x:max"); link.watch("undulator.und_01.gap"); link.watch("bogus.x")
+        link.record(True, max_turns=20, repeat=True)
+        link.control("run")
+        eng.start()
+        try:
+            end = _t.time() + 10
+            while _t.time() < end and len([r for r in list_runs(tmp) if r["status"] == "done"]) < 2:
+                _t.sleep(0.01)
+            link.record(False)
+            _t.sleep(0.1)
+        finally:
+            eng.stop(); eng.join(timeout=5)
+        rows = list_runs(tmp)
+        done = [r for r in rows if r["status"] == "done"]
+        self.assertGreaterEqual(len(done), 2, rows)                       # два полных прохода по лимиту
+        self.assertTrue(all(r["status"] in ("done", "stopped") for r in rows))
+        r0 = Run.open(done[0]["run_id"], root=tmp)
+        self.assertEqual(r0.names(), ["obs.ebpm.x:max", "undulator.und_01.gap"])   # bogus.x отвергнут
+        st, t, v = r0.series("obs.ebpm.x:max")
+        self.assertEqual(int(st[-1]), 20)                                 # проход ровно до лимита (оборот = такт)
+        self.assertAlmostEqual(float(v[-1]), 2.0e-5)                      # max(1e-6·оборот, …) на 20-м обороте
+        self.assertEqual(r0.manifest["source"], "cockpit")
+        self.assertEqual(r0.manifest["config"]["max_turns"], 20)          # без опыта — сводка движка
+
+    def test_cockpit_record_ui(self):
+        """Кнопка «● запись» окна графика шлёт Watch; блок «запись прогона» панели шлёт record(on, лимит, повтор)
+        и показывает текущий прогон из меты движка."""
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PySide6.QtWidgets import QApplication
+            from client import windows as W
+            from client.cockpit import ControlPanel
+        except Exception as e:
+            self.skipTest(f"нет GUI-зависимостей: {e}")
+        from client import InProcLink
+        from client.link import WATCH, UNWATCH, RECORD
+        QApplication.instance() or QApplication([])
+        got = []
+        w = W.GraphWindow("obs.ebpm.x:rms")
+        w.request_watch.connect(lambda a, on: got.append((a, on)))
+        w.btn_watch.setChecked(True); w.btn_watch.setChecked(False)
+        self.assertEqual(got, [("obs.ebpm.x:rms", True), ("obs.ebpm.x:rms", False)])
+        link = InProcLink()
+        p = ControlPanel(link)
+        p.chk_rec.setChecked(True); p.spin_turns.setValue(5000); p.chk_repeat.setChecked(True)
+        p._send_record()
+        msgs = [m for m in link.pull() if m.kind == RECORD]
+        self.assertEqual(msgs[-1].value, {"on": True, "max_turns": 5000, "repeat": True})
+        p.update_meta({"run_id": "20261125-x", "watches": ["obs.ebpm.x:rms"], "pass": 2})
+        self.assertIn("20261125-x", p.lbl_run.text())
+        link.watch("obs.tune"); link.unwatch("obs.tune")
+        self.assertEqual([m.kind for m in link.pull()], [WATCH, UNWATCH])
+
+    def test_loop_gain_address_reads_and_commands(self):
+        """loop.<имя>.gain — читает и задаёт Controller.params["gain"] (раньше команда молча не применялась)."""
+        from client import InProcLink
+        from client.engine import EngineThread
+        from control import ExperimentState, Scheduler, StateView
+        from control.controllers.integral_svd import IntegralSVD
+        from synchrotronsim import addresses as AD
+        from control.controller import ResponseMatrix
+
+        class _P(_FakeInfinitePlant):
+            def build_response(self, actuators, observables):
+                return ResponseMatrix(np.ones((3, len(actuators))), ["b0", "b1", "b2"], actuators)
+        plant = _P()
+        state = ExperimentState(plant.schema())
+        sch = Scheduler(plant, state, dt=1.0e-3)
+        sch.add(IntegralSVD("fofb_x", sensor="ebpm.x", actuator_key="hkick", gain=0.5), rate_hz=100.0, enabled=False)
+        self.assertEqual(AD.resolve(StateView(state), "loop.fofb_x.gain", loops=sch.loops), 0.5)
+        eng = EngineThread(InProcLink(), sch)
+        eng._command("loop.fofb_x.gain", 0.25)
+        self.assertEqual(sch.loops["fofb_x"].controller.params["gain"], 0.25)
+        self.assertIsNone(eng._unknown)
 
 
 if __name__ == "__main__":

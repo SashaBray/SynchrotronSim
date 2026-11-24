@@ -1,5 +1,7 @@
 # Сборка
 build/
+build-py/
+*.pyd
 bin/
 obj/
 *.exe
@@ -153,5 +155,7 @@ elegant_run/*.ele
 control/mode5_knobs.json
 
 # Режим 4: таблицы РЕЗУЛЬТАТОВ эксперимента ОС (генерируются mode4_run.py; конфиги fb_* версионируются)
+workspace/runs/
+workspace/tables/runs.csv
 workspace/tables/fb_results.csv
 workspace/tables/fb_artifacts.csv

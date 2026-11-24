@@ -9,6 +9,8 @@
 Направления (эскиз из docs/CLIENT_PLAN.md §1):
   клиент→движок:  subscribe(addr) / unsubscribe(addr) / command(addr, value)
                   control("run"|"stop"|"restart"|"shutdown") / set_screen(addr, area, res, point, quantity)
+                  watch(addr) / unwatch(addr) — что записывать в прогон; record(on, max_turns, repeat) —
+                  запись прогона (synchrotronsim.run.Run) и лимит оборотов прохода (шаг 5 плана библиотеки)
   движок→клиент:  poll_snapshot() -> Snapshot{ values:{addr:val}, meta:{model_time, wall_time,
                                                speed, cycle, seq} }   # только подписанное + мета
 
@@ -36,6 +38,9 @@ UNSUBSCRIBE = "unsubscribe"
 COMMAND = "command"
 CONTROL = "control"
 SET_SCREEN = "set_screen"
+WATCH = "watch"
+UNWATCH = "unwatch"
+RECORD = "record"
 
 
 @dataclass(frozen=True)
@@ -45,7 +50,9 @@ class Message:
       command:   addr — адрес ручки, value — новое значение (число/строка/bool).
       control:   value — действие ("run"/"stop"/"restart"/"shutdown"), addr пуст.
       set_screen: addr — адрес экрана, value — {"area", "res", "point", "quantity"} (медленный такт);
-                 quantity — что рисовать: "flux" (поток на E₁, интерференция) | "power" (мощность, Вт/мм²)."""
+                 quantity — что рисовать: "flux" (поток на E₁, интерференция) | "power" (мощность, Вт/мм²).
+      watch/unwatch: addr — адрес, который писать в прогон (Watch) / перестать писать.
+      record:    value — {"on": bool, "max_turns": int | None, "repeat": bool}: запись прогона и лимит прохода."""
     kind: str
     addr: str = ""
     value: Any = None
@@ -91,6 +98,16 @@ class Link(ABC):
     @abstractmethod
     def publish(self, snapshot: Snapshot) -> None: ...
 
+    # запись прогона (не абстрактные — у транспортов без записи просто нет этих сообщений)
+    def watch(self, addr: str) -> None:
+        raise NotImplementedError
+
+    def unwatch(self, addr: str) -> None:
+        raise NotImplementedError
+
+    def record(self, on: bool, max_turns: Optional[int] = None, repeat: bool = False) -> None:
+        raise NotImplementedError
+
     def close(self) -> None:  # освобождение ресурсов транспорта (для NetLink — закрыть сокет)
         pass
 
@@ -122,6 +139,16 @@ class InProcLink(Link):
 
     def set_screen(self, addr: str, area: Any, res: Any, point: Any = None, quantity: Any = None) -> None:
         self._q.put(Message(SET_SCREEN, addr, {"area": area, "res": res, "point": point, "quantity": quantity}))
+
+    def watch(self, addr: str) -> None:
+        self._q.put(Message(WATCH, addr))
+
+    def unwatch(self, addr: str) -> None:
+        self._q.put(Message(UNWATCH, addr))
+
+    def record(self, on: bool, max_turns: Optional[int] = None, repeat: bool = False) -> None:
+        self._q.put(Message(RECORD, "", {"on": bool(on), "max_turns": int(max_turns) if max_turns else None,
+                                         "repeat": bool(repeat)}))
 
     def poll_snapshot(self) -> Optional[Snapshot]:
         with self._snap_lock:

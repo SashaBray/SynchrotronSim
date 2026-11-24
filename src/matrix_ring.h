@@ -158,12 +158,27 @@ inline void setFrames(Node& nd) {
     }
 }
 
-// ---- СБОРКА КОЛЬЦА из БД (build_line + check_junctions) ----------------------------------------
-// nsl/order — срезы и порядок сектор/кик-тела (по умолчанию как elegant: 5 и 4); isr — квантовое возбуждение.
-inline std::vector<Node> buildLine(const std::string& ws, int lattice, double design_mev, bool sr,
-                                   const Settings& stg, int nsl_sector = SECTOR_NSLICES, int yoshida_order = 4,
-                                   bool isr = false) {
-    const std::map<std::string, int> nsl_dev = nslByDev();
+// ---- ОПИСАНИЕ ЛИНИИ: магниты в порядке пучка, обмотки уже сложены ------------------------------------
+// Два поставщика: readLineSpec (CSV таблиц БД — как всегда) и Python-модель Machine.elements (модуль
+// расширения, шаг 2 docs/LIBRARY_ARCHITECTURE.md). Сборка узлов buildLineFrom — одна для обоих.
+struct LineSpec {
+    std::vector<std::string> dev, kind;
+    std::vector<double> x, y, z, yaw, pitch, roll, leff, B, G, Gv, S, O, e1, e2, lf1, lf2;
+    std::vector<int> nsl_box;                       // n_slices box-тела из БД (≤ 0 ⇒ 40)
+    size_t size() const { return dev.size(); }
+    void check() const {                            // все столбцы одной длины
+        const size_t n = dev.size();
+        const size_t lens[] = { kind.size(), x.size(), y.size(), z.size(), yaw.size(), pitch.size(), roll.size(),
+                                leff.size(), B.size(), G.size(), Gv.size(), S.size(), O.size(), e1.size(),
+                                e2.size(), lf1.size(), lf2.size(), nsl_box.size() };
+        for (size_t L : lens) if (L != n) throw std::runtime_error("LineSpec: столбцы разной длины");
+        if (n == 0) throw std::runtime_error("решётка пуста");
+    }
+};
+
+// CSV → описание линии (build_line): порядок — instance_id как целое, подряд идущие строки с одинаковыми
+// СТРОКАМИ x, y, z — обмотки одного магнита (mat_* складываются).
+inline LineSpec readLineSpec(const std::string& ws, int lattice) {
     Table lc = readTable(ws + "tables/lattice_configs.csv");
     Table cn = readTable(ws + "tables/element_connectivity.csv");
     int cLat = lc.col("lattice_id"), cInst = lc.col("instance_id");
@@ -183,14 +198,16 @@ inline std::vector<Node> buildLine(const std::string& ws, int lattice, double de
     std::sort(order.begin(), order.end(), [](const std::string& a, const std::string& b) {
         return std::stoi(a) < std::stoi(b);
     });
-    std::vector<Node> mags;
+    LineSpec L;
     size_t i = 0;
     while (i < order.size()) {
         const auto* r0 = conf[order[i]];
         if (!r0) { ++i; continue; }
-        double B = cellD(*r0, cB), G = cellD(*r0, cG);
-        double Gv = cell(*r0, cGv).empty() ? cellD(*r0, cG) : cellD(*r0, cGv);
-        double S = cellD(*r0, cS), O = cellD(*r0, cO);
+        // сумма обмоток с НУЛЯ, как matrix_tracker.Magnet (0.0 + x): ячейка «-0» даёт +0, а не −0 — тогда знак
+        // нуля у сил совпадает с Python-моделью (на трекинг не влияет, но описание срезов — бит-в-бит)
+        double B = 0.0 + cellD(*r0, cB), G = 0.0 + cellD(*r0, cG);
+        double Gv = 0.0 + (cell(*r0, cGv).empty() ? cellD(*r0, cG) : cellD(*r0, cGv));
+        double S = 0.0 + cellD(*r0, cS), O = 0.0 + cellD(*r0, cO);
         std::string kx = cell(*r0, cx), ky = cell(*r0, cy), kz = cell(*r0, cz);   // ключ со-локации (СТРОКИ)
         while (i + 1 < order.size()) {                                            // суммируем со-локованные обмотки
             const auto* rn = conf[order[i + 1]];
@@ -201,25 +218,45 @@ inline std::vector<Node> buildLine(const std::string& ws, int lattice, double de
                 ++i;
             } else break;
         }
+        L.dev.push_back(cell(*r0, cdev)); L.kind.push_back(cell(*r0, cKind));
+        L.x.push_back(cellD(*r0, cx)); L.y.push_back(cellD(*r0, cy)); L.z.push_back(cellD(*r0, cz));
+        L.yaw.push_back(cellD(*r0, cyaw)); L.pitch.push_back(cellD(*r0, cpit)); L.roll.push_back(cellD(*r0, crol));
+        L.leff.push_back(cellD(*r0, cLeff));
+        L.B.push_back(B); L.G.push_back(G); L.Gv.push_back(Gv); L.S.push_back(S); L.O.push_back(O);
+        L.e1.push_back(cellD(*r0, cE1)); L.e2.push_back(cellD(*r0, cE2));
+        L.lf1.push_back(cellD(*r0, cLf1)); L.lf2.push_back(cellD(*r0, cLf2));
+        L.nsl_box.push_back((int)cellD(*r0, cNsl, 40.0));
+        ++i;
+    }
+    return L;
+}
+
+// ---- СБОРКА КОЛЬЦА (build_line + check_junctions) ------------------------------------------------
+// nsl/order — срезы и порядок сектор/кик-тела (по умолчанию как elegant: 5 и 4); isr — квантовое возбуждение;
+// nsl_dev — срезы сектор/кик-тела по типу устройства (перекрывают nsl_sector).
+inline std::vector<Node> buildLineFrom(const LineSpec& L, double design_mev, bool sr, const Settings& stg,
+                                       int nsl_sector, int yoshida_order, bool isr,
+                                       const std::map<std::string, int>& nsl_dev) {
+    L.check();
+    std::vector<Node> mags;
+    mags.reserve(L.size());
+    for (size_t k = 0; k < L.size(); ++k) {
         Node nd;
-        nd.dev = cell(*r0, cdev); nd.kind = cell(*r0, cKind);
-        double Leff = cellD(*r0, cLeff);
+        nd.dev = L.dev[k]; nd.kind = L.kind[k];
+        double Leff = L.leff[k];
         int nsl = nsl_sector;       // сектор/кик-тело (_nsl_sector); n_slices из БД — для box-тела (кик корректора)
         { auto it = nsl_dev.find(nd.dev); if (it != nsl_dev.end()) nsl = it->second; }   // SS_NSL_DEV по типу
-        double e1 = cellD(*r0, cE1), e2 = cellD(*r0, cE2);
-        double lf1 = cellD(*r0, cLf1), lf2 = cellD(*r0, cLf2);
-        int nsl_box = (int)cellD(*r0, cNsl, 40.0);
-        nd.phys = Element::make(nd.kind, Leff, B, G, Gv, S, O, e1, e2, nsl, design_mev, sr, yoshida_order, isr,
-                                nsl_box > 0 ? nsl_box : 40, lf1, lf2);
+        int nsl_box = L.nsl_box[k];
+        nd.phys = Element::make(nd.kind, Leff, L.B[k], L.G[k], L.Gv[k], L.S[k], L.O[k], L.e1[k], L.e2[k], nsl,
+                                design_mev, sr, yoshida_order, isr, nsl_box > 0 ? nsl_box : 40, L.lf1[k], L.lf2[k]);
         nd.sector = nd.phys.sector; nd.monitor = (nd.kind == "monitor");
-        double yaw = cellD(*r0, cyaw), pitch = cellD(*r0, cpit), roll = cellD(*r0, crol);
-        nd.center = { cellD(*r0, cx), cellD(*r0, cy), cellD(*r0, cz) };
-        frame(yaw, pitch, roll, nd.axis, nd.uhat, nd.vhat);
+        nd.center = { L.x[k], L.y[k], L.z[k] };
+        frame(L.yaw[k], L.pitch[k], L.roll[k], nd.axis, nd.uhat, nd.vhat);
         nd.entry = nd.center - nd.axis * (0.5 * Leff);
         nd.exit  = nd.center + nd.axis * (0.5 * Leff);
         nd.theta0_0 = nd.phys.theta0; nd.edge1_0 = nd.phys.edge1; nd.edge2_0 = nd.phys.edge2;
         setFrames(nd);
-        mags.push_back(nd); ++i;
+        mags.push_back(nd);
     }
     // check_junctions: снап совпадающих плоскостей (same_plane_as_prev) — по «ящику» (axis/entry/exit).
     for (size_t j = 1; j < mags.size(); ++j) {
@@ -229,6 +266,15 @@ inline std::vector<Node> buildLine(const std::string& ws, int lattice, double de
         mags[j].same_plane_as_prev = (s < stg.plane_parallel_tol) && (gap < stg.plane_same_tol_m);
     }
     return mags;
+}
+
+// Кольцо из БД (CSV). nsl_dev_in — срезы по типу устройства ЯВНО (модуль расширения: окружение процесса у
+// него общее с интерпретатором и не годится для настройки одного кольца); nullptr — из env SS_NSL_DEV.
+inline std::vector<Node> buildLine(const std::string& ws, int lattice, double design_mev, bool sr,
+                                   const Settings& stg, int nsl_sector = SECTOR_NSLICES, int yoshida_order = 4,
+                                   bool isr = false, const std::map<std::string, int>* nsl_dev_in = nullptr) {
+    const std::map<std::string, int> nsl_dev = nsl_dev_in ? *nsl_dev_in : nslByDev();
+    return buildLineFrom(readLineSpec(ws, lattice), design_mev, sr, stg, nsl_sector, yoshida_order, isr, nsl_dev);
 }
 
 // ---- СТЫКОВОЧНЫЙ ДРЕЙФ (modified_drift) --------------------------------------------------------

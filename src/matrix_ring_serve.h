@@ -14,6 +14,7 @@
 //   PIECES n             + n·6           → OK m + n·(n_pieces+1)·6 (старт + после каждого куска)
 //   JUNCTION n           + 24 + n·6      → OK m + n·6 (стык плоскостей A→B: p, axis, u, v каждой)
 //   PIECEMETA / INFO                     → OK k + k текстовых строк
+//   DESCRIBE                             → OK m + описание узлов (DESCRIBE_COLS × n_mag + 24 числа плоскости)
 //   KICK j theta | VKICK j theta | YAW j alpha | DK j dk | DKV j dk | DSK j dk | DK2 j dk | DK3 j dk | RESET → OK 0
 //     (DK — k1 и k1v вместе, как возбуждение квадруполя; DKV — только вертикальный k1v)
 //   BSCALE j f → OK 0: угол и грани изгиба j = f × исходные, рамки заново (живой зазор: поле полюсов ИД ∝ K)
@@ -27,6 +28,10 @@
 // в плоскости наблюдения. Одиночные пролёты ELEM/PIECES применяют резонаторы внутри пути (иначе 6D-орбита
 // после резонатора неверна), конец оборота — только turn().
 //
+// ИСТОЧНИК РЕШЁТКИ. Сервер читает таблицы ws (readLineSpec/readCavities). Модуль расширения (src/py_engine.cpp)
+// может задать RingModel::spec/cav_spec — описание линии из Python-модели Machine: тогда build() (и RESET)
+// собирает кольцо из памяти, без чтения диска. Узлы в обоих случаях строит одна функция buildLineFrom.
+//
 // ЧАСТОТА ВЧ. freq_hz ≤ 0 ⇒ f_RF = h·c/C (резонатор настроен на геометрический периметр — как было всегда).
 // freq_hz > 0 ⇒ «длина ВЧ-оборота» C_RF = h·c/f_RF: за оборот опорные часы уходят на C_RF (не на C), фаза
 // 2πh·t/C_RF. Расстройка Δf сдвигает равновесную энергию δ ≈ −Δf/(η·f) — ВЧ-частота становится актуатором.
@@ -36,6 +41,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -55,9 +61,25 @@ struct RingConfig {
 
 struct Piece { int mag; bool junction; Element el; };
 
+// ОПИСАНИЕ УЗЛОВ (команда DESCRIBE, модуль: Ring.describe_flat) — ТЕКУЩЕЕ состояние ядра для Python-описания
+// магнитов (ring_cpp.CppRing.mags/plane): аналитика видит ровно то кольцо, которое трекает ядро, со всеми
+// возмущениями, без второй сборки решётки. Плоский массив: n_mag строк по столбцам DESCRIBE_COLS («имя:ширина»,
+// ширина 1 опускается; рамка — p, axis, u, v по 3), затем 24 числа плоскости наблюдения (fr_in, fr_out).
+// Разбор — ring_cpp.parse_describe. Флаги и целые — как double.
+constexpr const char* DESCRIBE_COLS =
+    "center:3 axis:3 uhat:3 vhat:3 entry:3 exit:3 fr_in:12 fr_out:12 Leff theta0 k1 k1v k2 k3 ks hkick vkick "
+    "edge1 edge2 kEdge1 kEdge2 psi1 psi2 rinv rad_coef isr_coef lf1 lf2 theta0_0 edge1_0 edge2_0 "
+    "sector kick same_plane_as_prev nsl nsl_box";
+
 struct RingModel {
     RingConfig cfg;
     std::string ws;
+    bool nsl_dev_explicit = false;                   // true ⇒ срезы по типу из nsl_dev (расширение), иначе env SS_NSL_DEV
+    std::map<std::string, int> nsl_dev;
+    // Источник решётки: spec задан ⇒ магниты и резонаторы из него (модуль расширения, Python-модель Machine),
+    // RESET/build() пересобирает кольцо из памяти без чтения диска; иначе — таблицы ws (как всегда).
+    std::shared_ptr<const LineSpec> spec;
+    std::shared_ptr<const std::vector<CavitySpec>> cav_spec;
     std::vector<Node> mags;
     Node plane;
     std::vector<double> s_in, s_out;
@@ -73,7 +95,12 @@ struct RingModel {
 
     void build() {
         Settings stg;
-        mags = buildLine(ws, cfg.lattice, cfg.design_mev, cfg.sr || cfg.isr, stg, cfg.nsl, cfg.order, cfg.isr);
+        if (spec)
+            mags = buildLineFrom(*spec, cfg.design_mev, cfg.sr || cfg.isr, stg, cfg.nsl, cfg.order, cfg.isr,
+                                 nsl_dev_explicit ? nsl_dev : nslByDev());
+        else
+            mags = buildLine(ws, cfg.lattice, cfg.design_mev, cfg.sr || cfg.isr, stg, cfg.nsl, cfg.order, cfg.isr,
+                             nsl_dev_explicit ? &nsl_dev : nullptr);
         if (mags.empty()) throw std::runtime_error("решётка пуста");
         const Node& m0 = mags.front(); const Node& m1 = mags.back();
         double gap = dot(m0.fr_in.p - m1.fr_out.p, m1.fr_out.axis);
@@ -94,7 +121,7 @@ struct RingModel {
     // Резонаторы установки на кольце — те же правила, что beam_injection.build_path (старт = плоскость наблюдения).
     void setupCavities() {
         cav_before.assign(mags.size(), {}); cav_tail.clear(); end_share = -1.0; has_cav = false;
-        std::vector<CavitySpec> cav = readCavities(ws, cfg.lattice);
+        std::vector<CavitySpec> cav = cav_spec ? *cav_spec : (spec ? std::vector<CavitySpec>() : readCavities(ws, cfg.lattice));
         if (cav.empty()) return;
         ExpPlanes ep; ep.start.c = plane.center; ep.start.n = plane.axis; ep.has_finish = false;
         Injection path = buildPath(mags, ep, cav, Settings(), true);
@@ -151,6 +178,27 @@ struct RingModel {
     const std::vector<Piece>& currentPieces() {
         if (pieces_stale) buildPieces();
         return pieces;
+    }
+
+    // Раскладка — DESCRIBE_COLS (70 чисел на узел) + 24 числа плоскости.
+    std::vector<double> describeFlat() const {
+        std::vector<double> out;
+        out.reserve(mags.size() * 70 + 24);
+        auto v3 = [&](const Vec3& v) { out.push_back(v.x); out.push_back(v.y); out.push_back(v.z); };
+        auto fr = [&](const Frame& f) { v3(f.p); v3(f.axis); v3(f.u); v3(f.v); };
+        for (const Node& nd : mags) {
+            const Element& e = nd.phys;
+            v3(nd.center); v3(nd.axis); v3(nd.uhat); v3(nd.vhat); v3(nd.entry); v3(nd.exit);
+            fr(nd.fr_in); fr(nd.fr_out);
+            const double s[] = { e.Leff, e.theta0, e.k1, e.k1v, e.k2, e.k3, e.ks, e.hkick, e.vkick, e.edge1, e.edge2,
+                                 e.kEdge1, e.kEdge2, e.psi1, e.psi2, e.rinv, e.rad_coef, e.isr_coef, e.lf1, e.lf2,
+                                 nd.theta0_0, nd.edge1_0, nd.edge2_0,
+                                 e.sector ? 1.0 : 0.0, e.kick ? 1.0 : 0.0, nd.same_plane_as_prev ? 1.0 : 0.0,
+                                 (double)e.nsl, (double)e.nsl_box };
+            out.insert(out.end(), std::begin(s), std::end(s));
+        }
+        fr(plane.fr_in); fr(plane.fr_out);
+        return out;
     }
 
     double beta(double d) const {
@@ -493,6 +541,8 @@ inline int serveRing(RingModel& R) {
                     out.push_back(b);
                 }
                 sendText(out);
+            } else if (cmd == "DESCRIBE") {              // описание узлов (текущее состояние) — см. DESCRIBE_COLS
+                sendDoubles(R.describeFlat());
             } else if (cmd == "PIECEMETA") {
                 std::vector<std::string> out;
                 char b[512];

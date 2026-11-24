@@ -19,7 +19,7 @@ from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt, QTimer, QObject, Signal
 from PySide6.QtGui import QCursor, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QSpinBox,
                                QInputDialog, QLabel, QMainWindow, QMessageBox, QPushButton, QToolBar,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
@@ -157,9 +157,36 @@ class ControlPanel(QWidget):
         self.box_optics.setLayout(self._opt_grid)
         self.box_optics.setVisible(False)              # показать, когда оптика доступна (set_optics)
 
+        # запись прогона (synchrotronsim.run.Run): каждый проход — от рестарта до лимита — своя папка
+        # workspace/runs/<id> (паспорт + ряды); ЧТО писать — кнопка «● запись» в окнах графиков
+        self.chk_rec = QCheckBox("записывать прогон")
+        self.spin_turns = QSpinBox()
+        self.spin_turns.setRange(0, 2_000_000_000)
+        self.spin_turns.setSingleStep(1000)
+        self.spin_turns.setSpecialValueText("без лимита")
+        self.spin_turns.setSuffix(" об.")
+        self.chk_repeat = QCheckBox("по лимиту — новый проход (иначе пауза)")
+        self.lbl_run = QLabel("не пишется")
+        self.lbl_run.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lbl_run.setWordWrap(True)
+        self.chk_rec.clicked.connect(self._send_record)
+        self.chk_repeat.clicked.connect(self._send_record)
+        self.spin_turns.editingFinished.connect(self._send_record)
+        rec = QGridLayout()
+        rec.addWidget(self.chk_rec, 0, 0, 1, 2)
+        rec.addWidget(QLabel("лимит прохода"), 1, 0)
+        rec.addWidget(self.spin_turns, 1, 1)
+        rec.addWidget(self.chk_repeat, 2, 0, 1, 2)
+        rec.addWidget(self.lbl_run, 3, 0, 1, 2)
+        box_rec = QGroupBox("запись прогона")
+        box_rec.setLayout(rec)
+        box_rec.setToolTip("что писать — кнопка «● запись» в окнах графиков; папки — workspace/runs, индекс — "
+                           "workspace/tables/runs.csv")
+
         lay = QVBoxLayout(self)
         lay.addLayout(bar)
         lay.addWidget(box_meta)
+        lay.addWidget(box_rec)
         lay.addWidget(box_gap)
         lay.addWidget(self.box_optics)
         lay.addWidget(self.box_loops)
@@ -179,6 +206,16 @@ class ControlPanel(QWidget):
         for key, text in format_meta(meta).items():
             if key in self.lbl:
                 self.lbl[key].setText(text)
+        n = len(meta.get("watches") or [])
+        rid = meta.get("run_id") or ""
+        if rid:
+            self.lbl_run.setText(f"пишется: {rid} · величин {n} · проход {meta.get('pass', 0)}")
+        else:
+            self.lbl_run.setText(f"не пишется · отмечено величин {n}" if n else
+                                 "не пишется · отметьте величины кнопкой «● запись» в окнах")
+
+    def _send_record(self, *_):
+        self.link.record(self.chk_rec.isChecked(), int(self.spin_turns.value()) or None, self.chk_repeat.isChecked())
 
     # ---- контуры САУ: список (имя файла логики) + переключатели вкл/выкл ----
     def set_loops(self, loops: List[dict]):
@@ -460,6 +497,7 @@ class Cockpit(QMainWindow):
             self._subscribe(a)
         try:
             win.request_open.connect(self._open_from_request)
+            win.request_watch.connect(self._watch_from_window)
         except Exception:
             pass
         if isinstance(win, (ScreenWindow, UndulatorInfoWindow)):
@@ -498,6 +536,10 @@ class Cockpit(QMainWindow):
             tw = getattr(win, "_toolwin", None)
             if tw is not None:
                 tw.close()
+
+    def _watch_from_window(self, addr: str, on: bool):
+        """Кнопка «● запись» окна → писать/не писать адрес в прогон (Watch движка)."""
+        (self.link.watch if on else self.link.unwatch)(addr)
 
     def _open_from_request(self, kind: str, addr: str):
         if kind == "graph":

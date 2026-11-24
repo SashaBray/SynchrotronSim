@@ -42,6 +42,14 @@ const double ISR_K = R_E * std::sqrt(55.0 / (24.0 * std::sqrt(3.0)) * 137.035989
 constexpr double YOSHIDA_BETA  = 1.25992104989487316477;     // 2^(1/3) — расщепление Йошиды 4-го порядка
 constexpr int    SECTOR_NSLICES = 5;                        // срезов сектор/кик-тела (_nsl_sector, как elegant N_SLICES=5)
 
+// Дробные степени ISR через sqrt, а не std::pow (2026-11-24). pow у mingw-w64 считает на x87, и его последний
+// бит зависит от точности x87, которую задаёт ПРОЦЕСС-хозяин: exe MinGW стартует с 64-битной (cw 0x037F),
+// Python (MSVC) — с 53-битной (0x027F). Из-за этого ISR сервера и модуля расширения расходились на ~1e-11.
+// sqrt на SSE округляется точно по IEEE — результат один в любом процессе (поэтому и у сервера, и у расширения).
+inline double pow_1p5(double x)  { return x * std::sqrt(x); }                              // x^1.5
+inline double pow_2p5(double x)  { return x * x * std::sqrt(x); }                          // x^2.5
+inline double pow_0p75(double x) { double r = std::sqrt(x); return r * std::sqrt(r); }     // x^0.75, x ≥ 0
+
 struct ParticleLost : std::runtime_error {
     explicit ParticleLost(const std::string& m) : std::runtime_error(m) {}
 };
@@ -162,7 +170,7 @@ struct Element {
         if (sector && sr) {                                          // распределённое СИ (классическое)
             double gamma = design_mev / MC2_MEV;
             rad_coef = RAD_K * gamma * gamma * gamma / (rho0 * rho0);
-            if (isr) isr_coef = ISR_K * std::pow(gamma, 2.5) / std::pow(std::fabs(rho0), 1.5);
+            if (isr) isr_coef = ISR_K * pow_2p5(gamma) / pow_1p5(std::fabs(rho0));
         }
     }
 
@@ -255,7 +263,7 @@ private:
                     QX /= (1.0 + DP); QY /= (1.0 + DP);           // канонич. → наклон
                     if (rad_coef != 0.0) DP -= rad_coef * delta_factor * F2 * ds * ds_factor;
                     if (isr_coef != 0.0 && rng)                   // квантовый скачок энергии (гауссов шум)
-                        DP -= isr_coef * delta_factor * std::pow(F2, 0.75)
+                        DP -= isr_coef * delta_factor * pow_0p75(F2)
                               * std::sqrt(ds_isr * ds_factor) * (*rng)();
                     QX *= (1.0 + DP); QY *= (1.0 + DP);           // наклон → канонич. при новой энергии
                 }

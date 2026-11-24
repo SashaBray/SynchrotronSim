@@ -29,7 +29,11 @@ def _rms(v):
 
 
 class Recorder:
-    """База. По умолчанию ничего не делает; наследники переопределяют sample/finalize."""
+    """База. По умолчанию ничего не делает; наследники переопределяют sample/finalize.
+
+    Ряды рекордера в прогоне `synchrotronsim.run.Run` — адреса `rec.<signal>` (prefix); `result_rows` — скаляры
+    для прежней таблицы fb_results, `series_rows` — всё (у WatchRecorder — ещё и векторы)."""
+    prefix = "rec."
 
     def __init__(self, params="", cadence="per_window", **kw):
         self.params = params
@@ -46,8 +50,60 @@ class Recorder:
     def result_rows(self):
         return self.rows
 
+    def series_rows(self):
+        return list(self.rows)
+
     def artifact(self):
         return self._art
+
+
+class WatchRecorder(Recorder):
+    """Запись ЛЮБОГО адреса единого пространства (`synchrotronsim.addresses`, шаг 4): строка fb_record, где в
+    `signal` стоит адрес (`obs.tune`, `undulator.und_01.gap`, `act.corr.000.hkick`, `obs.ebpm.x:rms`, …), а не имя
+    рекордера. Ряд называется самим (каноническим) адресом. cadence: per_window — каждое окно (params `every=N`
+    прореживает), final — одно значение в конце. Векторные значения идут только в прогон (series_rows)."""
+    prefix = ""
+
+    def __init__(self, params="", cadence="per_window", addr="", loops=None, **kw):
+        super().__init__(params, cadence)
+        from synchrotronsim.addresses import canonical
+        self.addr = canonical(addr)
+        self.loops = loops
+        self.every = 1
+        for tok in str(params or "").replace(",", ";").split(";"):
+            k, _, v = tok.partition("=")
+            if k.strip() == "every" and v.strip():
+                self.every = max(1, int(v))
+        self._n = 0
+        self._vec = []
+
+    def _value(self, state, plant):
+        from control.state import StateView
+        from synchrotronsim.addresses import resolve
+        meta = {"model_time": float(getattr(state, "t", 0.0)), "turn": float(getattr(plant, "turn", 0) or 0)}
+        return resolve(StateView(state), self.addr, loops=self.loops, meta=meta)
+
+    def _put(self, step, v):
+        if v is None:
+            return
+        if isinstance(v, list):
+            self._vec.append((self.addr, int(step), v))
+        else:
+            self.rows.append((self.addr, int(step), float(v)))
+
+    def sample(self, state, widx, plant):
+        if self.cadence == "final":
+            return
+        self._n += 1
+        if (self._n - 1) % self.every == 0:
+            self._put(widx, self._value(state, plant))
+
+    def finalize(self, state, plant):
+        if self.cadence == "final":
+            self._put(0, self._value(state, plant))
+
+    def series_rows(self):
+        return list(self.rows) + list(self._vec)
 
 
 class OrbitRmsRecorder(Recorder):
@@ -311,14 +367,18 @@ REGISTRY = {
 }
 
 
-def build(records, mesh=121):
-    """records = list[fb_config.Record] → list рекордеров (только enabled и известные signal)."""
+def build(records, mesh=121, loops=None):
+    """records = list[fb_config.Record] → list рекордеров (только enabled). signal — имя рекордера из REGISTRY
+    или АДРЕС единого пространства (→ WatchRecorder); прочее (нереализованное, напр. sf) — пропускаем.
+    loops — Scheduler.loops (для адресов loop.*)."""
+    from synchrotronsim.addresses import is_address
     out = []
     for r in records:
         if not r.enabled:
             continue
         cls = REGISTRY.get(r.signal)
-        if cls is None:                                      # неизвестный/нереализованный сигнал — пропускаем
-            continue
-        out.append(cls(params=r.params, cadence=r.cadence, mesh=mesh))
+        if cls is not None:
+            out.append(cls(params=r.params, cadence=r.cadence, mesh=mesh))
+        elif is_address(r.signal):
+            out.append(WatchRecorder(params=r.params, cadence=r.cadence, addr=r.signal, loops=loops))
     return out

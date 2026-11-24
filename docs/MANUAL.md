@@ -210,6 +210,25 @@ py -3.14 load_config.py <путь> --parse-only                        # тол�
 «собрал → поправил руками → посчитал», просто не перезагружать `.lte` после правок. Сохранение
 per-instance правок между пересборками сознательно не делалось (решение 2026-07-17: не усложнять БД).
 
+### Библиотечный загрузчик: `synchrotronsim.db` и модель `Machine`
+
+Единый слой чтения БД для новой библиотеки (шаг 1 `docs/LIBRARY_ARCHITECTURE.md`); формат таблиц тот же.
+
+```python
+import synchrotronsim as ss
+db = ss.open_db()                      # корень проекта; работает из любой текущей папки
+m = db.machine(26)                     # Machine: instances (строки БД), elements (магниты), devices, groups,
+                                       #   cavities, kickers, bpms, screens, meta; m.fingerprint — sha256
+m.elements.kind, m.elements.mat_G      # столбцы numpy, только чтение; обмотки: m.elements.members(i)
+db2 = ss.open_db(overlay=ws_dir)       # ws_dir — папка errors.perturbed_workspace: её таблицы главнее
+```
+
+Магниты `m.elements` совпадают с `matrix_tracker.build_line` бит-в-бит (склейка обмоток по совпадающим
+строкам x, y, z; фолбэки L_eff/kind/n_slices на тип; `mat_Gv` пусто ⇒ `mat_G`); `n_slices = 0` — «из
+настроек опыта». В модели СИ (экраны мм/мрад → м/рад, `rot_*_deg` → рад, `field_pct` → доля); `arg_val` «-»
+и пустые ячейки — NaN. Паспорт установки (`m.meta`: энергия, ВЧ, суперпериоды) — из
+`synchrotronsim/machines.py` (бывший `facility_report.LATTICE_INFO`; правьте там). Тест — `TestDataModel`.
+
 ## 4. Трекинг
 
 ```powershell
@@ -418,7 +437,7 @@ Python больше **не считает** — только БД/анализ/�
   — **сервер кольца для анализа** (`src/matrix_ring_serve.h`): порт `ring_analysis.Ring` (плоскость наблюдения
   перед первым магнитом, ВЧ как RFCA с FIDUCIAL=light, СИ и ISR по срезам изгибов, у каждой частицы свой
   генератор). Двоичный протокол по stdin/stdout: `TRACK`/`TBT`/`ELEM`/`PIECES`/`JUNCTION` + float64,
-  `INFO`/`PIECEMETA`, возмущения `KICK`/`VKICK j θ` (гор./верт. доп. кик) / `DK j dk` (±Δ нормального
+  `INFO`/`PIECEMETA`/`DESCRIBE` (описание узлов, раскладка `DESCRIBE_COLS`), возмущения `KICK`/`VKICK j θ` (гор./верт. доп. кик) / `DK j dk` (±Δ нормального
   градиента k1 обеих плоскостей — BBA) / `DKV j dk` (±Δ только вертикального k1v) / `BSCALE j f` (угол и грани
   изгиба j = f × исходные, рамки заново — живой зазор ондулятора, `TbtPlant`) / `DSK j dks` (скью-градиент ks, связь x↔y — коррекция связи) /
   `DK2 j dk2` / `DK3 j dk3` (±Δ секступольной k2 / октупольной k3 — нелинейный тюнер ν(δ), коррекция
@@ -434,14 +453,53 @@ Python больше **не считает** — только БД/анализ/�
   `rf_circumference()`; Python-эталон — `ring_analysis.Ring.set_rf`/`rf_circumference`, elegant — `FREQ=freq_hz`);
   `apply_perturb(kicks, vkicks, dks, dsks, dk2s, dk3s, dkvs, bscales)` — RESET + набор возмущений на том же сервере,
   ошибки рассогласования и возмущения создания `with_*`/`perturbed` сохраняются, сбрасывается только прежний
-  `apply_perturb`; описание магнитов `mags`/`plane` для `ring_matrix`/`ring_response` следует за всеми
-  возмущениями: кик изгиба не трогает его θ0, `VKICK` — только атрибут `vkick`); сверка с Python-эталоном — до
+  `apply_perturb`; описание магнитов `mags`/`plane` для `ring_matrix`/`ring_response`/`ring_map` — **из ядра**
+  (команда `DESCRIBE`: рамки, силы, грани, флаги тела — текущее состояние со всеми возмущениями; объекты
+  `matrix_tracker.Magnet`, без излучения и ВЧ; кик изгиба и полевого элемента — атрибут `hkick`/`vkick`, кик
+  «ящика» корректора — его θ0, как `ra.kicked`); сверка с Python-эталоном — до
   1e-11, быстрее в 150–450 раз. Дешёвые пути БЕЗ RESET (~0,3 с): `set_kicks(kicks, vkicks)` — задать
   изменившиеся кики (смена корректоров FOFB; снять — 0), `add_perturb(dks=…, dkvs=…, dsks=…, dk2s=…, dk3s=…)` —
   доложить аддитивные приращения, `set_bend_scale([(j, f)])` — масштаб изгиба полюсов (живой зазор ИД);
   `TbtPlant._apply` сам выбирает путь.
   `nsl_dev={device_type_id: n}` — срезы сектор/кик-тела по типу устройства (env `SS_NSL_DEV="dev=n,…"`,
   её же читает Python-эталон — паритет 1e-11); не задано — из окружения, по умолчанию всё как было.
+
+**То же ядро в процессе Python — модуль расширения `synchrotronsim._engine`** (шаг 0 плана библиотеки,
+`docs/LIBRARY_ARCHITECTURE.md`). Собирается из тех же заголовков (`src/py_engine.cpp` над `mc::RingModel`),
+nanobind, MinGW; рантайм MinGW и OpenMP влинкованы статически — модуль зависит только от `python314.dll`,
+`msvcrt.dll`, `KERNEL32.dll` и грузится без `C:\mingw64\bin` в PATH. Отдельная папка сборки `build-py/`:
+
+```powershell
+py -3.14 -m pip install nanobind                                         # один раз
+$py = py -3.14 -c "import sys; print(sys.executable)"
+cmake -S . -B build-py -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DSS_BUILD_PYTHON=ON "-DPython_EXECUTABLE=$py"
+cmake --build build-py --target _engine                                  # → synchrotronsim/_engine.cp314-win_amd64.pyd
+```
+
+После правки `src/matrix_*.h` пересобирать ОБА: `MatrixTracker` (сервер) и `_engine`. Обёртка —
+`synchrotronsim.engine.ExtRing` с интерфейсом `CppRing` (`track`, `track_tbt`, `track_elements`, `track_pieces`,
+`piece_meta`, `junction`, `apply_perturb`, `add_perturb`, `set_kicks`, `set_bend_scale`, `set_rf`,
+`rf_frequency`, `rf_circumference`; срезы по типу `nsl_dev` передаются явно, не через окружение). Числа —
+**бит-в-бит с сервером** при той же последовательности запросов, включая ISR (тест `TestEngineExtension`).
+На время трекинга GIL отпущен: разные `ExtRing` в разных потоках Python считаются параллельно (8 колец × 1
+частица на 16 потоках — ×6,3). Скорость трекинга та же, что у сервера (канал не был узким местом);
+`set_kicks` — 1 мкс вместо 60 мкс.
+
+**Решётка из модели, RESET без диска, снимки и копии (шаг 2).** По умолчанию `ExtRing` берёт решётку из
+`synchrotronsim.db` (`Machine`, `ws` ⇒ overlay) и передаёт в C++ массивами (`line_spec`, `cavity_specs`): ядро
+не читает таблицы ни при сборке, ни при `RESET`. `RESET` (`apply_perturb`, `reset()`) — откат к снимку свежего
+кольца, ВЧ на лету сохраняется (как у сервера): **~6 мс против ~0,3 с**. `snapshot()`/`restore(snap)` — снимок и
+откат живого состояния (~30 мс / ~5 мс); `clone()` — независимая копия (~30 мс). `source="csv"` — ядро читает
+таблицы само (для сверок). Все три пути (сервер, расширение из CSV, расширение из модели) — бит-в-бит.
+
+**`CppRing` выбирает бэкенд сам** (`ring_cpp.choose_backend`): аргумент `backend="ext"|"pipe"` → переменная
+окружения `SS_ENGINE=ext|pipe` → по умолчанию **`ext`** (модуль в процессе), если модуль собран и не задан
+`timeout`; с `timeout` — `pipe` (сторож убивает зависший процесс сервера, у модуля процесса нет). Интерфейс и
+числа одинаковы; на `ext` копии `with_*`/`perturbed` — клон свежего кольца (~30 мс вместо запуска процесса
+~1 с), RESET — 6 мс. Вернуть прежнее поведение во всём проекте — `SS_ENGINE=pipe`. **Готча x87:** `std::pow` у mingw-w64 считает на x87, и последний бит зависит
+от точности x87, которую ставит процесс-хозяин (exe MinGW — 64 бита, Python — 53). Поэтому дробные степени ISR в
+ядре — через `sqrt` (`pow_1p5`/`pow_2p5`/`pow_0p75` в `matrix_core.h`); новые `std::pow` с дробной степенью в
+ядро не добавлять.
 
 Python-ядро `matrix_tracker.py` — **эталон** для разработки/опытов: новое явление сначала в Python, потом порт
 в C++; регрессия `test_matrix_core_cpp.py` (элемент, бит-в-бит) и `test_matrix_core_ring.py` (кольцо+npz,
@@ -762,6 +820,66 @@ py -3.14 undulators/screen_report.py --lattice 27 --screen SCR_U01 --calc accura
 (~80 мс на три окна). Поэтому, пока камеру крутят (зажата кнопка мыши, крутится колесо, идёт перелёт по
 стрелкам), окна графиков ждут и после получают последний снимок; сцена, челюсти ондуляторов и панель
 обновляются всегда. Ряды во времени и след точки x×y — без сглаживания линий (перерисовка вдвое дешевле).
+
+### Адреса величин и прогоны (`synchrotronsim.addresses`, `synchrotronsim.run`)
+
+Каждая величина, которую показывает кокпит, записывает прогон или двигает команда, имеет **адрес** —
+`<область>.<объект>[.<атрибут>][@<место>][:<редукция>]`:
+
+| область | пример | что |
+|---|---|---|
+| `obs` | `obs.ebpm.x`, `obs.ebpm.x:rms`, `obs.tune:0` | наблюдаемая (вектор; `:rms/mean/max/min/<индекс>` — свёртка) |
+| `act` | `act.corr.000.hkick`, `act.corr.000.hkick.slew` | реализованное значение актуатора / поле его привода |
+| `undulator` | `undulator.und_01.gap` | ондулятор (gap, gap_target, K, B0, orbit_kick, slew) |
+| `optics` | `optics.nux`, `optics.beta_x@QF1A_03` | линейная оптика |
+| `element` | `element.SP03.COR05.k1` | магнит |
+| `loop` | `loop.fofb_x.enabled`, `loop.fofb_x.gain` | контур |
+| `meta`, `screen`, `diag`, `rec` | `meta.model_time`, `screen.SCR_U01`, `rec.orbit_rms.x` | мета прогона, экран, стандартный график, ряд рекордера |
+
+Прежние имена — **псевдонимы** (2026-11-25): `drive.<aid>.<поле>` → `act.<aid>.<поле>`, `actual.<aid>` →
+`act.<aid>`, голый id актуатора (`corr.000.hkick`, `quad.QF1A.dk`, `rf.freq`) → `act.<id>`. Старые раскладки окон
+открываются (адреса приводятся при восстановлении окна), подписки и команды понимают обе формы.
+`synchrotronsim.addresses.meta(addr)` — имя, единицы, виджет, можно ли писать (`writable`), форма, владелец
+(доска / движок / рекордер), цена (дешёвый / дорогой). Клиентский `client/addresses.py` — реэкспорт.
+
+Прогон эксперимента (`mode4_run`) пишется в `workspace/runs/<run_id>/` (паспорт `manifest.json`, ряды
+`signals.npz`, `tables/signals.csv` для Excel, `artifacts/`) и в индекс `workspace/tables/runs.csv` — подробности в
+`docs/CONTROL_MODEL.md`, раздел 10. Из Python: `Run.open(run_id).series(addr)` → (шаг, время, значение);
+`synchrotronsim.run.list_runs()` — индекс. Подписка в `fb_record` принимает любой адрес (`WatchRecorder`).
+
+### Запись прогона из кокпита и лимит оборотов
+
+На панели управления — блок **«запись прогона»**:
+- **что писать** — кнопка **«● запись»** в окне графика (или точки x×y): нажатая — адрес окна пишется в прогон;
+- **«записывать прогон»** — каждый проход (от рестарта до лимита) пишется в свою папку `workspace/runs/<id>`
+  (вид `cockpit`; в паспорте — опыт кокпита с текущей подпиской и лимитом, отпечаток машины, git, сборка ядра);
+  точка ряда — на каждом кадре движка (шаг = цикл публикации, время — модельное);
+- **«лимит прохода»** (оборотов; «без лимита» = 0) и **«по лимиту — новый проход»**: дойдя до лимита, проход
+  завершается (статус `done`) и либо начинается заново с нуля (новый прогон), либо модель встаёт на паузу.
+  Ручной «Рестарт» и снятие галочки завершают проход со статусом `stopped`.
+Строка под блоком показывает текущий прогон, число отмеченных величин и номер прохода. Экраны и стандартные
+графики (дорогие величины) пока не пишутся.
+
+### Опыт и стандартный цикл из Python (`synchrotronsim.experiment`, `synchrotronsim.simulation`)
+
+```python
+from synchrotronsim.experiment import Experiment
+from synchrotronsim.simulation import Simulation
+from synchrotronsim.run import Watch
+exp = Experiment.from_fb(3, smoke=True)          # опыт ОС из таблиц fb_* (то же, что mode4_run --exp 3 smoke)
+exp.record.append(Watch("obs.ebpm.x:rms"))        # дописать подписку
+run = Simulation(exp).run()                       # сборка + шаги + рекордеры → прогон
+run.series("rec.orbit_rms.x")
+exp.to_json("exp3.json"); Experiment.from_json("exp3.json")
+exp.save_bundle("exp3.zip")                       # опыт + таблицы его машины; Experiment.load_bundle(путь, папка)
+```
+
+`Experiment.cockpit(...)` — опыт живого кокпита (параметры прежнего `build_session`). Сборка у всех входов
+одна — `synchrotronsim.simulation.build_session(exp)`: `mode4_run` (через `Simulation`) и кокпит
+(`client.engine.build_session`) — её обёртки. Параметры конструктора plant'а лежат в опыте дословно
+(`exp.plant.kwargs`), поэтому `mode4_run` после перехода даёт ряды бит-в-бит как раньше. Пакет `save_bundle`
+сверяет отпечаток машины при распаковке; запуск модели прямо из распакованного пакета — следующий шаг
+(plant'ы пока читают основную БД).
 
 ## 10. Сравнение моделей — диффур vs кик (element_compare)
 

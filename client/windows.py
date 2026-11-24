@@ -231,10 +231,22 @@ class ValueLink(QLabel):
             self._emit(kind, addr)
 
 
+def _watch_button(win, addrs):
+    """Кнопка «● запись»: включённая — адреса окна пишутся в прогон (Watch) при включённой записи на панели."""
+    b = QPushButton("● запись")
+    b.setCheckable(True)
+    b.setMaximumWidth(110)
+    b.setToolTip("писать эту величину в прогон (workspace/runs) — запись включается на панели управления")
+    b.setStyleSheet("QPushButton:checked{color:#b01c22;font-weight:600;}")
+    b.toggled.connect(lambda on: [win.request_watch.emit(a, bool(on)) for a in addrs])
+    return b
+
+
 class SubscriberWindow(QWidget):
     """База окна-подписчика. Наследник задаёт KIND, addresses(), on_snapshot(), params()/from_params()."""
     KIND = "base"
     request_open = Signal(str, str)        # (kind, addr) — попросить кокпит открыть новое окно
+    request_watch = Signal(str, bool)      # (addr, писать?) — попросить кокпит писать адрес в прогон
 
     def __init__(self, title: str = ""):
         super().__init__()
@@ -294,6 +306,8 @@ class GraphWindow(SubscriberWindow):
         self.spin.valueChanged.connect(self._set_history)
         ctl.addWidget(self.spin)
         ctl.addStretch(1)
+        self.btn_watch = _watch_button(self, [self.addr])
+        ctl.addWidget(self.btn_watch)
         ctl.addWidget(_save_button(self.plot, f"{self.addr}.png"))
 
         lay = QVBoxLayout(self)
@@ -347,6 +361,8 @@ class PointWindow(SubscriberWindow):
 
         ctl = QHBoxLayout()
         ctl.addStretch(1)
+        self.btn_watch = _watch_button(self, [x_addr, y_addr])
+        ctl.addWidget(self.btn_watch)
         ctl.addWidget(_save_button(self.plot, f"{x_addr}_{y_addr}.png".replace(":", "")))
         lay = QVBoxLayout(self)
         lay.addWidget(self.plot, 1)
@@ -391,13 +407,13 @@ def info_fields(kind, element, aids):
     """[(addr, label, units[, scale])] — ТОЛЬКО параметры, которыми объект реально обладает (по роли/виду)."""
     rows = [(f"element.{element}.x", "положение X", "м"), (f"element.{element}.y", "положение Y", "м")]
     if kind in ("corrector", "kicker") and aids:            # корректор: ЖИВЫЕ H/V дипольные кики
-        rows += [(f"actual.{aids[0]}", "кик H", "рад"), (f"actual.{aids[1]}", "кик V", "рад")]
+        rows += [(f"act.{aids[0]}", "кик H", "рад"), (f"act.{aids[1]}", "кик V", "рад")]
     else:
         for suf, label, un in _KIND_FIELDS.get(kind, []):   # проектные (статичные) силы магнита
             rows.append((f"element.{element}.{suf}", label, un))
         if kind in _FAM_DK and aids:                        # + ЖИВАЯ Δk семейства, реализованная контуром
             lbl, un = _FAM_DK[kind]
-            rows.append((f"actual.{aids[0]}", lbl, un))
+            rows.append((f"act.{aids[0]}", lbl, un))
     if kind in _DEVICE_KINDS:                               # углы ориентации прибора (yaw/pitch/roll)
         rows += [(f"element.{element}.{suf}", label, un, sc) for suf, label, un, sc in _ORIENT_FIELDS]
     if kind in _KIND_FIELDS:                                 # оптика в точке — отдельной группой (для магнитов)
@@ -1196,10 +1212,18 @@ WINDOW_REGISTRY = {c.KIND: c for c in (GraphWindow, PointWindow, InfoWindow, Scr
                                        OrbitModesWindow)}
 
 
+_ADDR_PARAMS = ("addr", "x_addr", "y_addr")                # параметры окон, в которых лежат адреса
+
+
 def make_window(d: dict) -> Optional[SubscriberWindow]:
-    """Пересоздать окно из сериализованного описания {kind, params} (для восстановления раскладки)."""
+    """Пересоздать окно из сериализованного описания {kind, params} (для восстановления раскладки). Адреса
+    приводятся к канонической форме: раскладки со старыми именами (drive.*, actual.*) открываются как прежде."""
     cls = WINDOW_REGISTRY.get(d.get("kind"))
     if cls is None:
         return None
-    win = cls.from_params(dict(d.get("params", {})))
+    params = dict(d.get("params", {}))
+    for k in _ADDR_PARAMS:
+        if isinstance(params.get(k), str):
+            params[k] = A.canonical(params[k])
+    win = cls.from_params(params)
     return win
