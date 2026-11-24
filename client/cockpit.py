@@ -271,6 +271,7 @@ class Cockpit(QMainWindow):
         self._state = None
         self._builder = None
         self._last_seq = -1
+        self._held_snap = None                 # снимок, отложенный для окон на время осмотра сцены
         self._subs: Counter = Counter()        # ref-count подписок на Link
         self._windows: List = []               # открытые SubscriberWindow
         self._ready = False
@@ -594,12 +595,29 @@ class Cockpit(QMainWindow):
             self._open_diag(payload[1])
 
     # ---- такт опроса ----
+    def _scene_busy(self) -> bool:
+        try:
+            return bool(self.scene is not None and self.scene.is_interacting())
+        except Exception:
+            return False
+
+    def _feed_windows(self, snap):
+        for win in list(self._windows):
+            try:
+                win.on_snapshot(snap)
+            except Exception:
+                pass
+
     def _tick(self):
         if self.scene is not None:
             try:
                 self.scene.animate_jaws()         # плавная анимация челюстей ондулятора — каждый кадр
             except Exception:
                 pass
+        busy = self._scene_busy()
+        if not busy and self._held_snap is not None:   # осмотр закончился — окна догоняют последним снимком
+            held, self._held_snap = self._held_snap, None
+            self._feed_windows(held)
         snap = self.link.poll_snapshot()
         if snap is None:
             return
@@ -612,11 +630,10 @@ class Cockpit(QMainWindow):
         self.control.update_optics(snap.values)       # живые тюн/хроматизм/adts на панели
         if self.scene is not None:
             self.scene.update_snapshot(snap)
-        for win in list(self._windows):
-            try:
-                win.on_snapshot(snap)
-            except Exception:
-                pass
+        if busy:                                      # крутят камеру: перерисовка графиков (десятки мс в этом же
+            self._held_snap = snap                    # потоке) дала бы рывки — откладываем до конца осмотра
+            return
+        self._feed_windows(snap)
 
     # ---- раскладка (этап 6): окна + панели по глоб. геометрии + камера ----
     @staticmethod

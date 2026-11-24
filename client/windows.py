@@ -282,7 +282,7 @@ class GraphWindow(SubscriberWindow):
         self.plot.setLabel("bottom", "модельное время", units="с")
         self.plot.setDownsampling(mode="peak")          # лёгкий рендер длинной истории
         self.plot.setClipToView(True)
-        self.curve = self.plot.plot(pen=pg.mkPen(self.color, width=2))
+        self.curve = self.plot.plot(pen=pg.mkPen(self.color, width=2), antialias=False)   # без сглаживания: ×2 дешевле
         self._hover = CurveHover(self.plot, [(self.curve, m.name, lambda t: f"t = {_fmt_num(t)} с",
                                               lambda v, u=m.units: f"{_fmt_num(v)} {u or ''}")], mode="x")
 
@@ -338,7 +338,7 @@ class PointWindow(SubscriberWindow):
         self.plot.setLabel("left", A.meta(y_addr).name, units=A.meta(y_addr).units or None)
         self.plot.setLabel("bottom", A.meta(x_addr).name, units=A.meta(x_addr).units or None)
         self.plot.setAspectLocked(True)                 # орбита x/y изотропна — равный масштаб осей
-        self.trace = self.plot.plot(pen=pg.mkPen("#bbb", width=1))
+        self.trace = self.plot.plot(pen=pg.mkPen("#bbb", width=1), antialias=False)
         self.dot = pg.ScatterPlotItem(size=11, pen=pg.mkPen("#b01c22", width=1), brush=pg.mkBrush("#e15759"))
         self.plot.addItem(self.dot)
         mx, my = A.meta(x_addr), A.meta(y_addr)

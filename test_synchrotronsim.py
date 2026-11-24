@@ -3568,6 +3568,57 @@ class TestClientCockpitOffscreen(unittest.TestCase):
         finally:
             win.close()
 
+    def test_windows_wait_while_camera_moves(self):
+        """Пока крутят камеру (кнопка мыши, колесо, перелёт), окна графиков не перерисовываются — снимок
+        откладывается и отдаётся после; сцена и панель обновляются всегда. Кривые рядов — без сглаживания."""
+        try:
+            self._env()
+            from time import perf_counter
+            from client import InProcLink, Snapshot
+            from client.cockpit import Cockpit
+            from client.scene3d import make_ring_scene
+            from client.windows import GraphWindow
+        except Exception as e:
+            self.skipTest(f"нет Qt/PyVista offscreen: {e}")
+        link = InProcLink()
+        win = Cockpit(link, poll_ms=10)
+        try:
+            scene = make_ring_scene()
+            scene.set_geometry({"centers": [[0, 0], [1, 0], [2, 1]], "undulators": {"u": {"xy": [1.0, 0.0], "gap_mm": 5.0}}})
+            win.bind_scene(scene)
+
+            class Spy:
+                def __init__(self):
+                    self.got = []
+
+                def on_snapshot(self, snap):
+                    self.got.append(int(snap.meta["seq"]))
+            spy = Spy(); win._windows.append(spy)
+            meta = lambda s: {"running": True, "model_time": 1e-3 * s, "wall_time": 1.0, "speed": 1e-3, "cycle": s,
+                              "seq": s, "turn": s, "alive": True}
+            self.assertFalse(scene.is_interacting())
+            scene._dragging = True                                  # ЛКМ зажата — вращение
+            link.publish(Snapshot(values={"undulator.u.gap": 8.0}, meta=meta(1))); win._tick()
+            link.publish(Snapshot(values={"undulator.u.gap": 9.0}, meta=meta(2))); win._tick()
+            self.assertEqual(spy.got, [])                           # окна ждут
+            self.assertEqual(scene._target_gap["u"], 9.0)           # сцена получила снимок
+            self.assertEqual(win.control.lbl["cycle"].text(), "2")  # панель тоже
+            scene._dragging = False
+            win._tick()
+            self.assertEqual(spy.got, [2])                          # после — один, последний снимок
+            scene._wheel_t = perf_counter()                         # колесо — тоже осмотр
+            self.assertTrue(scene.is_interacting())
+            scene._wheel_t = -1e9; scene._mmb_down = True           # СКМ (панорама)
+            self.assertTrue(scene.is_interacting())
+            scene._mmb_down = False
+            link.publish(Snapshot(values={}, meta=meta(3))); win._tick()
+            self.assertEqual(spy.got, [2, 3])                       # без осмотра — сразу
+            win._windows.remove(spy)
+            gw = GraphWindow("actual.quad.QF.dk")
+            self.assertFalse(gw.curve.opts["antialias"])            # ряды без сглаживания (×2 дешевле перерисовка)
+        finally:
+            win.close()
+
     def test_scene_camera_navigation_keys(self):
         """Ctrl/Shift+←/→: камера перелетает на соседний элемент / соседний того же типа (без фокуса — подсказка)."""
         try:

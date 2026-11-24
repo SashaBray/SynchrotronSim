@@ -708,6 +708,8 @@ def make_ring_scene(parent=None, gap_scale: float = 1.0):
             self._lc_press = None
             self._rc_press = None
             self._rmb_down = False                           # ПКМ зажата (гасим hover-пик во время зума)
+            self._mmb_down = False                           # СКМ зажата (панорама) — тоже без hover-пика
+            self._wheel_t = -1e9                             # время последнего колеса (зум) — «идёт осмотр»
             self._dragging = False
             self._hover_name = None
             self._hover_actor = None
@@ -814,6 +816,8 @@ def make_ring_scene(parent=None, gap_scale: float = 1.0):
                 if ev.button() == Qt.MouseButton.RightButton:
                     self._rc_press = self._qt_xy(ev)
                     self._rmb_down = True                     # ПКМ зажата — hover не пикает (не мешает зуму)
+                elif ev.button() == Qt.MouseButton.MiddleButton:
+                    self._mmb_down = True                     # СКМ — панорама: hover не пикает (пик = рендер-проход)
             except Exception:
                 pass
             super().mousePressEvent(ev)                       # VTK начинает dolly как обычно
@@ -821,6 +825,8 @@ def make_ring_scene(parent=None, gap_scale: float = 1.0):
         def mouseReleaseEvent(self, ev):
             super().mouseReleaseEvent(ev)                     # СНАЧАЛА VTK полностью завершает dolly — не залипает
             try:
+                if ev.button() == Qt.MouseButton.MiddleButton:
+                    self._mmb_down = False
                 if ev.button() != Qt.MouseButton.RightButton:
                     return                                    # ЛКМ/СКМ — обрабатывают VTK-наблюдатели
                 self._rmb_down = False
@@ -965,8 +971,21 @@ def make_ring_scene(parent=None, gap_scale: float = 1.0):
                 pass
 
         # ---- наведение: жёлтая рамка-подсветка магнита под курсором ----
+        def wheelEvent(self, ev):
+            from time import perf_counter
+            self._wheel_t = perf_counter()                    # зум колесом — осмотр идёт (окна графиков ждут)
+            super().wheelEvent(ev)
+
+        def is_interacting(self, wheel_hold: float = 0.3) -> bool:
+            """Идёт ли осмотр сцены: зажата кнопка мыши (вращение/зум/панорама), крутилось колесо (последние
+            wheel_hold с) или камера перелетает (Ctrl/Shift+стрелки). Пока да — кокпит не перерисовывает окна
+            графиков (перерисовка в том же потоке и давала рывки вращения), а после отдаёт им свежий снимок."""
+            from time import perf_counter
+            return bool(self._dragging or self._rmb_down or self._mmb_down or self._fly_timer is not None
+                        or perf_counter() - self._wheel_t < wheel_hold)
+
         def _on_move(self, *a):
-            if self._dragging or self._rmb_down or self.model is None:   # во время вращения/зума не пикаем
+            if self._dragging or self._rmb_down or self._mmb_down or self.model is None:   # вращение/зум/панорама — без пика
                 return
             nm = self._mag_at(self._pick_prop())
             name = mx = my = None
