@@ -6,6 +6,7 @@
     py -3.14 -m client --experiment workspace/experiments/my.json     # опыт из файла (окно «Опыт…» → сохранить)
     py -3.14 -m client --experiment fb:3                              # опыт ОС из таблиц fb_*
     py -3.14 -m client --experiment bundle.zip                        # пакет: опыт + документ машины, без БД
+    py -3.14 -m client --site lab                                     # модель на вычислителе площадки lab
 
 Тяжёлая модель кольца строится в фоне — окно появляется сразу. Из оболочки кокпит открывается кнопкой
 «Режим 4»; этот модуль — тот же кокпит отдельным процессом.
@@ -53,6 +54,9 @@ def main() -> int:
                     help="срезы по типам устройств: auto (по умолчанию — workspace/configs/slices_<lat>.json, набор "
                          "tight из nsl_convergence.py; нет файла — как раньше) | none (как раньше: --nsl, полюса ИД 1) | "
                          "tight | loose (из workspace/results/nsl_convergence_<lat>.json) | путь к json")
+    ap.add_argument("--site", default=None,
+                    help="площадка (ss_server.py site add …): модель строится и считается на её вычислителе, "
+                         "здесь — сцена, окна и ручки (шов Link по сети); машина — из хранилища площадки по ссылке")
     a = ap.parse_args()
 
     from PySide6.QtWidgets import QApplication
@@ -71,7 +75,7 @@ def main() -> int:
                          publish_every=a.publish_every, settle_turns=a.settle_turns,
                          nsl=a.nsl, n_part=a.n_part, stride=a.stride, fofb_on=not a.no_fofb,
                          optics=not a.no_optics, autorun=a.autorun, gap_slew_mm_s=a.gap_slew, nsl_dev=nsl_dev,
-                         experiment=a.experiment)
+                         experiment=a.experiment, site=a.site)
     assert win is not None       # держим ссылку живой на время цикла событий
     return app.exec()
 

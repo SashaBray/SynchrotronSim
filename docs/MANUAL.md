@@ -1020,6 +1020,67 @@ save_machine(m, "sila26.ssd"); load_machine("sila26.ssd")   # документ M
   `SCR_und_NN`, 50×50 мм на 20 м (раньше два из них брали имя и размер из строк решётки 27).
 - Правка справочника устройств даёт новые ревизии всех машин (ссылка на справочник — часть ревизии машины).
 
+### Сеть: хранилище, вычислитель и клиент на разных компьютерах (`ss_server.py`, `synchrotronsim.Site`)
+
+Три роли в локальной сети: **хранилище** (компьютер с базой), **вычислитель** (сервер счёта), **клиент**
+(библиотека, кокпит). Только стандартная библиотека Python. Подробно — `docs/DATA_PROTOCOL.md`, этап 3.
+
+1. Токен площадки (один раз; файл — на все компьютеры площадки, защищённым способом):
+   ```powershell
+   py -3.14 ss_server.py token --file lab.token
+   ```
+2. На компьютере с базой:
+   ```powershell
+   py -3.14 ss_server.py store --host 0.0.0.0 --port 8701 --token-file lab.token
+   ```
+3. На вычислителе (адрес хранилища — свой):
+   ```powershell
+   py -3.14 ss_server.py compute --host 0.0.0.0 --port 8702 --token-file lab.token --store http://db-pc:8701
+   ```
+4. На своём компьютере — профиль площадки и проверка связи:
+   ```powershell
+   py -3.14 ss_server.py site add lab --store http://db-pc:8701 --compute tcp://calc-pc:8702 --token-file lab.token
+   ```
+   ```powershell
+   py -3.14 ss_server.py site check lab
+   ```
+   Проверка показывает задержку, протокол, доступ по токену, сервер (ОС, Python, ядра), коммит кода на сервере и
+   **сборку ядра**: тот же файл расширения — результаты бит-в-бит; другая сборка (Linux, другой компилятор) —
+   предупреждение: сверять с допуском (паспорт прогона пишет, где считалось).
+
+Работа через площадку:
+
+```powershell
+py -3.14 ss_store.py --site lab status
+```
+```powershell
+py -3.14 -m client --site lab
+```
+
+```python
+from synchrotronsim import Site
+from synchrotronsim.experiment import Experiment
+from synchrotronsim.simulation import Simulation
+lab = Site.load("lab")
+print(lab.check())
+run = Simulation(Experiment.from_fb(3, smoke=True), on=lab).run()   # счёт на вычислителе, прогон — из хранилища
+m = lab.store.get("machine", "26", "head")                         # машина из хранилища площадки
+```
+
+- `ss_store.py --site lab …` — те же команды (status, diff, commit, checkout, export, import) против сервера
+  хранилища; рабочая копия — таблицы этого компьютера.
+- `Simulation(exp, on=lab)`: машина фиксируется в хранилище площадки (черновик, если рабочая копия не
+  зафиксирована), вычислителю уходит ссылка; прогон кладётся в хранилище и скачивается в `workspace/runs`.
+- Кокпит `--site lab`: модель строится и считается на вычислителе, здесь — сцена, окна и ручки. Подписки,
+  отметки «● запись», настройки экранов и записи, пуск и зазоры при пересборке («Опыт…») переносятся. При обрыве
+  связи — сообщение в строке состояния; новый сеанс — «Опыт…» → «Применить и перестроить».
+- Профили — `~/.synchrotronsim/sites.json`, токены — `~/.synchrotronsim/credentials.json` или переменная
+  `SS_TOKEN_<ИМЯ>`; в хранилище и в git токены не попадают. Без токена серверы слушают только 127.0.0.1.
+  `ss_server.py site publish lab` — профиль (без токена) в хранилище площадки.
+- Ядро на Linux-сервере: `cmake -S . -B build-py -DCMAKE_BUILD_TYPE=Release -DSS_BUILD_PYTHON=ON
+  -DPython_EXECUTABLE=$(which python3)` и `cmake --build build-py --target _engine` (нужен nanobind; на Linux ещё не
+  проверялось).
+
 ## 10. Сравнение моделей — диффур vs кик (element_compare)
 
 `element_compare.py` сопоставляет **диффурную** (C++ SynchrotronTracker, Boris по картам поля) и

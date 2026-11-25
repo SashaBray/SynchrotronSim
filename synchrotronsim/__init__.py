@@ -25,5 +25,6 @@ except ImportError as e:                      # не собрано или со�
 
 from .db import Repository, open_db           # noqa: E402
 from .model import Machine                    # noqa: E402
+from .site import Site                        # noqa: E402  (площадка: где хранилище и вычислитель — этап 3)
 
-__all__ = ["ENGINE_AVAILABLE", "ENGINE_ERROR", "Repository", "open_db", "Machine"]
+__all__ = ["ENGINE_AVAILABLE", "ENGINE_ERROR", "Repository", "open_db", "Machine", "Site"]

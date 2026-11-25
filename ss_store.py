@@ -11,6 +11,7 @@
     py -3.14 ss_store.py checkout 26@<ревизия>        # ревизию — в рабочую копию (--force — затереть правки)
     py -3.14 ss_store.py export 26 out/sila26         # для Excel: запятая, «;», UTF-8 с BOM; 26@<рев> | 26@working
     py -3.14 ss_store.py import out/sila26            # правки из Excel → рабочая копия (--commit -m … — сразу ревизия)
+    py -3.14 ss_store.py --site lab status            # то же против сервера хранилища площадки (ss_server.py)
 """
 import argparse
 import os
@@ -29,6 +30,13 @@ STATE = {"clean": "без изменений", "modified": "ИЗМЕНЕНА", "
 
 def _store(a, create=False):
     root = os.path.abspath(a.root)
+    if a.site:                                                # хранилище площадки (сервер) + эта рабочая копия
+        from synchrotronsim import Site
+        from synchrotronsim.remote import RemoteStore
+        s = Site.load(a.site)
+        if not s.store_url:
+            raise SystemExit(f"у площадки «{a.site}» нет сервера хранилища")
+        return RemoteStore(s.store_url, s.token(), working=root, site_name=s.name)
     f = find_store_file(root)
     if f is None and not create:
         raise SystemExit("хранилища нет — сначала: py -3.14 ss_store.py init")
@@ -155,6 +163,8 @@ def cmd_import(a):
 def main():
     ap = argparse.ArgumentParser(description="хранилище ревизий SynchrotronSim (рабочая копия — workspace/tables)")
     ap.add_argument("--root", default=os.path.dirname(os.path.abspath(__file__)), help="корень проекта/рабочей копии")
+    ap.add_argument("--site", default="", help="площадка (ss_server.py site add …): хранилище — её сервер, рабочая "
+                                               "копия — этого компьютера; без ключа — локальное хранилище")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("init", help="первые ревизии из рабочей копии"); p.add_argument("-m", "--message", default="")
     p.set_defaults(f=cmd_init)

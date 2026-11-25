@@ -306,8 +306,9 @@ class Cockpit(QMainWindow):
     """Кокпит: 3D-сцена в ЦЕНТРЕ + панель управления, дерево и окна-подписчики — ПЛАВАЮЩИМИ окнами поверх.
     Окна двигаются/закрываются, не прячутся за сценой. Подписки с ref-count: адрес жив, пока нужен окну."""
 
-    def __init__(self, link, project: str = "sila26", parent=None, poll_ms: int = 33):
+    def __init__(self, link, project: str = "sila26", parent=None, poll_ms: int = 33, site=None):
         super().__init__(parent)
+        self.site = site                       # площадка (synchrotronsim.Site): модель на её вычислителе (NetLink)
         self.setWindowTitle("SynchrotronSim — режим 4 (живой кокпит)")
         self.resize(1360, 880)
         self.link = link
@@ -325,6 +326,7 @@ class Cockpit(QMainWindow):
         self._panels_shown = False
         self.experiment = None                 # опыт (synchrotronsim.experiment.Experiment), который исполняет модель
         self._machine_doc = None               # документ машины из пакета опыта (держится для пересборок той же решётки)
+        self._desc = None                      # описание сеанса (client.engine.describe_session / с вычислителя)
         self._session_subs: List[str] = []     # подписки панели/сцены текущей сборки (снимаются при пересборке)
         self._carry: Optional[dict] = None     # что перенести в новую сборку (запись, отметки, зазоры, пуск)
         self._opts = dict(gap_scale=1.0, gap_slew_mm_s=500.0, publish_every=3, autorun=False, restore_last=True,
@@ -607,7 +609,17 @@ class Cockpit(QMainWindow):
 
     # ---- дерево проекта ----
     def build_tree(self, state, loops, screens: List[str]):
+        """Дерево по объектам модели (состояние, Scheduler.loops) — обёртка над build_tree_desc."""
+        return self.build_tree_desc(sorted(getattr(state, "observables", {}) or {}),
+                                    sorted(getattr(state, "undulators", {}) or {}),
+                                    [{"name": n, "enabled": bool(getattr(sp, "enabled", False))}
+                                     for n, sp in (loops or {}).items()], screens)
+
+    def build_tree_desc(self, observables, undulators, loops, screens):
+        """Дерево проекта по описанию сеанса (одинаково для модели здесь и на вычислителе): наблюдаемые, контуры
+        [{name, enabled}], ондуляторы, экраны (sid | (sid, вид)), сенсоры, движок, стандартные графики."""
         self.tree.clear()
+        loop_names = [l["name"] for l in (loops or [])]
 
         def node(parent, text, payload=None):
             it = QTreeWidgetItem([text])
@@ -617,13 +629,13 @@ class Cockpit(QMainWindow):
             return it
 
         n_obs = node(None, "наблюдаемые")
-        for oid in sorted(state.observables):
+        for oid in sorted(observables):
             node(n_obs, oid, ("graph", f"obs.{oid}:rms"))
         n_loop = node(None, "контуры")
-        for name, spec in (loops or {}).items():
-            node(n_loop, f"{name} [{'вкл' if spec.enabled else 'выкл'}]", ("graph", f"loop.{name}.enabled"))
+        for l in (loops or []):
+            node(n_loop, f"{l['name']} [{'вкл' if l.get('enabled') else 'выкл'}]", ("graph", f"loop.{l['name']}.enabled"))
         n_und = node(None, "ондуляторы")
-        for gid in sorted(state.undulators):
+        for gid in sorted(undulators):
             node(n_und, gid, ("graph", f"undulator.{gid}.gap"))
         n_scr = node(None, "экраны")
         sub = {}
@@ -637,14 +649,14 @@ class Cockpit(QMainWindow):
                 parent = sub[kind]
             node(parent, sid, ("screen", sid))
         n_sens = node(None, "сенсоры")
-        if "ebpm.x" in state.observables:
+        if "ebpm.x" in observables:
             node(n_sens, "e-BPM 0 (x×y)", ("point", "obs.ebpm.x:0", "obs.ebpm.y:0"))
         n_eng = node(None, "движок")
         for a, t in (("meta.speed", "скорость"), ("meta.model_time", "модельное время"),
                      ("meta.cycle", "цикл")):
             node(n_eng, t, ("graph", a))
         n_std = node(None, "стандартные графики")
-        if "fofb_x" in (loops or {}):                      # η-узор и моды FOFB — нужна матрица отклика FOFB X
+        if "fofb_x" in loop_names:                         # η-узор и моды FOFB — нужна матрица отклика FOFB X
             node(n_std, A.DIAG_TITLES["orbit_modes"], ("diag", "orbit_modes"))
         self.tree.expandToDepth(0)
 
@@ -688,6 +700,10 @@ class Cockpit(QMainWindow):
         if not busy and self._held_snap is not None:   # осмотр закончился — окна догоняют последним снимком
             held, self._held_snap = self._held_snap, None
             self._feed_windows(held)
+        err = getattr(self.link, "error", None) if self.remote else None
+        if err and err != getattr(self, "_shown_link_err", None):   # обрыв связи с вычислителем — в статус
+            self._shown_link_err = err
+            self.set_status(f"{err} — пересоберите модель («Опыт…» → «Применить и перестроить»)")
         snap = self.link.poll_snapshot()
         if snap is None:
             return
@@ -773,10 +789,17 @@ class Cockpit(QMainWindow):
             self.set_status(f"раскладка загружена: {name}")
 
     # ---- опыт: сборка модели по опыту, пересборка (окна, подписки и запись сохраняются) ----
+    @property
+    def remote(self) -> bool:
+        """Модель на вычислителе площадки (шов Link — сеть), а не в этом процессе."""
+        from .netlink import NetLink
+        return isinstance(self.link, NetLink)
+
     def build(self, experiment, machine=None):
         """Собрать модель по опыту в ФОНЕ (первый запуск или пересборка). Готовая сборка — `_attach`.
         machine — документ машины (пакет опыта); None — документ, с которым уже работали (та же решётка), иначе
-        из хранилища по ссылке опыта (последняя ревизия: правки таблиц подхватываются пересборкой)."""
+        из хранилища по ссылке опыта (последняя ревизия: правки таблиц подхватываются пересборкой).
+        Удалённый режим (площадка с вычислителем): модель строится на вычислителе, сюда приходит её описание."""
         exp, m = load_experiment_doc(experiment)
         machine = machine or m
         if machine is None and self._machine_doc is not None and int(self._machine_doc.lattice_id) == int(exp.lattice_id):
@@ -786,11 +809,18 @@ class Cockpit(QMainWindow):
             raise ValueError(f"опыт «{exp.name}»: модель {exp.plant.kind} без кольца — кокпит показывает только "
                              f"{'/'.join(COCKPIT_PLANTS)}; такой опыт исполняется Simulation(exp).run()")
         note = self._opts.get("note") or ""
-        self.set_status(f"строится модель кольца: опыт «{exp.name}», решётка {exp.lattice_id} — это ~15–20 с…"
+        where = f" на вычислителе {self.link.url}" if self.remote else ""
+        self.set_status(f"строится модель кольца{where}: опыт «{exp.name}», решётка {exp.lattice_id} — это ~15–20 с…"
                         + (f" · {note}" if note else ""))
         if self.scene is None and self._placeholder is not None:
-            self._placeholder.setText(f"строится модель кольца…\nопыт «{exp.name}», решётка {exp.lattice_id}")
-        b = _Builder(exp, machine)
+            self._placeholder.setText(f"строится модель кольца{where}…\nопыт «{exp.name}», решётка {exp.lattice_id}")
+        if self.remote:
+            o = self._opts
+            b = _RemoteBuilder(self.link, self.site, exp, machine,
+                               {"gap_slew_mm_s": o["gap_slew_mm_s"], "publish_every": o["publish_every"],
+                                "gaps": (self._carry or {}).get("gaps")})
+        else:
+            b = _Builder(exp, machine)
         self._builder = b
         b.done.connect(self._attach)
         b.start()
@@ -813,9 +843,25 @@ class Cockpit(QMainWindow):
         return self.build(exp, machine)
 
     def _detach(self) -> dict:
-        """Остановить движок и закрыть plant текущей сборки; вернуть то, что переносится в следующую."""
+        """Остановить движок и закрыть plant текущей сборки; вернуть то, что переносится в следующую.
+        Удалённый режим: сеанс на вычислителе закрывается; подписки, отметки, экраны, запись и пуск NetLink
+        повторит сам, зазоры — из последнего снимка."""
         eng, self._engine = self._engine, None
         carry: dict = dict(self._carry or {})
+        if self.remote:
+            snap = self.link.poll_snapshot()
+            if snap is not None:
+                v = snap.values
+                slew = float(self._opts.get("gap_slew_mm_s", 500.0))
+                gaps = {}
+                for gid in (self._desc or {}).get("undulators", []):
+                    g, gt = v.get(f"undulator.{gid}.gap"), v.get(f"undulator.{gid}.gap_target")
+                    if g is not None and gt is not None:
+                        gaps[gid] = (float(g), float(gt), slew)
+                if gaps:
+                    carry["gaps"] = gaps
+                self.link.remember_running(bool(snap.meta.get("running")))
+            self.link.close()
         if eng is not None:
             R = eng.runner
             carry.update(watches=set(R.watches), rec_on=bool(R.rec_on), max_turns=R.max_turns, repeat=bool(R.repeat),
@@ -842,37 +888,39 @@ class Cockpit(QMainWindow):
         self._session_subs.append(addr)
 
     def _attach(self, result):
-        """Готовая сборка (plant, state, sch) → сцена, панель, дерево, подписки, движок; перенос из прежней."""
+        """Готовая сборка → сцена, панель, дерево, подписки, движок; перенос из прежней. result — (plant, state,
+        sch) модели в этом процессе или ("remote", опыт, описание сеанса) модели на вычислителе."""
         self._builder = None
         if isinstance(result, Exception):
             self.set_status(f"ошибка сборки модели: {type(result).__name__}: {result}")
             if self._placeholder is not None:
                 self._placeholder.setText(f"не удалось построить модель:\n{result}")
             return
-        plant, state, sch = result
-        exp = getattr(sch, "experiment", None)
         first = self.scene is None
         carry, self._carry = (self._carry or {}), None
-        self.experiment = exp
-        self._plant, self._state = plant, state
         o = self._opts
-        init_undulators(state, o["gap_slew_mm_s"])      # один ондулятор сведён (5 мм), остальные разведены (50 мм)
-        for gid, (g, gt, slew) in (carry.get("gaps") or {}).items():   # пересборка: зазоры как были
-            u = state.undulators.get(gid)
-            if u is not None:
-                u.slew_mm_s = slew
-                u.gap_max = max(float(getattr(u, "gap_max", 20.0)), g, gt)
-                u.gap_mm, u.gap_target = g, gt
-        from .scene3d import make_ring_scene, build_geometry
+        if isinstance(result, tuple) and len(result) == 3 and result[0] == "remote":
+            _, exp, D = result
+            plant = state = sch = None
+        else:
+            plant, state, sch = result
+            exp = getattr(sch, "experiment", None)
+            init_undulators(state, o["gap_slew_mm_s"])  # один ондулятор сведён (5 мм), остальные разведены (50 мм)
+            apply_gaps(state, carry.get("gaps"))         # пересборка: зазоры как были
+            D = describe_session(plant, state, sch, exp)
+        self.experiment = exp
+        self._desc = D
+        self._plant, self._state = plant, state
+        from .scene3d import make_ring_scene
         scene = make_ring_scene(gap_scale=o["gap_scale"]) if first else self.scene
-        scene.set_geometry(build_geometry(plant, state))
+        scene.set_geometry(D["geometry"])
         if first:
             self.bind_scene(scene)
 
-        gids = list(state.undulators)
+        gids = list(D["undulators"])
         self.control.set_undulators(gids)
-        self.control.set_loops(_loops_info(sch.loops))   # панель контуров САУ (имя файла логики + вкл/выкл)
-        opt_specs = _optics_specs(state)                 # оптика кольца (тюн/хроматизм/adts) на панель + мониторинг
+        self.control.set_loops(D["loops"])               # панель контуров САУ (имя файла логики + вкл/выкл)
+        opt_specs = [tuple(x) for x in D["optics"]]      # оптика кольца (тюн/хроматизм/adts) на панель + мониторинг
         self.control.set_optics(opt_specs, self._open_from_request)
         for addr, _, _ in opt_specs:
             self._sub_session(addr)
@@ -881,33 +929,40 @@ class Cockpit(QMainWindow):
         for gid in gids:
             self._sub_session(f"undulator.{gid}.gap")
             self._sub_session(f"undulator.{gid}.gap_target")
-        for name in sch.loops:                           # живое состояние контуров → переключатели панели
-            self._sub_session(f"loop.{name}.enabled")
+        for l in D["loops"]:                             # живое состояние контуров → переключатели панели
+            self._sub_session(f"loop.{l['name']}.enabled")
+        self.build_tree_desc(D["observables"], gids, D["loops"], [tuple(x) if isinstance(x, list) else x
+                                                                   for x in D["screens"]])
 
-        scr_list = [(s["sid"], s.get("kind", "")) for s in (scene.model.screens or [])] or \
-            _read_screen_ids(getattr(plant, "machine", None))
-        self.build_tree(state, sch.loops, scr_list)
-
-        from .engine import EngineThread
-        spc = int(getattr(getattr(exp, "run", None), "steps_per_cycle", 9) or 9)
-        eng = EngineThread(self.link, sch, steps_per_cycle=spc, publish_every=o["publish_every"])
-        R = eng.runner
-        for w in (getattr(exp, "record", None) or []):   # подписка опыта (адреса) → отмеченные величины
-            if not w.recorder:
-                R.watch(w.addr)
-        for a in carry.get("watches") or ():
-            R.watch(a)
-        eng._screens.update(carry.get("screens") or {})
-        if carry:
-            rec_on, max_turns, repeat = carry.get("rec_on", False), carry.get("max_turns"), carry.get("repeat", False)
-        else:
+        if self.remote:                                  # движок — на вычислителе; запись/пуск NetLink повторил
+            rec = self.link._record or {}
             run = getattr(exp, "run", None)
-            rec_on, max_turns, repeat = False, getattr(run, "max_turns", None), bool(getattr(run, "repeat", False))
-        R.set_recording(rec_on, max_turns, repeat)       # до старта потока: запись нового опыта — новый прогон
-        self.control.set_record(rec_on, max_turns, repeat)
-        eng._running = bool(carry.get("running", False))
-        self._engine = eng
-        eng.start()
+            self.control.set_record(bool(rec.get("on")), rec.get("max_turns", getattr(run, "max_turns", None)),
+                                    bool(rec.get("repeat", getattr(run, "repeat", False))))
+            running = bool(self.link._running)
+            self.link.resume()                           # пуск — как был до пересборки, теперь, когда всё готово
+        else:
+            from .engine import EngineThread
+            spc = int(getattr(getattr(exp, "run", None), "steps_per_cycle", 9) or 9)
+            eng = EngineThread(self.link, sch, steps_per_cycle=spc, publish_every=o["publish_every"])
+            R = eng.runner
+            for w in (getattr(exp, "record", None) or []):   # подписка опыта (адреса) → отмеченные величины
+                if not w.recorder:
+                    R.watch(w.addr)
+            for a in carry.get("watches") or ():
+                R.watch(a)
+            eng._screens.update(carry.get("screens") or {})
+            if carry:
+                rec_on, max_turns, repeat = carry.get("rec_on", False), carry.get("max_turns"), carry.get("repeat", False)
+            else:
+                run = getattr(exp, "run", None)
+                rec_on, max_turns, repeat = False, getattr(run, "max_turns", None), bool(getattr(run, "repeat", False))
+            R.set_recording(rec_on, max_turns, repeat)       # до старта потока: запись нового опыта — новый прогон
+            self.control.set_record(rec_on, max_turns, repeat)
+            eng._running = bool(carry.get("running", False))
+            self._engine = eng
+            eng.start()
+            running = eng._running
         self._ready = True
         if first:
             if o["restore_last"]:
@@ -919,13 +974,14 @@ class Cockpit(QMainWindow):
             except Exception:
                 pass
         name = f"опыт «{exp.name}»" if exp is not None else "модель"
+        where = f" (вычислитель {self.link.url})" if self.remote else ""
         if first and o["autorun"]:
             self.link.control(RUN)
-            self.set_status(f"{name} готов — идёт прогон")
-        elif eng._running:
-            self.set_status(f"{name} пересобран — прогон продолжается с нуля")
+            self.set_status(f"{name} готов{where} — идёт прогон")
+        elif running:
+            self.set_status(f"{name} пересобран{where} — прогон продолжается с нуля")
         else:
-            self.set_status(f"{name} {'готов' if first else 'пересобран'} — нажмите «Пуск»")
+            self.set_status(f"{name} {'готов' if first else 'пересобран'}{where} — нажмите «Пуск»")
 
     def current_experiment(self):
         """Опыт с ЖИВЫМИ флагами контуров, отмеченными величинами и лимитом записи — то, что сохранится в JSON
@@ -934,6 +990,17 @@ class Cockpit(QMainWindow):
         from synchrotronsim.run import Watch
         exp = self.experiment
         eng = self._engine
+        if exp is not None and self.remote:
+            snap = self.link.poll_snapshot()
+            vals = snap.values if snap is not None else {}
+            loops = [dataclasses.replace(l, enabled=bool(vals.get(f"loop.{l.name}.enabled", l.enabled)))
+                     for l in exp.loops]
+            rec = self.link._record or {}
+            record = [w for w in exp.record if w.recorder] + [Watch(a, cadence="per_step")
+                                                              for a in sorted(self.link._watches)]
+            run = dataclasses.replace(exp.run, max_turns=rec.get("max_turns", exp.run.max_turns),
+                                      repeat=bool(rec.get("repeat", exp.run.repeat)))
+            return dataclasses.replace(exp, loops=loops, record=record, run=run)
         if exp is None or eng is None:
             return exp
         live = eng.sch.loops
@@ -965,6 +1032,8 @@ class Cockpit(QMainWindow):
                 self._engine.join(timeout=5)
             if self._plant is not None:
                 self._plant.close()
+            if self.remote:
+                self.link.close()                        # сеанс на вычислителе закрывается
         except Exception:
             pass
         event.accept()
@@ -989,6 +1058,39 @@ class _Builder(QObject):
             S = build_session(self.experiment, machine=self.machine)
             S.sch.experiment = self.experiment
             self.done.emit((S.plant, S.state, S.sch))
+        except Exception as e:                      # noqa: BLE001 — ошибку доставим в UI
+            self.done.emit(e)
+
+
+class _RemoteBuilder(QObject):
+    """Живой сеанс на вычислителе площадки: опыт + ссылка на ревизию машины → (модель строится там) → описание
+    сеанса. Машина: у площадки есть сервер хранилища — фиксируется там (черновик, если рабочая копия не
+    зафиксирована), уходит ссылка; нет — документ машины целиком."""
+    done = Signal(object)   # ("remote", опыт, описание) | Exception
+
+    def __init__(self, link, site, experiment, machine, hello):
+        super().__init__()
+        self.link, self.site, self.experiment, self.machine, self.hello = link, site, experiment, machine, dict(hello)
+
+    def start(self):
+        threading.Thread(target=self._run, name="session-build-remote", daemon=True).start()
+
+    def _run(self):
+        try:
+            exp = self.experiment
+            h = dict(self.hello, experiment=exp.to_dict())
+            if self.site is not None and getattr(self.site, "store_url", ""):
+                st = self.site.store
+                m = self.machine if self.machine is not None else st.get("machine", str(exp.lattice_id),
+                                                                         exp.machine_rev or None)
+                h["machine_ref"] = str(st.pin(m))
+            else:
+                from synchrotronsim.simulation import resolve_machine
+                from synchrotronsim.documents import machine_to_bytes
+                m = self.machine if self.machine is not None else resolve_machine(exp)
+                h["machine_doc"] = machine_to_bytes(m)
+            desc = self.link.open(h, replay_run=False)          # пуск — когда интерфейс готов (_attach)
+            self.done.emit(("remote", exp, desc))
         except Exception as e:                      # noqa: BLE001 — ошибку доставим в UI
             self.done.emit(e)
 
@@ -1040,69 +1142,10 @@ def cockpit_experiment(lattice: int = 26, settle_turns: int = 250, steps_per_cyc
     return exp, note
 
 
-def _loops_info(loops: dict) -> List[dict]:
-    """Контуры САУ для панели: [{name, file, enabled, tip}]. `file` — имя файла, описывающего логику контура
-    (модуль класса контроллера, напр. integral_svd.py); разные контуры одного типа различаются по name."""
-    import inspect
-    import os
-    out = []
-    for name, spec in (loops or {}).items():
-        ctrl = getattr(spec, "controller", None)
-        try:
-            file = os.path.basename(inspect.getsourcefile(type(ctrl)) or inspect.getfile(type(ctrl)))
-        except (TypeError, OSError):
-            file = "?"
-        cls = type(ctrl).__name__ if ctrl is not None else "?"
-        rate = float(getattr(spec, "rate_hz", 0.0) or 0.0)
-        tip = f"{cls}  ·  {rate:.0f} Гц" if rate else cls
-        out.append({"name": name, "file": file, "enabled": bool(getattr(spec, "enabled", False)), "tip": tip})
-    return out
-
-
-_OPTICS_COMPONENTS = {
-    "tune":   [("obs.tune:0", "тюн νx"), ("obs.tune:1", "тюн νy")],
-    "chroma": [("obs.chroma:0", "хроматизм ξx"), ("obs.chroma:1", "хроматизм ξy")],
-    "adts":   [("obs.adts:0", "adts ∂νx/∂Jx"), ("obs.adts:1", "adts ∂νy/∂Jy"),
-               ("obs.adts:2", "adts ∂νx/∂Jy")],
-}
-
-
-def _optics_specs(state) -> List[tuple]:
-    """Строки оптики для панели: [(addr, label, fmt)] по КОМПОНЕНТАМ тюна/хроматизма/adts — только для тех
-    наблюдаемых, что реально есть в состоянии (optics=True). Пусто при orbit-only (optics=False)."""
-    obs = getattr(state, "observables", {}) or {}
-    specs = []
-    for o in ("tune", "chroma", "adts"):
-        if o in obs:
-            for addr, label in _OPTICS_COMPONENTS[o]:
-                specs.append((addr, label, "{:.4f}"))
-    return specs
-
-
-def init_undulators(state, slew, open_gid="und_01", open_mm=5.0, closed_mm=50.0):
-    """Стартовая конфигурация ондуляторов: ВКЛЮЧЁН один (`open_gid`, челюсти сведены на `open_mm`), остальные
-    ВЫКЛЮЧЕНЫ (челюсти разведены на `closed_mm` — поток ∝ K² падает ~1e-7). Поднимаем `gap_max` (деф. 20),
-    иначе `command/advance` клипнут 50 обратно; ставим gap_mm==gap_target, чтобы `advance()` не уводил старт."""
-    for gid, u in (getattr(state, "undulators", {}) or {}).items():
-        try:
-            u.slew_mm_s = float(slew)
-            u.gap_max = max(float(getattr(u, "gap_max", 20.0)), float(closed_mm))
-            g = float(open_mm) if gid == open_gid else float(closed_mm)
-            u.gap_mm = u.gap_target = g
-        except Exception:
-            pass
-
-
-def _read_screen_ids(machine=None) -> List[str]:
-    """Список экранов: у документа машины — её экраны; без машины — таблица screens (через synchrotronsim.db)."""
-    if machine is not None:
-        return [s.screen_id for s in machine.screens]
-    try:
-        from synchrotronsim.db import Repository
-        return [v.strip() for v in Repository(layoutmod._ROOT).table("screens", required=False).column("screen_id")
-                if v.strip()]
-    except (OSError, ValueError):
-        return []
+# описание сеанса (без Qt — общее с сервером вычислителя): client.engine
+from .engine import (loops_info as _loops_info, OPTICS_COMPONENTS as _OPTICS_COMPONENTS,  # noqa: E402
+                     optics_specs as _optics_specs, init_undulators, apply_gaps, read_screen_ids as _read_screen_ids,
+                     describe_session)
 
 
 def launch_cockpit(lattice: int = 26, exp=None, parent=None, gap_scale: float = 1.0,
@@ -1110,7 +1153,7 @@ def launch_cockpit(lattice: int = 26, exp=None, parent=None, gap_scale: float = 
                    nsl: int = 8, n_part: int = 12, stride: int = 15, fofb_on: bool = True,
                    optics: bool = True, autorun: bool = False, gap_slew_mm_s: float = 500.0,
                    project: Optional[str] = None, restore_last: bool = True,
-                   nsl_dev="auto", experiment=None) -> Cockpit:
+                   nsl_dev="auto", experiment=None, site=None) -> Cockpit:
     """Открыть кокпит: создать Link и окно сразу, модель кольца собрать в фоне ПО ОПЫТУ, затем привязать сцену,
     запустить EngineThread, подписать панель/сцену, построить дерево и (опц.) восстановить раскладку `last`.
     Возвращает окно (держите ссылку, иначе соберётся GC).
@@ -1132,8 +1175,15 @@ def launch_cockpit(lattice: int = 26, exp=None, parent=None, gap_scale: float = 
                                      nsl=nsl, n_part=n_part, stride=stride, fofb_on=fofb_on, optics=optics,
                                      nsl_dev=nsl_dev)
     project = project or f"sila{e.lattice_id}"
-    link = InProcLink()
-    win = Cockpit(link, project=project, parent=parent)
+    if isinstance(site, str):
+        from synchrotronsim import Site
+        site = Site.load(site)
+    if site is not None and getattr(site, "compute_url", ""):  # модель на вычислителе площадки
+        from .netlink import NetLink
+        link = NetLink(site.compute_url, site.token())
+    else:
+        link = InProcLink()
+    win = Cockpit(link, project=project, parent=parent, site=site)
     win._opts.update(gap_scale=gap_scale, gap_slew_mm_s=gap_slew_mm_s, publish_every=publish_every,
                      autorun=autorun, restore_last=restore_last, note=note)
     win.show()

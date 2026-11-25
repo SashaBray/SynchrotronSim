@@ -464,3 +464,100 @@ def build_session(lattice: int = 26, nsl: int = 8, settle_turns: int = 250, fofb
     plant, state, sch = S.plant, S.state, S.sch
     sch.experiment = exp
     return plant, state, sch
+
+
+# ---------------------------------------------------------------------------------------------- описание сеанса
+# Всё, что интерфейсу кокпита нужно знать о собранной модели, — словарём (числа/строки): так же для модели в этом
+# процессе и для модели на вычислителе (synchrotronsim.live шлёт его по сети). Без Qt — годится серверу.
+
+def loops_info(loops: dict) -> list:
+    """Контуры САУ для панели: [{name, file, enabled, tip}]. `file` — имя файла, описывающего логику контура
+    (модуль класса контроллера, напр. integral_svd.py); разные контуры одного типа различаются по name."""
+    import inspect
+    import os
+    out = []
+    for name, spec in (loops or {}).items():
+        ctrl = getattr(spec, "controller", None)
+        try:
+            file = os.path.basename(inspect.getsourcefile(type(ctrl)) or inspect.getfile(type(ctrl)))
+        except (TypeError, OSError):
+            file = "?"
+        cls = type(ctrl).__name__ if ctrl is not None else "?"
+        rate = float(getattr(spec, "rate_hz", 0.0) or 0.0)
+        tip = f"{cls}  ·  {rate:.0f} Гц" if rate else cls
+        out.append({"name": name, "file": file, "enabled": bool(getattr(spec, "enabled", False)), "tip": tip})
+    return out
+
+
+OPTICS_COMPONENTS = {
+    "tune":   [("obs.tune:0", "тюн νx"), ("obs.tune:1", "тюн νy")],
+    "chroma": [("obs.chroma:0", "хроматизм ξx"), ("obs.chroma:1", "хроматизм ξy")],
+    "adts":   [("obs.adts:0", "adts ∂νx/∂Jx"), ("obs.adts:1", "adts ∂νy/∂Jy"),
+               ("obs.adts:2", "adts ∂νx/∂Jy")],
+}
+
+
+def optics_specs(state) -> list:
+    """Строки оптики для панели: [(addr, label, fmt)] по КОМПОНЕНТАМ тюна/хроматизма/adts — только для тех
+    наблюдаемых, что реально есть в состоянии (optics=True). Пусто при orbit-only (optics=False)."""
+    obs = getattr(state, "observables", {}) or {}
+    specs = []
+    for o in ("tune", "chroma", "adts"):
+        if o in obs:
+            for addr, label in OPTICS_COMPONENTS[o]:
+                specs.append((addr, label, "{:.4f}"))
+    return specs
+
+
+def init_undulators(state, slew, open_gid="und_01", open_mm=5.0, closed_mm=50.0):
+    """Стартовая конфигурация ондуляторов: ВКЛЮЧЁН один (`open_gid`, челюсти сведены на `open_mm`), остальные
+    ВЫКЛЮЧЕНЫ (челюсти разведены на `closed_mm` — поток ∝ K² падает ~1e-7). Поднимаем `gap_max` (деф. 20),
+    иначе `command/advance` клипнут 50 обратно; ставим gap_mm==gap_target, чтобы `advance()` не уводил старт."""
+    for gid, u in (getattr(state, "undulators", {}) or {}).items():
+        try:
+            u.slew_mm_s = float(slew)
+            u.gap_max = max(float(getattr(u, "gap_max", 20.0)), float(closed_mm))
+            g = float(open_mm) if gid == open_gid else float(closed_mm)
+            u.gap_mm = u.gap_target = g
+        except Exception:
+            pass
+
+
+def apply_gaps(state, gaps: Optional[dict]) -> None:
+    """Перенос зазоров при пересборке: {gid: (зазор, уставка, скорость привода)} — как были до пересборки."""
+    for gid, v in (gaps or {}).items():
+        u = (getattr(state, "undulators", {}) or {}).get(gid)
+        if u is None:
+            continue
+        g, gt, slew = (float(x) for x in v)
+        u.slew_mm_s = slew
+        u.gap_max = max(float(getattr(u, "gap_max", 20.0)), g, gt)
+        u.gap_mm, u.gap_target = g, gt
+
+
+def read_screen_ids(machine=None) -> list:
+    """Список экранов: у документа машины — её экраны; без машины — таблица screens (через synchrotronsim.db)."""
+    if machine is not None:
+        return [s.screen_id for s in machine.screens]
+    try:
+        from synchrotronsim.db import Repository, PROJECT_ROOT
+        return [v.strip() for v in Repository(PROJECT_ROOT).table("screens", required=False).column("screen_id")
+                if v.strip()]
+    except (OSError, ValueError):
+        return []
+
+
+def describe_session(plant, state, sch, exp=None) -> dict:
+    """Описание собранного сеанса для интерфейса: опыт, геометрия сцены, ондуляторы, контуры, оптика, наблюдаемые,
+    экраны, машина. Только числа и строки — уходит по сети как есть."""
+    from .scene3d import build_geometry
+    geom = build_geometry(plant, state)
+    m = getattr(plant, "machine", None)
+    scr = [(s["sid"], s.get("kind", "")) for s in (geom.get("screens") or [])] or \
+        [(sid, "") for sid in read_screen_ids(m)]
+    return {"experiment": exp.to_dict() if exp is not None else None,
+            "geometry": geom, "undulators": list(getattr(state, "undulators", {}) or {}),
+            "loops": loops_info(sch.loops), "optics": optics_specs(state),
+            "observables": sorted(getattr(state, "observables", {}) or {}), "screens": scr,
+            "machine": ({"lattice_id": int(m.lattice_id), "fingerprint": m.fingerprint, "source": str(m.source)}
+                        if m is not None else None)}

@@ -310,10 +310,13 @@ def open_store(site=None, root: Optional[str] = None, overlay: Optional[str] = N
     (ревизии + рабочая копия таблиц), иначе LocalCsvStore (таблицы + снимки); overlay (возмущённая машина) —
     всегда LocalCsvStore. Сетевые площадки — этап 3 (`synchrotronsim.Site`)."""
     if site not in (None, "local"):
+        if isinstance(site, str):                            # имя площадки → профиль (~/.synchrotronsim/sites.json)
+            from .site import Site
+            site = Site.load(site)
         store = getattr(site, "store", None)
         if store is not None:
             return store
-        raise StoreError(f"площадка {site!r}: сетевое хранилище — этап 3 протокола")
+        raise StoreError(f"площадка {site!r} без хранилища")
     key = (os.path.abspath(root) if root else None, os.path.abspath(overlay) if overlay else None)
     st = _STORES.get(key)
     if st is None:

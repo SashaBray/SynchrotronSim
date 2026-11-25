@@ -167,10 +167,11 @@ class Runner:
     исполнение — они в `err`."""
 
     def __init__(self, sch, experiment=None, run_root: Optional[str] = None, kind: str = "cockpit",
-                 source: str = "cockpit"):
+                 source: str = "cockpit", store=None):
         self.sch, self.state, self.plant = sch, sch.state, sch.plant
         self.experiment = experiment if experiment is not None else getattr(sch, "experiment", None)
         self.run_root, self.kind, self.source = run_root, kind, source
+        self.store = store                    # хранилище для ревизии машины в паспорте (None — open_store(run_root))
         self.watches: set = set()             # канонические адреса, которые пишутся в прогон
         self.rec_on = False                   # запись включена: каждый проход — свой Run
         self.max_turns: Optional[int] = None  # лимит оборотов прохода (None — без лимита)
@@ -178,6 +179,7 @@ class Runner:
         self.run: Optional[Run] = None        # текущий прогон или None
         self.pass_no = 0                      # номер прохода (растёт на каждом рестарте)
         self.err: Optional[str] = None        # последняя ошибка записи
+        self.on_finish = None                 # callable(run) после завершения прохода (None — ничего)
 
     # ---- шаг и проход ----
     def step(self) -> None:
@@ -254,8 +256,11 @@ class Runner:
         if machine is None:
             return None
         try:
-            from .store import open_store
-            return str(open_store(root=self.run_root).pin(machine))
+            st = self.store
+            if st is None:
+                from .store import open_store
+                st = open_store(root=self.run_root)
+            return str(st.pin(machine))
         except Exception as e:                            # запись снимка не должна ронять исполнение
             self.err = f"снимок машины: {type(e).__name__}: {e}"
             return None
@@ -280,6 +285,8 @@ class Runner:
         if run is not None:
             try:
                 run.finish(status)
+                if self.on_finish is not None:            # напр. живой сеанс на вычислителе: прогон → хранилище
+                    self.on_finish(run)
             except Exception as e:
                 self.err = f"запись прогона: {type(e).__name__}: {e}"
 
@@ -306,10 +313,11 @@ class Simulation:
     legacy_fb — для опытов из БД (source «fb_exp_id=N») писать и прежние fb_results/fb_artifacts/статус."""
 
     def __init__(self, exp: Experiment, root: Optional[str] = None, legacy_fb: Optional[bool] = None,
-                 progress: Optional[Callable[[str], None]] = print, store=None, machine=None):
+                 progress: Optional[Callable[[str], None]] = print, store=None, machine=None, on=None):
         self.exp = exp
         self.root = root
         self.store, self.machine = store, machine         # хранилище и/или готовый документ машины
+        self.on = on                                      # площадка (Site) / вычислитель — счёт не в этом процессе
         self.legacy_fb = exp.source.startswith("fb_exp_id=") if legacy_fb is None else bool(legacy_fb)
         self.progress = progress or (lambda s: None)
         self.session: Optional[Session] = None
@@ -322,7 +330,23 @@ class Simulation:
     def _fb_id(self):
         return int(self.exp.source.split("=", 1)[1]) if self.legacy_fb else None
 
+    def _remote(self):
+        on = self.on
+        if on is None:
+            return None
+        if isinstance(on, str):
+            from .site import Site
+            on = Site.load(on)
+        comp = getattr(on, "compute", on)
+        return comp if comp is not None and hasattr(comp, "submit") else None
+
     def run(self, steps: Optional[int] = None, close: bool = True) -> Run:
+        comp = self._remote()
+        if comp is not None:                              # этап 3b: на вычислителе площадки
+            return comp.run(self.exp, steps=steps, machine=self.machine, progress=self.progress)
+        return self._run_here(steps, close)
+
+    def _run_here(self, steps: Optional[int] = None, close: bool = True) -> Run:
         """Пакетный прогон через Runner: один Run (паспорт — полный опыт), рекордеры подписки по окнам."""
         from control import recorders
         exp = self.exp
@@ -332,7 +356,7 @@ class Simulation:
             raise ValueError("Simulation.run: не задано число шагов (exp.run.steps или steps=)")
         recs = recorders.build(records_of(exp), mesh=exp.run.record_mesh, loops=S.sch.loops, machine=S.machine)
         R = Runner(S.sch, experiment=exp, run_root=self.root, kind="fb_mode4" if self.legacy_fb else "simulation",
-                   source=exp.source)
+                   source=exp.source, store=self.store)
         R.max_turns = exp.run.max_turns
         run = R.begin_pass(config=exp, note=exp.note)
         if run is None:

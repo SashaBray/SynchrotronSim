@@ -5902,6 +5902,176 @@ class TestRevisionStore(unittest.TestCase):
         self.assertTrue(T.same_in_excel("001", "1") and T.same_in_excel("1e-05", "1,00E-05".replace(",", ".")))
 
 
+@unittest.skipUnless(os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")), "нет БД")
+class TestNetwork(unittest.TestCase):
+    """Протокол данных, этап 3: сетевой формат, сервер хранилища (токен, рабочая копия против сервера), площадка
+    и её проверка, вычислитель (задание → прогон в хранилище площадки), живой сеанс кокпита по сети (NetLink:
+    снимки, ручки, повтор состояния при новом сеансе). Серверы — на 127.0.0.1, порты свободные."""
+
+    def test_wire_roundtrip(self):
+        from synchrotronsim import wire
+        obj = {"a": np.arange(6, dtype=np.float32).reshape(2, 3), "b": b"\x00\x01", "t": (1, 2.5, "x"),
+               "f": [float("nan"), float("inf"), -float("inf"), 1e-300], "m": {1: "один", (2, 3): [4]},
+               "n": None, "s": "строка", "i": np.int64(7), "z": np.array(["a", "b"], dtype=object)}
+        back = wire.decode(wire.encode(obj))
+        self.assertTrue(np.array_equal(back["a"], obj["a"]) and back["a"].dtype == np.float32)
+        self.assertEqual((back["b"], back["t"], back["s"], back["i"], back["n"]), (b"\x00\x01", (1, 2.5, "x"), "строка", 7, None))
+        self.assertTrue(np.isnan(back["f"][0]) and back["f"][1:] == [float("inf"), -float("inf"), 1e-300])
+        self.assertEqual(back["m"], {1: "один", (2, 3): [4]})
+        self.assertEqual(back["z"], ("a", "b"))
+        with self.assertRaises(ValueError):
+            wire.decode(b"XXXX" + b"\x00" * 8)
+
+    def test_store_server_site_check_and_remote_working_copy(self):
+        import tempfile, shutil, secrets
+        from synchrotronsim.store_sqlite import SqliteStore
+        from synchrotronsim.remote import StoreServer, RemoteStore
+        from synchrotronsim.store import StoreError
+        from synchrotronsim import tableset as T, Site
+        srv_dir = tempfile.mkdtemp(prefix="ss_nsrv_"); cli = tempfile.mkdtemp(prefix="ss_ncli_")
+        self.addCleanup(shutil.rmtree, srv_dir, True); self.addCleanup(shutil.rmtree, cli, True)
+        shutil.copytree(mt.TB, os.path.join(srv_dir, "tables")); shutil.copytree(mt.TB, os.path.join(cli, "tables"))
+        loc = SqliteStore(os.path.join(srv_dir, "store", "store.sqlite"), working=srv_dir)
+        loc.init_from_working()
+        tok = secrets.token_urlsafe(16)
+        with self.assertRaises(ValueError):                                # в сеть без токена — отказ
+            StoreServer(SqliteStore(loc.path), "0.0.0.0", 0, token=None)
+        srv = StoreServer(SqliteStore(loc.path, working=None), "127.0.0.1", 0, token=tok).start()
+        self.addCleanup(srv.server_close); self.addCleanup(srv.shutdown)
+        rs = RemoteStore(srv.url, tok, working=cli, site_name="t")
+        self.assertEqual(rs.get("machine", "26", "head").fingerprint, loc.get("machine", "26").fingerprint)
+        self.assertEqual({r["state"] for r in rs.status()}, {"clean"})
+        p = os.path.join(cli, "tables", "lattice_configs.csv")
+        s = T.read_sheet(p); L, i, j = s.col("lattice_id"), s.col("instance_id"), s.col("mat_G")
+        k = next(k for k, r in enumerate(s.rows) if r[L] == "26" and r[i] == "101"); s.rows[k][j] = "12.5"; T.write_sheet(p, s)
+        refs = rs.commit_working(note="с клиента")
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(loc.history("machine", "26")[-1]["note"], "с клиента")   # ревизия — на сервере
+        with self.assertRaises(StoreError):
+            RemoteStore(srv.url, "wrong-token").head("machine", "26")
+        os.environ["SS_TOKEN_TNET"] = tok
+        self.addCleanup(os.environ.pop, "SS_TOKEN_TNET", None)
+        rep = Site("tnet", store_url=srv.url).check(pings=1)
+        self.assertTrue(rep.ok, str(rep))
+        self.assertIn("та же сборка", str(rep))
+        site = Site("tnet", store_url=srv.url)
+        site.publish(SqliteStore(loc.path))
+        self.assertEqual(Site.from_store(rs, "tnet").store_url, srv.url)             # профиль — в хранилище
+
+    def _fake_compute(self):
+        from synchrotronsim.compute import ComputeServer
+        from control import ExperimentState, Scheduler
+
+        class _Fake(ComputeServer):
+            def live_session(self, exp, machine):
+                plant = _FakeInfinitePlant()
+                state = ExperimentState(plant.schema())
+                plant.reset(state)
+                return plant, state, Scheduler(plant, state, dt=1.0e-3)
+        srv = _Fake("127.0.0.1", 0, token="tok-123").start()
+        self.addCleanup(srv.close)
+        return srv
+
+    def test_live_session_netlink(self):
+        import time as _t
+        from client.netlink import NetLink
+        from synchrotronsim.experiment import Experiment, PlantSpec, RunLimits
+        from synchrotronsim.documents import machine_to_bytes
+        from synchrotronsim import open_db
+        srv = self._fake_compute()
+        nl = NetLink(srv.url, "tok-123")
+        exp = Experiment(name="fake", lattice_id=2, plant=PlantSpec("tbt", {}), run=RunLimits(steps_per_cycle=1))
+        hello = {"experiment": exp.to_dict(), "machine_doc": machine_to_bytes(open_db().machine(2)), "publish_every": 1}
+        desc = nl.open(hello)
+        self.assertEqual(desc["undulators"], ["und_01"])
+        self.assertIn("ebpm.x", desc["observables"])
+        nl.subscribe("obs.ebpm.x"); nl.subscribe("undulator.und_01.gap"); nl.watch("obs.ebpm.x:max")
+        nl.control("run"); nl.command("undulator.und_01.gap", 9.0)
+
+        def wait(cond, t=10.0):
+            end = _t.time() + t
+            while _t.time() < end:
+                s = nl.poll_snapshot()
+                if s is not None and cond(s):
+                    return s
+                _t.sleep(0.02)
+            return nl.poll_snapshot()
+        s = wait(lambda s: s.meta.get("cycle", 0) >= 3 and abs((s.values.get("undulator.und_01.gap") or 0) - 9.0) < 1e-9)
+        self.assertGreaterEqual(s.meta["cycle"], 3)
+        self.assertEqual(len(s.values["obs.ebpm.x"]), 3)
+        self.assertIn("obs.ebpm.x:max", s.meta.get("watches", []))
+        desc2 = nl.open(dict(hello, gaps={"und_01": (11.0, 11.0, 1.0e6)}))     # новый сеанс: состояние повторено
+        s2 = wait(lambda s: s.meta.get("running") and s.meta.get("cycle", 0) >= 2 and
+                  "undulator.und_01.gap" in s.values)
+        self.assertTrue(s2.meta["running"])
+        self.assertAlmostEqual(s2.values["undulator.und_01.gap"], 11.0)          # перенесённый зазор
+        self.assertIn("obs.ebpm.x:max", s2.meta.get("watches", []))
+        nl.close()
+        with self.assertRaises(Exception):                                     # чужой токен
+            NetLink(srv.url, "wrong").open(hello)
+
+    def test_cockpit_remote_attach_and_rebuild(self):
+        import time as _t
+        from types import SimpleNamespace
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PySide6.QtWidgets import QApplication
+            from client.cockpit import Cockpit
+            from client.netlink import NetLink
+        except Exception as e:
+            self.skipTest(f"нет Qt: {e}")
+        from synchrotronsim.experiment import Experiment, PlantSpec, RunLimits
+        from synchrotronsim import Site
+        app = QApplication.instance() or QApplication([])
+        srv = self._fake_compute()
+
+        class _Scene:
+            model = SimpleNamespace(screens=[])
+            n = 0
+            def set_geometry(self, b): self.n += 1; self.g = b
+            def fit_view(self): pass
+            def update_snapshot(self, s): pass
+            def animate_jaws(self): pass
+            def is_interacting(self): return False
+        os.environ["SS_TOKEN_TLIVE"] = "tok-123"
+        self.addCleanup(os.environ.pop, "SS_TOKEN_TLIVE", None)
+        site = Site("tlive", compute_url=srv.url)
+        nl = NetLink(site.compute_url, site.token())
+        win = Cockpit(nl, project="unittest_tmp_cockpit", poll_ms=100000, site=site)
+        win.scene = _Scene()
+        win._opts.update(publish_every=1)
+
+        def wait(cond, t=20.0):
+            end = _t.time() + t
+            while _t.time() < end:
+                app.processEvents()
+                if cond():
+                    return True
+                _t.sleep(0.02)
+            return False
+        try:
+            self.assertTrue(win.remote)
+            win.build(Experiment(name="r1", lattice_id=2, plant=PlantSpec("tbt", {}), run=RunLimits(steps_per_cycle=1)))
+            self.assertTrue(wait(lambda: win._ready), win.statusBar().currentMessage())
+            self.assertIsNone(win._engine)                                    # движок — на вычислителе
+            self.assertEqual(win.experiment.name, "r1")
+            self.assertIn("вычислитель", win.statusBar().currentMessage())
+            nl.watch("obs.ebpm.x:max"); nl.control("run"); nl.command("undulator.und_01.gap", 9.0)
+            self.assertTrue(wait(lambda: (nl.poll_snapshot() is not None and
+                                          abs((nl.poll_snapshot().values.get("undulator.und_01.gap") or 0) - 9.0) < 1e-9)))
+            cur = win.current_experiment()
+            self.assertEqual([w.addr for w in cur.record], ["obs.ebpm.x:max"])
+            win.rebuild(Experiment(name="r2", lattice_id=2, plant=PlantSpec("tbt", {}), run=RunLimits(steps_per_cycle=1)))
+            self.assertTrue(wait(lambda: win._ready and win.experiment.name == "r2"))
+            self.assertTrue(wait(lambda: (nl.poll_snapshot() is not None and nl.poll_snapshot().meta.get("running") and
+                                          abs((nl.poll_snapshot().values.get("undulator.und_01.gap") or 0) - 9.0) < 1e-9)))
+            self.assertIn("obs.ebpm.x:max", nl.poll_snapshot().meta.get("watches", []))
+            self.assertEqual(win.scene.n, 2)
+        finally:
+            win._detach()
+            win.close()
+
+
 @unittest.skipUnless(_engine_ext_available() and os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")),
                      "нет собранного расширения или БД")
 class TestModelFromDocuments(unittest.TestCase):
