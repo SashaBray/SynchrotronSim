@@ -159,3 +159,4 @@ workspace/runs/
 workspace/tables/runs.csv
 workspace/tables/fb_results.csv
 workspace/tables/fb_artifacts.csv
+workspace/store/

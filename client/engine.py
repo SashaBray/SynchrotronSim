@@ -316,7 +316,7 @@ class EngineThread(threading.Thread):
             return self._compute_power(sid, mesh, pt, st)
         try:
             from control.recorders import ScreenRecorder
-            rec = ScreenRecorder(params=sid, mesh=mesh, point=pt)
+            rec = ScreenRecorder(params=sid, mesh=mesh, point=pt, machine=self._machine())
             rec.sample(st, 0, None)                         # ScreenRecorder читает только доску (снимок)
             rec.finalize(st, None)
             art = rec.artifact()
@@ -354,6 +354,15 @@ class EngineThread(threading.Thread):
     def _lattice(self) -> int:
         return int(getattr(self.plant, "lattice", None) or 26)
 
+    def _machine(self):
+        """Документ машины plant'а (экраны и геометрия — из него, таблицы не читаются); нет — None."""
+        return getattr(self.plant, "machine", None)
+
+    def _lat(self):
+        """Машина для screen_analysis: документ, а без него — номер решётки (прежний путь через таблицы)."""
+        m = self._machine()
+        return m if m is not None else self._lattice()
+
     def _bend_context(self, sid: str):
         """Контекст живого экрана, если его источник — ДИПОЛЬ (экраны у линеек SCR_DP…, замороженные mode=bend);
         иначе None (экран ондулятора — прежний путь)."""
@@ -361,9 +370,9 @@ class EngineThread(threading.Thread):
             sa = self._sa()
             if not str(sid).startswith("SCR_DP") and not any(
                     r.get("screen_id") == sid and r.get("lattice_id") == str(self._lattice()) and r.get("mode") == "bend"
-                    for r in sa._screen_rows()):
+                    for r in sa._screen_rows(self._lat())):
                 return None
-            c = sa.live_context(self._lattice(), sid)
+            c = sa.live_context(self._lat(), sid)
             return c if c is not None and c["scr"].get("mode") == "bend" else None
         except Exception:                                  # noqa: BLE001 — нет таблиц: не диполь
             return None
@@ -374,14 +383,14 @@ class EngineThread(threading.Thread):
         участка дуги, смотрящего на точку. Карта статична (зазоры не влияют) — считается один раз на сетку."""
         try:
             sa = self._sa()
-            v = sa.bend_view(self._lattice(), sid, mesh, quantity)    # по траектории; кэш — считается один раз
+            v = sa.bend_view(self._lat(), sid, mesh, quantity)        # по траектории; кэш — считается один раз
             out = {"mesh": mesh, "quantity": quantity, "kind": "bend", "ec": v["ec"], "dev": v["dev"], "D": v["D"],
                    "heatmap": np.asarray(v["S"], float).tolist(), "extent": [float(e) for e in v["extent"]]}
             if quantity == "power":
                 out.update(peak=v["peak"], total=v["total"], und_W=0.0, bend_W=v["bend_W"], n_bend=v["n_bend"],
                            centroid=[v["cu"], v["cv"]])
             ec0 = v["ec"]
-            sp = sa.bend_spectrum(self._lattice(), sid, float(pt[0]), float(pt[1]))
+            sp = sa.bend_spectrum(self._lat(), sid, float(pt[0]), float(pt[1]))
             out["spectrum"] = {"E_keV": np.asarray(sp["E_keV"], float).tolist(),
                                "flux": np.asarray(sp["flux"], float).tolist(),
                                "u_mm": float(pt[0]), "v_mm": float(pt[1]), "E1": ec0}
@@ -403,10 +412,10 @@ class EngineThread(threading.Thread):
             from control.recorders import ScreenRecorder
             gaps = {gid: float(u.gap_mm) for gid, u in (getattr(st, "undulators", None) or {}).items()}
             lattice = int(getattr(self.plant, "lattice", None) or 26)
-            fp = sa.live_power_map(lattice, sid, gaps, mesh)
+            fp = sa.live_power_map(self._lat(), sid, gaps, mesh)
             if fp is None:
                 return {"error": f"карта мощности: экран {sid} не построить (источник — не ондулятор решётки {lattice})"}
-            rec = ScreenRecorder(params=sid, mesh=mesh, point=pt)
+            rec = ScreenRecorder(params=sid, mesh=mesh, point=pt, machine=self._machine())
             gap = float(rec._live_gap(st))
             out = {"heatmap": np.asarray(fp["S"], float).tolist(), "extent": [float(e) for e in fp["extent"]],
                    "mesh": mesh, "quantity": "power", "gap": gap,

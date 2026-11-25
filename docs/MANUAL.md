@@ -912,10 +912,12 @@ py -3.14 undulators/screen_report.py --lattice 27 --screen SCR_U01 --calc accura
 ```powershell
 py -3.14 -m client --experiment workspace\experiments\my.json
 py -3.14 -m client --experiment fb:3
+py -3.14 -m client --experiment exp3.zip
 ```
 
 `путь.json` — опыт, сохранённый окном «Опыт…» или `Experiment.to_json`; `fb:N` — опыт ОС из таблиц fb_*
-(контуры включены, как в `mode4_run`). Модель без кольца (`plant.kind = optics`, напр. fb:2) кокпит не
+(контуры включены, как в `mode4_run`); `пакет.zip` — опыт + документ машины (`Experiment.save_bundle`): модель
+считает по документу, без БД, и держит этот документ при пересборках той же решётки. Модель без кольца (`plant.kind = optics`, напр. fb:2) кокпит не
 показывает — её исполняет `Simulation(exp).run()`.
 
 Кнопка **«Опыт…»** на панели инструментов — опыт текущей модели:
@@ -946,7 +948,8 @@ exp.record.append(Watch("obs.ebpm.x:rms"))        # дописать подпи�
 run = Simulation(exp).run()                       # сборка + шаги + рекордеры → прогон
 run.series("rec.orbit_rms.x")
 exp.to_json("exp3.json"); Experiment.from_json("exp3.json")
-exp.save_bundle("exp3.zip")                       # опыт + таблицы его машины; Experiment.load_bundle(путь, папка)
+exp.save_bundle("exp3.zip")                       # опыт + документ машины + таблицы её строк
+exp, m = Experiment.open_bundle("exp3.zip")       # → опыт и машина; Simulation(exp, machine=m).run() — без БД
 ```
 
 `Experiment.cockpit(...)` — опыт живого кокпита (параметры прежнего `build_session`; обратное —
@@ -955,8 +958,33 @@ exp.save_bundle("exp3.zip")                       # опыт + таблицы е
 кода). Исполнитель шагов тоже один — `synchrotronsim.simulation.Runner` (шаг, рестарт прохода, лимит оборотов,
 `Watch` → `Run`): на нём и `Simulation.run`, и поток кокпита `EngineThread`. Параметры конструктора plant'а лежат в опыте дословно
 (`exp.plant.kwargs`), поэтому `mode4_run` после перехода даёт ряды бит-в-бит как раньше. Пакет `save_bundle`
-сверяет отпечаток машины при распаковке; запуск модели прямо из распакованного пакета — следующий шаг
-(plant'ы пока читают основную БД).
+сверяет отпечаток машины при распаковке (`load_bundle` — с таблицами, `open_bundle` — документом).
+
+### Хранилище и документы машины (`synchrotronsim.store`, `synchrotronsim.documents`)
+
+Библиотека получает машину и опыт **документами** (протокол — `docs/DATA_PROTOCOL.md`); модель во время счёта
+таблиц не открывает (проверяется тестом `TestModelFromDocuments`).
+
+```python
+from synchrotronsim.store import open_store
+st = open_store()                                  # локальное хранилище над нынешними таблицами
+m = st.get("machine", "26")                        # последняя ревизия (Machine)
+ref = st.pin(m)                                    # снимок → machine:26@<отпечаток>
+st.get("machine", "26", ref.rev)                   # та же машина, даже если таблицы потом поправят
+e = st.get("experiment", "fb:3")                   # опыт; st.commit("experiment", "my", e, parent=…) — ревизия
+from synchrotronsim.documents import save_machine, load_machine
+save_machine(m, "sila26.ssd"); load_machine("sila26.ssd")   # zip: document.json + arrays.npz; отпечаток сверяется
+```
+
+- Ревизия машины — её отпечаток (sha256 содержимого). Опыт ссылается на машину `exp.lattice_id` +
+  `exp.machine_rev` (пусто — последняя); `Simulation(exp, store=…, machine=…)`.
+- Каждый прогон фиксирует ревизию машины: снимок документа — `workspace/store/machine/<id>/<ревизия>.ssd`,
+  в паспорте прогона — `machine.ref`. Папка `workspace/store/` в git не хранится.
+- Ревизии опытов — `workspace/store/experiment/<id>/` (указатель `HEAD`, история `index.jsonl`); `commit` поверх
+  устаревшей ревизии — `ConflictError`, не перезапись.
+- Машины пишутся ревизиями на этапе 2 (SQLite + импорт/экспорт CSV); пока источник последней ревизии — таблицы.
+- Экраны решётки берутся только из её машины: у решётки 26 своих строк в `screens` нет — все экраны кокпита
+  `SCR_und_NN`, 50×50 мм на 20 м (раньше два из них брали имя и размер из строк решётки 27).
 
 ## 10. Сравнение моделей — диффур vs кик (element_compare)
 

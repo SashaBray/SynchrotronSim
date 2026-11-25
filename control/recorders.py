@@ -167,8 +167,9 @@ class ScreenRecorder(Recorder):
     результаты — ряд E₁(окно) и резкость. Нет живого зазора на доске → fallback на зашитый GAP_MM.
     УПРОЩЕНИЕ v1: картина на оси, источник = photon[0]; геометрия экрана из `screens.csv` даёт плечо D."""
 
-    def __init__(self, params="", cadence="final", mesh=121, point=(0.0, 0.0), **kw):
+    def __init__(self, params="", cadence="final", mesh=121, point=(0.0, 0.0), machine=None, **kw):
         super().__init__(params, cadence)
+        self.machine = machine                               # документ машины: экраны — из него, не из screens.csv
         self.mesh = int(mesh)
         self._point = (float(point[0]), float(point[1])) if point else (0.0, 0.0)   # точка на экране (мм)
         self._spot = []
@@ -212,6 +213,12 @@ class ScreenRecorder(Recorder):
         self._gapser.append((int(widx), self._live_gap(state)))
 
     def _screen_row(self, screen_id):
+        if self.machine is not None:                         # экран машины (документ); нет — {} (умолчания)
+            for s in self.machine.screens:
+                if s.screen_id == screen_id:
+                    return {"screen_id": s.screen_id, "source_ref": s.source_ref, "dist_m": repr(float(s.dist)),
+                            "mode": s.mode}
+            return {}
         path = os.path.join(_ROOT, "workspace", "tables", "screens.csv")
         if screen_id and os.path.exists(path):
             with open(path, encoding="utf-8-sig") as f:
@@ -367,10 +374,10 @@ REGISTRY = {
 }
 
 
-def build(records, mesh=121, loops=None):
+def build(records, mesh=121, loops=None, machine=None):
     """records = list[fb_config.Record] → list рекордеров (только enabled). signal — имя рекордера из REGISTRY
     или АДРЕС единого пространства (→ WatchRecorder); прочее (нереализованное, напр. sf) — пропускаем.
-    loops — Scheduler.loops (для адресов loop.*)."""
+    loops — Scheduler.loops (для адресов loop.*); machine — документ машины (экраны берутся из него)."""
     from synchrotronsim.addresses import is_address
     out = []
     for r in records:
@@ -378,7 +385,8 @@ def build(records, mesh=121, loops=None):
             continue
         cls = REGISTRY.get(r.signal)
         if cls is not None:
-            out.append(cls(params=r.params, cadence=r.cadence, mesh=mesh))
+            kw = {"machine": machine} if cls is ScreenRecorder else {}
+            out.append(cls(params=r.params, cadence=r.cadence, mesh=mesh, **kw))
         elif is_address(r.signal):
             out.append(WatchRecorder(params=r.params, cadence=r.cadence, addr=r.signal, loops=loops))
     return out

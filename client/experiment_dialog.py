@@ -65,6 +65,7 @@ class ExperimentDialog(QDialog):
         self.setWindowTitle("Опыт")
         self.base = experiment
         self._result = None
+        self._result_machine = None
         e = experiment
         kw = e.plant.kwargs
         self.cockpit = (e.source == "cockpit")
@@ -183,12 +184,12 @@ class ExperimentDialog(QDialog):
         self.accept()
 
     def _open(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Открыть опыт", "", "Опыт (*.json)")
+        path, _ = QFileDialog.getOpenFileName(self, "Открыть опыт", "", "Опыт (*.json *.zip)")
         if not path:
             return
-        from synchrotronsim.experiment import Experiment
+        from .cockpit import load_experiment_doc
         try:
-            self._result = Experiment.from_json(path)
+            self._result, self._result_machine = load_experiment_doc(path)   # .zip — пакет: опыт + документ машины
         except Exception as ex:
             QMessageBox.warning(self, "Опыт", f"не удалось прочитать {path}:\n{type(ex).__name__}: {ex}")
             return
@@ -205,3 +206,7 @@ class ExperimentDialog(QDialog):
 
     def result_experiment(self) -> Optional[object]:
         return self._result
+
+    def result_machine(self):
+        """Документ машины открытого пакета опыта (или None — машина из хранилища по ссылке опыта)."""
+        return self._result_machine

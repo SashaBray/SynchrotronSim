@@ -15,8 +15,7 @@ os.environ.setdefault("SS_SECTOR", "1")
 
 import numpy as np
 
-import errors as er
-import facility_report as fr
+import ring_cpp
 import orbit_correct as oc
 import orbit_infer as oi
 
@@ -53,11 +52,16 @@ def id_devices(mags):
 
 
 class RingModel:
-    def __init__(self, lattice=26, nsl=8, n_photon=0, photon_d=15.0):
-        self.lattice = lattice
+    def __init__(self, lattice=26, nsl=8, n_photon=0, photon_d=15.0, machine=None):
+        if machine is None:                                   # машина — документ (docs/DATA_PROTOCOL.md); нет — из хранилища
+            from synchrotronsim.store import open_store
+            machine = open_store().machine(lattice)
+        from synchrotronsim.machines import info_of
+        self.machine = machine
+        self.lattice = lattice = int(machine.lattice_id)
         self.nsl = nsl
-        inf = dict(fr.info_of(lattice)); inf["_id"] = lattice
-        self.ring = fr._ring(inf, nsl=nsl)
+        inf = info_of(machine)                                # паспорт — из документа машины
+        self.ring = ring_cpp.CppRing(lattice=lattice, design_mev=inf["energy_mev"], nsl=nsl, order=4, machine=machine)
         self.corr = oc.corrector_indices(self.ring)
         self.mon = oi.monitor_rows(self.ring)
         # карты имён ↔ индексов (из того же кольца, индексы те же, что в векторах/actuator-схеме)
@@ -98,10 +102,11 @@ class RingModel:
         self.photon_rows, self.photon_d = self._source_rows(n_photon, photon_d) if n_photon else (np.array([], int), photon_d)
 
     def _families(self, indices):
-        """Группировка индексов магнитов по имени семейства (fr._family по m.dev): {fam: [idx, …]}."""
+        """Группировка индексов магнитов по имени семейства (machines.family по m.dev): {fam: [idx, …]}."""
+        from synchrotronsim.machines import family
         fams = {}
         for i in indices:
-            f = fr._family(self.ring.mags[i].dev)
+            f = family(self.ring.mags[i].dev)
             fams.setdefault(f, []).append(int(i))
         return fams
 
@@ -123,7 +128,8 @@ class RingModel:
     def _source_rows(self, n_photon, d):
         """Строки track_elements в центрах первых n_photon ондуляторов (ближайший mag.center к pivot группы)."""
         cen = np.array([m.center for m in self.ring.mags])
-        groups = sorted(er.load_groups(self.lattice), key=lambda x: x["group_id"])[:n_photon]
+        from synchrotronsim.machines import groups_of
+        groups = sorted(groups_of(self.machine), key=lambda x: x["group_id"])[:n_photon]
         rows = [int(np.argmin(np.linalg.norm(cen - np.asarray(g["pivot"], float), axis=1))) + 1 for g in groups]
         return np.array(rows, int), float(d)
 

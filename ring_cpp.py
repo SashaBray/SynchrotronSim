@@ -249,7 +249,7 @@ class _ExtBackend:
         self.x = _ext if _ext is not None else ExtRing(
             lattice=ring.lattice, start_before_first_m=ring.lead, sr=ring.sr, isr=ring.isr,
             rf=dict(ring.rf) if ring.rf else None, design_mev=ring.design_mev, nsl=ring.nsl, order=ring.order,
-            seed=ring.seed, ws=ring.ws, nsl_dev=dict(ring.nsl_dev))
+            seed=ring.seed, ws=ring.ws, nsl_dev=dict(ring.nsl_dev), machine=ring.machine)
         x = self.x
         self.n_mag, self.circumference, self.n_pieces = x.n_mag, x.circumference, x.n_pieces
         self.s_in, self.s_out, self.kinds, self.names = x.s_in, x.s_out, list(x.kinds), list(x.names)
@@ -298,10 +298,15 @@ class CppRing:
 
     def __init__(self, lattice=1, start_before_first_m=None, settings=None, sr=False, isr=False, rf=None,
                  design_mev=6000.0, nsl=None, order=None, seed=12345, ws=None, timeout=None, nsl_dev=None,
-                 backend=None):
+                 backend=None, machine=None):
         self.backend = choose_backend(backend, timeout)   # "ext" (в процессе) | "pipe" (сервер) — см. шапку
         dn, do = _default_slices()
-        self.lattice = int(lattice)
+        # машина (synchrotronsim.model.Machine): готовый документ — ядро ext строится из него, таблиц не читает;
+        # None — по номеру решётки из таблиц (ws ⇒ overlay), как раньше
+        if machine is not None and self.backend == "pipe" and str(machine.source).startswith("document:"):
+            raise ValueError("CppRing: бэкенд pipe (сервер) читает таблицы сам; машина из документа — только ext")
+        self.lattice = int(machine.lattice_id) if machine is not None else int(lattice)
+        self._machine = machine
         self.lead = start_before_first_m
         self.sr, self.isr, self.rf, self.design_mev = bool(sr or isr), bool(isr), rf, float(design_mev)
         self.nsl = int(nsl or dn); self.order = int(order or do); self.seed = int(seed)
@@ -323,20 +328,21 @@ class CppRing:
         self._perturb = []                      # базовые [(cmd, j, value)] — with_*/perturbed: переживают RESET
         self._transient = []                    # транзитные — от последнего apply_perturb
         self._py = None
-        self.rf_cavities = self._read_cavities() if rf else ()   # резонаторы установки (сервер читает тот же файл)
+        self.rf_cavities = self._cavity_key() if rf else ()      # резонаторы установки — для отпечатка кэша откликов
         self._start()
 
-    def _read_cavities(self):
-        """Строки rf_cavities.csv этой решётки (из ws, если задан) — для отпечатка кэша откликов; () — нет."""
-        import csv
-        tb = os.path.join(self.ws, "tables") if self.ws else os.path.join(ROOT, "workspace", "tables")
-        path = os.path.join(tb, "rf_cavities.csv")
-        if not os.path.exists(path):
-            return ()
-        with open(path, encoding="utf-8") as f:
-            rows = [r for r in csv.DictReader(f, delimiter=";") if r.get("lattice_id") == str(self.lattice)]
-        cols = ("cavity_id", "x", "y", "z", "nx", "ny", "nz", "volt_share")
-        return tuple(tuple(r.get(c, "") for c in cols) for r in rows)
+    @property
+    def machine(self):
+        """Машина этого кольца (Machine): заданная при создании или из таблиц по номеру решётки (ws ⇒ overlay)."""
+        if self._machine is None:
+            from synchrotronsim.db import Repository
+            self._machine = Repository(overlay=self.ws).machine(self.lattice)
+        return self._machine
+
+    def _cavity_key(self):
+        """Резонаторы машины (id, точка, нормаль, доля) — для отпечатка кэша откликов; () — нет."""
+        return tuple((c.cavity_id, *(repr(float(v)) for v in c.point), *(repr(float(v)) for v in c.normal),
+                      repr(float(c.volt_share))) for c in self.machine.cavities)
 
     # ---- бэкенд ядра (ext — в процессе, pipe — сервер) ---------------------------------------------
     def _start(self):
@@ -443,10 +449,9 @@ class CppRing:
         import ring_analysis as ra
         import matrix_tracker as mt
         from beam_injection import PlaneMagnet
-        from synchrotronsim.db import Repository
         D = self._be.describe()
         n = self.n_mag
-        M = Repository(overlay=self.ws).machine(self.lattice)
+        M = self.machine
         E = M.elements
         if len(E) != n or [str(d) or "-" for d in E.device_type] != [str(d) or "-" for d in self.names]:
             raise RuntimeError("порядок магнитов модели Machine и C++-ядра разошёлся")   # не геометрия — индексы

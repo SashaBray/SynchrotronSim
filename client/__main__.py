@@ -5,6 +5,7 @@
     py -3.14 -m client --lattice 26
     py -3.14 -m client --experiment workspace/experiments/my.json     # опыт из файла (окно «Опыт…» → сохранить)
     py -3.14 -m client --experiment fb:3                              # опыт ОС из таблиц fb_*
+    py -3.14 -m client --experiment bundle.zip                        # пакет: опыт + документ машины, без БД
 
 Тяжёлая модель кольца строится в фоне — окно появляется сразу. Из оболочки кокпит открывается кнопкой
 «Режим 4»; этот модуль — тот же кокпит отдельным процессом.
@@ -21,7 +22,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="SynchrotronSim — живой кокпит режима 4")
     ap.add_argument("--exp", type=int, default=None, help="id опыта проекта (прежний хук оболочки; не используется)")
     ap.add_argument("--experiment", default=None,
-                    help="опыт: путь к JSON (Experiment.to_json, кнопка «Опыт…» → «Сохранить опыт…») или fb:N — опыт "
+                    help="опыт: путь к JSON (Experiment.to_json, кнопка «Опыт…» → «Сохранить опыт…»), пакет .zip "
+                         "(Experiment.save_bundle: опыт + документ машины — модель считает без БД) или fb:N — опыт "
                          "ОС из таблиц fb_*; задан — параметры модели (--lattice, --nsl, --slices, …) берутся из опыта")
     ap.add_argument("--lattice", type=int, default=26, help="решётка (по умолчанию 26 — активная СИЛА)")
     ap.add_argument("--gap-scale", type=float, default=1.0,

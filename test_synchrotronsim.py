@@ -5691,6 +5691,178 @@ class TestCockpitOnExperiment(unittest.TestCase):
             win.close()
 
 
+@unittest.skipUnless(os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")), "нет БД")
+class TestDocumentsAndStore(unittest.TestCase):
+    """Протокол данных, этап 1 (docs/DATA_PROTOCOL.md): документ машины (конверт + столбцы) сохраняет отпечаток и
+    ядро бит-в-бит; хранилище фиксирует ревизии снимками, опыты — ревизиями с проверкой родителя (конфликт)."""
+
+    def test_machine_document_roundtrip(self):
+        from synchrotronsim import open_db
+        from synchrotronsim.documents import machine_to_bytes, machine_from_bytes, unpack, pack, DocumentError
+        db = open_db()
+        for lat in (2, 26, 27):
+            m = db.machine(lat)
+            b = machine_to_bytes(m)
+            m2 = machine_from_bytes(b)
+            self.assertEqual(m2.fingerprint, m.fingerprint)
+            for tn in ("instances", "elements"):
+                A, B = getattr(m, tn), getattr(m2, tn)
+                for c in A.column_names():
+                    a, bb = getattr(A, c), getattr(B, c)
+                    self.assertEqual(a.dtype, bb.dtype, (lat, tn, c))
+                    if a.dtype.kind == "f":
+                        self.assertTrue(np.array_equal(a, bb, equal_nan=True) and
+                                        np.array_equal(np.signbit(a), np.signbit(bb)), (lat, tn, c))
+                    else:
+                        self.assertTrue((a == bb).all(), (lat, tn, c))
+            self.assertEqual((m2.groups, m2.meta, m2.screens, m2.cavities), (m.groups, m.meta, m.screens, m.cavities))
+        env, arr = unpack(b)
+        self.assertEqual((env["format"], env["kind"], env["id"]), ("synchrotronsim.machine/1", "machine", "27"))
+        env2 = dict(env, content=dict(env["content"], lattice_id=99))          # содержимое поправлено, отпечаток — нет
+        with self.assertRaises(DocumentError):
+            machine_from_bytes(pack(env2, arr))
+        with self.assertRaises(DocumentError):                                 # старшая версия формата новее
+            machine_from_bytes(pack(dict(env, format="synchrotronsim.machine/2"), arr))
+        if _engine_ext_available():                                            # ядро по документу — бит-в-бит
+            from synchrotronsim.engine import ExtRing
+            m = db.machine(26); m2 = machine_from_bytes(machine_to_bytes(m))
+            rf = {"volt_mv": 8.0, "harmonic": 1296, "phase_deg": 165.0}
+            x0 = np.array([[1e-4, 0, 5e-5, 0, 0, 1e-3], [2e-4, 1e-5, -5e-5, 0, 0, 0]])
+            ta = np.asarray(ExtRing(machine=m, sr=True, rf=rf).track(x0, 5))
+            tb = np.asarray(ExtRing(machine=m2, sr=True, rf=rf).track(x0, 5))
+            self.assertTrue(np.array_equal(ta, tb))
+
+    def test_store_pins_revisions_and_experiment_conflicts(self):
+        import tempfile, shutil, dataclasses
+        from synchrotronsim.store import LocalCsvStore, Ref, StoreError, ConflictError
+        from synchrotronsim.experiment import Experiment
+        tmp = tempfile.mkdtemp(prefix="ss_store_"); self.addCleanup(shutil.rmtree, tmp, True)
+        st = LocalCsvStore(store_dir=tmp)
+        head = st.get("machine", "2")
+        self.assertIs(st.get("machine", "2", head.fingerprint[:10]), head)    # префикс ревизии = последняя
+        old = dataclasses.replace(head, meta=dataclasses.replace(head.meta, label="старая ревизия"), fingerprint="")
+        self.assertNotEqual(old.fingerprint, head.fingerprint)
+        ref = st.pin(old)
+        self.assertEqual((ref.kind, ref.id, ref.rev), ("machine", "2", old.fingerprint))
+        self.assertEqual(st.pin(old), ref)                                    # повтор — та же ревизия, без записи
+        got = st.resolve(str(ref))
+        self.assertEqual((got.fingerprint, got.meta.label), (old.fingerprint, "старая ревизия"))
+        self.assertEqual(len(st.history("machine", 2)), 1)
+        with self.assertRaises(StoreError):
+            st.get("machine", "2", "0123456789ab")
+        with self.assertRaises(StoreError):                                   # машины пишутся ревизиями на этапе 2
+            st.commit("machine", "2", head)
+        self.assertEqual(Ref.parse("machine:26@abc"), Ref("machine", "26", "abc"))
+        self.assertEqual(str(Ref("experiment", "x")), "experiment:x")
+        e = Experiment.cockpit(lattice=2)
+        r1 = st.commit("experiment", "demo", e, note="первая")
+        with self.assertRaises(ConflictError):                                # поверх «ничего», а ревизия уже есть
+            st.commit("experiment", "demo", dataclasses.replace(e, note="b"))
+        r2 = st.commit("experiment", "demo", dataclasses.replace(e, note="b"), parent=r1.rev)
+        self.assertNotEqual(r1.rev, r2.rev)
+        self.assertEqual(st.get("experiment", "demo").note, "b")
+        self.assertEqual(st.get("experiment", "demo", r1.rev).to_dict(), e.to_dict())
+        self.assertEqual([h["rev"] for h in st.history("experiment", "demo")], [r1.rev, r2.rev])
+        self.assertEqual(st.get("experiment", "fb:3").source, "fb_exp_id=3")
+        self.assertEqual(e.machine_ref(), Ref("machine", "2", ""))
+        h = st.blob_put(b"abc")
+        self.assertEqual(st.blob_get(h), b"abc")
+
+
+@unittest.skipUnless(_engine_ext_available() and os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")),
+                     "нет собранного расширения или БД")
+class TestModelFromDocuments(unittest.TestCase):
+    """Критерий этапа 1 протокола данных: документы опыта и машины загружены заранее — дальше пакетный прогон,
+    сборка и шаги кокпита, экраны (ондулятор и линейка диполей) и сцена НЕ открывают ни одной таблицы. Паспорт
+    прогона ссылается на машину с ревизией; пакет опыта считается без БД."""
+
+    ALLOW = ("workspace/results/", "workspace/store/", "workspace/runs/", "workspace/fields_bin/")
+
+    def _guard(self):
+        import builtins, io as _io
+        root = os.path.dirname(os.path.abspath(mt.__file__))
+        seen = []
+        o_open, o_io = builtins.open, _io.open
+
+        def h(file, mode="r", *a, **k):
+            if isinstance(file, (str, os.PathLike)):
+                ap = os.path.abspath(os.fspath(file))
+                if ap.lower().startswith(root.lower()) and not ap.endswith((".py", ".pyc", ".pyd")):
+                    rel = os.path.relpath(ap, root).replace("\\", "/")
+                    if not rel.startswith(self.ALLOW):
+                        seen.append(rel)
+            return o_open(file, mode, *a, **k)
+        builtins.open = h; _io.open = h
+
+        def restore():
+            builtins.open = o_open; _io.open = o_io
+        return seen, restore
+
+    def test_compute_path_opens_no_tables(self):
+        import tempfile, shutil
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(mt.__file__)), "undulators"))
+        from synchrotronsim.experiment import Experiment
+        from synchrotronsim.simulation import Simulation, build_session
+        from synchrotronsim.store import open_store
+        from client.cockpit import cockpit_experiment
+        from client import InProcLink
+        from client.engine import EngineThread
+        from client.scene3d import build_geometry
+        import screen_analysis as sa
+        import control.recorders, control.tbt_plant  # noqa: F401 — импорты до проверки
+        tmp = tempfile.mkdtemp(prefix="ss_noread_"); self.addCleanup(shutil.rmtree, tmp, True)
+        os.makedirs(os.path.join(tmp, "tables"))
+        exp = Experiment.from_fb(3, smoke=True)
+        exp.run.steps = 9
+        m = open_store().machine(exp.lattice_id)
+        ce, _ = cockpit_experiment(optics=False, nsl_dev=None)
+        bend_sid = sa.bend_line_screens(m)[0]["sid"]
+        seen, restore = self._guard()
+        try:
+            run = Simulation(exp, root=tmp, legacy_fb=False, machine=m, progress=None).run()
+            S = build_session(ce, machine=m)
+            for _ in range(2):
+                S.sch.step()
+            eng = EngineThread(InProcLink(), S.sch)
+            g = build_geometry(S.plant, S.state)
+            und_sid = next(x["sid"] for x in g["screens"] if x["kind"] == "undulator")
+            res = {(sid, q): eng._compute_screen(f"screen.{sid}", {"res": 21, "quantity": q})
+                   for sid in (und_sid, bend_sid) for q in ("flux", "power")}
+            S.close()
+        finally:
+            restore()
+        self.assertEqual(seen, [], f"модель открыла таблицы: {sorted(set(seen))}")
+        self.assertTrue(all(not r.get("error") and r.get("heatmap") for r in res.values()),
+                        {k: r.get("error") for k, r in res.items()})
+        ref = run.manifest["machine"]["ref"]
+        self.assertEqual(ref, f"machine:26@{m.fingerprint}")                  # паспорт: машина с ревизией
+        self.assertTrue(os.path.exists(os.path.join(tmp, "store", "machine", "26", f"{m.fingerprint}.ssd")))
+        self.assertEqual(und_sid, "SCR_und_01")                               # экраны — из документа машины 26
+
+    def test_bundle_runs_without_db_and_rev_mismatch_rejected(self):
+        import tempfile, shutil, dataclasses
+        from synchrotronsim.experiment import Experiment
+        from synchrotronsim.simulation import build_session, resolve_machine
+        tmp = tempfile.mkdtemp(prefix="ss_bundle2_"); self.addCleanup(shutil.rmtree, tmp, True)
+        e = Experiment.cockpit(lattice=26, settle_turns=20)
+        p = e.save_bundle(os.path.join(tmp, "b.zip"))
+        e2, m = Experiment.open_bundle(p)
+        self.assertEqual(e2.to_dict(), e.to_dict())
+        self.assertTrue(m.source.startswith("document:"))
+        seen, restore = self._guard()
+        try:
+            S = build_session(e2, machine=m)
+            S.sch.step()
+            S.close()
+        finally:
+            restore()
+        self.assertEqual(seen, [], f"пакет: модель открыла таблицы: {sorted(set(seen))}")
+        with self.assertRaises(ValueError):                                   # опыт на другой ревизии
+            resolve_machine(dataclasses.replace(e2, machine_rev="0123456789ab"), machine=m)
+        with self.assertRaises(ValueError):                                   # опыт на другой решётке
+            resolve_machine(dataclasses.replace(e2, lattice_id=27), machine=m)
+
+
 @unittest.skipUnless(_engine_ext_available() and os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")),
                      "нет собранного расширения или БД")
 class TestParallelColumnsAndClosedOrbit(unittest.TestCase):

@@ -163,6 +163,9 @@ def undulator_trace(gid, insts, ci, byid, gap, et=None, poles=True, ppp=128, p=s
 
 # ─────────────────────────── диполи: модули, цепочки, мягкий край ───────────────────────────
 
+_DEV_MAPS = {}                 # тип устройства → путь карты (или None) из документов машин (register_machine_maps)
+
+
 @functools.lru_cache(maxsize=None)
 def _map_paths():
     out = {}
@@ -180,7 +183,7 @@ def map_profile(device_type):
     """Нормированный продольный профиль поля диполя по его карте: f(0)=1 в центре, ось — продольная X карты,
     точка y=z=0, компонента с наибольшим |B|. Полукарта (minX = 0) зеркалится. Возврат dict(x, f, cum, half,
     integral) или None (нет карты)."""
-    path = _map_paths().get(device_type)
+    path = _DEV_MAPS[device_type] if device_type in _DEV_MAPS else _map_paths().get(device_type)
     if not path or not os.path.exists(path):
         return None
     import scan_field_maps as sfm
@@ -433,9 +436,24 @@ def gauss_blur(S, cov, du, dv):
 
 # ─────────────────────────── контекст и итоговая карта ───────────────────────────
 
-def make_context(lattice, ws=None, et=None, gap=5.0, E=None, I=None, ppp=128, ci=None, byid=None, groups=None):
-    """Всё, что не зависит от экрана: таблицы машины, модули и цепочки диполей, кэши траекторий и карт."""
+def sa_lat_id(lattice):
     import screen_analysis as sa
+    return sa.lat_id(lattice)
+
+
+def register_machine_maps(machine):
+    """Карты поля устройств машины — из документа (devices[*].map_bin_path), без чтения hardware_library."""
+    for d, dt in machine.devices.items():
+        pth = (dt.map_bin_path or "").strip()
+        _DEV_MAPS[d] = os.path.join(FIELDS_BIN, pth) if pth and pth != "-" else None
+
+
+def make_context(lattice, ws=None, et=None, gap=5.0, E=None, I=None, ppp=128, ci=None, byid=None, groups=None):
+    """Всё, что не зависит от экрана: таблицы машины, модули и цепочки диполей, кэши траекторий и карт.
+    lattice — номер решётки (таблицы) или документ машины (synchrotronsim.model.Machine)."""
+    import screen_analysis as sa
+    if sa.is_machine(lattice):
+        register_machine_maps(lattice)
     if ci is None or byid is None:
         ci, byid = sa.load_lattice(lattice, ws)
     groups = sa.load_groups(lattice) if groups is None else groups
@@ -466,7 +484,7 @@ def _optics(ctx, point):
     key = tuple(np.round(np.asarray(point, float), 3))
     if key not in ctx["optics_cache"]:
         import lattice_optics as lo
-        ctx["optics_cache"][key] = lo.optics_at_point(ctx["lattice"], point)
+        ctx["optics_cache"][key] = lo.optics_at_point(sa_lat_id(ctx["lattice"]), point)
     return ctx["optics_cache"][key]
 
 

@@ -506,10 +506,10 @@ def detect_structures(ring, lin, n_sp):
 
 
 def _family(dev):
-    """Имя семейства: срезаем префикс sila26_/s2_ и хвостовой индекс среза (_1.._5, _1A…)."""
-    base = dev.split("_", 1)[1] if dev.split("_", 1)[0].endswith(("26", "25", "s2", "2")) and "_" in dev else dev
-    import re
-    return re.sub(r"_(\d+[A-Z]?|[A-Z])$", "", base)
+    """Имя семейства: срезаем префикс sila26_/s2_ и хвостовой индекс среза (_1.._5, _1A…).
+    Реализация — synchrotronsim.machines.family (общая для модели счёта и паспорта)."""
+    from synchrotronsim.machines import family
+    return family(dev)
 
 
 def _lin(t):

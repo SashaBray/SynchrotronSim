@@ -50,9 +50,10 @@ def make_loop(l: LoopSpec):
 class Session:
     """Собранная связка опыта: plant, доска (state), планировщик (sch), контуры, такт dt и окно усреднения."""
 
-    def __init__(self, exp, plant, state, sch, loops, dt, window):
+    def __init__(self, exp, plant, state, sch, loops, dt, window, machine=None):
         self.exp, self.plant, self.state, self.sch, self.loops, self.dt, self.window = \
             exp, plant, state, sch, loops, dt, window
+        self.machine = machine                             # документ машины, по которому собрано кольцо
 
     def close(self):
         try:
@@ -71,12 +72,31 @@ def loop_rate_hz(l: LoopSpec, dt: float, window: int, run) -> float:
     return float(l.rate)
 
 
-def build_session(exp: Experiment) -> Session:
-    """Опыт → (plant, доска, планировщик с контурами). Тяжёлые импорты ленивые (ring_cpp и т.п.)."""
+def resolve_machine(exp: Experiment, store=None, machine=None):
+    """Машина опыта: заданный документ или из хранилища по ссылке опыта (решётка + ревизия; "" — последняя)."""
+    if machine is not None:
+        if int(machine.lattice_id) != int(exp.lattice_id):
+            raise ValueError(f"машина решётки {machine.lattice_id}, а опыт «{exp.name}» — на решётке {exp.lattice_id}")
+        if exp.machine_rev and not machine.fingerprint.startswith(exp.machine_rev):
+            raise ValueError(f"опыт «{exp.name}» ссылается на ревизию {exp.machine_rev[:12]}, а передана машина "
+                             f"{machine.fingerprint[:12]}")
+        return machine
+    if store is None:
+        from .store import open_store
+        store = open_store()
+    ref = exp.machine_ref()
+    return store.get("machine", ref.id, ref.rev or None)
+
+
+def build_session(exp: Experiment, store=None, machine=None) -> Session:
+    """Опыт → (plant, доска, планировщик с контурами). Машина — документ: `machine=` или из хранилища `store` по
+    ссылке опыта (`exp.machine_ref()`); plant'ы собирают кольцо из него, таблиц не читают. Тяжёлые импорты
+    ленивые (ring_cpp и т.п.)."""
     from control import ExperimentState, Scheduler, NoiseModel, DRIVE_PROFILE_DEFAULTS
     from control.obs_assembly import observer_for
     from control.controllers.rf_frequency import RfFrequencyLoop
 
+    machine = resolve_machine(exp, store, machine)
     loops = [make_loop(l) for l in exp.loops]
     sensors = list(loops)
     if "rf.delta" in exp.plant.extra_sensors and not any(getattr(c, "sensor", "") == "rf.delta" for c in loops):
@@ -85,7 +105,7 @@ def build_session(exp: Experiment) -> Session:
     kind = exp.plant.kind
     if kind == "optics":
         from control.optics_plant import OpticsPlant
-        plant = OpticsPlant(lattice=exp.lattice_id, **kw)
+        plant = OpticsPlant(lattice=exp.lattice_id, machine=machine, **kw)
         state = ExperimentState(plant.schema(), history=plant.history())
         for q, v in plant.nominal().items():               # уставки контуров = проектная оптика
             state.refs[f"{q}.target"] = v
@@ -94,12 +114,13 @@ def build_session(exp: Experiment) -> Session:
         plant = CompositePlant(lattice=exp.lattice_id,
                                tbt_observer=observer_for(sensors, serves=set(TBT_SERVES) if kw.get("rf_actuator")
                                                          else set(TBT_SERVES) - {"rf.delta"}),
-                               optics_observer=observer_for(sensors, serves=set(OPTICS_SERVES)), **kw)
+                               optics_observer=observer_for(sensors, serves=set(OPTICS_SERVES)), machine=machine,
+                               **kw)
         state = ExperimentState(plant.schema(), history=plant.history())
     else:
         from control.tbt_plant import TbtPlant
         obs = observer_for(sensors, TBT_SERVES) if exp.plant.observer == "loops" else None
-        plant = TbtPlant(lattice=exp.lattice_id, observer=obs, **kw)
+        plant = TbtPlant(lattice=exp.lattice_id, observer=obs, machine=machine, **kw)
         state = ExperimentState(plant.schema(), history=plant.history())
     if exp.noise is not None:
         state.noise = NoiseModel(exp.noise)                # закон шума — в доске (живой)
@@ -108,9 +129,10 @@ def build_session(exp: Experiment) -> Session:
     dt = (plant.stride * plant.TREV) if hasattr(plant, "stride") else 1.0   # optics: абстрактный такт
     window = int(getattr(plant, "avg_chunks", 1) or 1)
     sch = Scheduler(plant, state, dt)
+    sch.machine = machine                                  # паспорт прогона: машина с ревизией (Runner фиксирует)
     for spec, ctl in zip(exp.loops, loops):
         sch.add(ctl, rate_hz=loop_rate_hz(spec, dt, window, exp.run), enabled=bool(spec.enabled))
-    return Session(exp, plant, state, sch, loops, dt, window)
+    return Session(exp, plant, state, sch, loops, dt, window, machine=machine)
 
 
 def records_of(exp: Experiment):
@@ -203,22 +225,38 @@ class Runner:
                                    run=dataclasses.replace(exp.run, max_turns=self.max_turns, repeat=self.repeat))
 
     def _machine(self):
+        """Машина прогона: та, по которой собрано кольцо (sch.machine / plant.machine), иначе — из хранилища."""
+        m = getattr(self.sch, "machine", None) or getattr(self.plant, "machine", None)
+        if m is not None:
+            return m
         lat = getattr(self.experiment, "lattice_id", None) if self.experiment is not None else None
         lat = lat if lat is not None else getattr(self.plant, "lattice", None)
         if lat is None:
             return None
         try:
-            from .db import open_db
-            return open_db(self.run_root).machine(int(lat))
+            from .store import open_store
+            return open_store(root=self.run_root).machine(int(lat))
         except Exception:
+            return None
+
+    def _pin(self, machine):
+        """Зафиксировать ревизию машины в хранилище (снимок документа) → текст ссылки или None (ошибка — в err)."""
+        if machine is None:
+            return None
+        try:
+            from .store import open_store
+            return str(open_store(root=self.run_root).pin(machine))
+        except Exception as e:                            # запись снимка не должна ронять исполнение
+            self.err = f"снимок машины: {type(e).__name__}: {e}"
             return None
 
     def begin_pass(self, config=None, note: Optional[str] = None) -> Optional[Run]:
         """Начать прогон (прежний, если был, — закрыть как stopped). config/note — для пакетного прогона."""
         self.end_pass("stopped")
         try:
+            m = self._machine()
             self.run = Run.create(self.kind, config=self.experiment_snapshot() if config is None else config,
-                                  machine=self._machine(), seed=getattr(self.experiment, "seed", None),
+                                  machine=m, machine_ref=self._pin(m), seed=getattr(self.experiment, "seed", None),
                                   source=self.source,
                                   note=note if note is not None else
                                   f"проход {self.pass_no}; старт с оборота {self.turn()}", root=self.run_root)
@@ -258,16 +296,17 @@ class Simulation:
     legacy_fb — для опытов из БД (source «fb_exp_id=N») писать и прежние fb_results/fb_artifacts/статус."""
 
     def __init__(self, exp: Experiment, root: Optional[str] = None, legacy_fb: Optional[bool] = None,
-                 progress: Optional[Callable[[str], None]] = print):
+                 progress: Optional[Callable[[str], None]] = print, store=None, machine=None):
         self.exp = exp
         self.root = root
+        self.store, self.machine = store, machine         # хранилище и/или готовый документ машины
         self.legacy_fb = exp.source.startswith("fb_exp_id=") if legacy_fb is None else bool(legacy_fb)
         self.progress = progress or (lambda s: None)
         self.session: Optional[Session] = None
 
     def build(self) -> Session:
         if self.session is None:
-            self.session = build_session(self.exp)
+            self.session = build_session(self.exp, store=self.store, machine=self.machine)
         return self.session
 
     def _fb_id(self):
@@ -281,7 +320,7 @@ class Simulation:
         n_steps = int(steps if steps is not None else (exp.run.steps or 0))
         if n_steps <= 0:
             raise ValueError("Simulation.run: не задано число шагов (exp.run.steps или steps=)")
-        recs = recorders.build(records_of(exp), mesh=exp.run.record_mesh, loops=S.sch.loops)
+        recs = recorders.build(records_of(exp), mesh=exp.run.record_mesh, loops=S.sch.loops, machine=S.machine)
         R = Runner(S.sch, experiment=exp, run_root=self.root, kind="fb_mode4" if self.legacy_fb else "simulation",
                    source=exp.source)
         R.max_turns = exp.run.max_turns

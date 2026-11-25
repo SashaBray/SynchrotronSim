@@ -98,6 +98,12 @@ class Experiment:
     seed: int = 1
     note: str = ""
     source: str = ""
+    machine_rev: str = ""          # ревизия машины (отпечаток); "" — последняя (docs/DATA_PROTOCOL.md)
+
+    def machine_ref(self):
+        """Ссылка на машину опыта: machine:<lattice_id>[@ревизия]."""
+        from .store import Ref
+        return Ref("machine", str(self.lattice_id), self.machine_rev or "")
 
     # ---- из БД: опыт ОС режима 4 -------------------------------------------------------------------
     @classmethod
@@ -204,7 +210,8 @@ class Experiment:
                    loops=[LoopSpec(**l) for l in d.get("loops") or []], noise=d.get("noise"),
                    drive_profile=d.get("drive_profile"),
                    record=[Watch(**w) for w in d.get("record") or []], run=RunLimits(**(d.get("run") or {})),
-                   seed=int(d.get("seed", 1)), note=d.get("note", ""), source=d.get("source", ""))
+                   seed=int(d.get("seed", 1)), note=d.get("note", ""), source=d.get("source", ""),
+                   machine_rev=str(d.get("machine_rev", "") or ""))
 
     def to_json(self, path: str) -> str:
         with open(path, "w", encoding="utf-8") as f:
@@ -221,16 +228,24 @@ class Experiment:
                      "bpm_config", "screens")                       # строки ЭТОЙ решётки (по lattice_id)
     BUNDLE_LIBRARY = ("hardware_library", "element_transforms", "field_maps")   # строки использованных типов
 
-    def save_bundle(self, path: str, root: Optional[str] = None) -> str:
-        """Один zip: experiment.json + манифест (отпечаток машины) + таблицы БД только этой машины (её строки
-        решётки и использованные типы устройств). Карты поля не кладутся (киковому ядру не нужны)."""
+    def save_bundle(self, path: str, root: Optional[str] = None, machine=None) -> str:
+        """Один zip: experiment.json + документ машины `machine.ssd` (synchrotronsim.documents — по нему модель
+        считает без БД, `open_bundle`) + манифест (отпечаток) + таблицы БД только этой машины (её строки решётки и
+        использованные типы устройств — для людей и импорта). Карты поля не кладутся (киковому ядру не нужны).
+        machine — готовый документ (иначе — из хранилища по ссылке опыта)."""
         import csv
         from .db import Repository
+        from .documents import machine_to_bytes
         db = Repository(root)
-        m = db.machine(self.lattice_id)
+        if machine is None:
+            from .store import open_store
+            ref = self.machine_ref()
+            machine = open_store(root=root).get("machine", ref.id, ref.rev or None)
+        m = machine
         devs = set(m.devices)
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("experiment.json", json.dumps(self.to_dict(), ensure_ascii=False, indent=1))
+            z.writestr("machine.ssd", machine_to_bytes(m, machine_id=str(m.lattice_id)))
             z.writestr("bundle.json", json.dumps({"format": "synchrotronsim.bundle/1", "lattice_id": m.lattice_id,
                                                   "fingerprint": m.fingerprint,
                                                   "label": m.meta.label if m.meta else None},
@@ -248,6 +263,21 @@ class Experiment:
                 w.writerow(t.header); w.writerows(rows)
                 z.writestr(f"tables/{name}.csv", buf.getvalue())
         return path
+
+    @staticmethod
+    def open_bundle(path: str):
+        """Пакет → (Experiment, Machine) БЕЗ распаковки таблиц: модель считает по документу машины
+        (`Simulation(exp, machine=m).run()`, кокпит `--experiment пакет.zip`). Отпечаток сверяется."""
+        from .documents import machine_from_bytes
+        with zipfile.ZipFile(path) as z:
+            exp = Experiment.from_dict(json.loads(z.read("experiment.json").decode("utf-8")))
+            info = json.loads(z.read("bundle.json").decode("utf-8"))
+            if "machine.ssd" not in z.namelist():
+                raise RuntimeError(f"пакет {path} старого формата (без machine.ssd) — load_bundle(путь, папка)")
+            m = machine_from_bytes(z.read("machine.ssd"), source=f"document:{path}")
+        if m.fingerprint != info["fingerprint"]:
+            raise RuntimeError(f"пакет {path}: документ машины {m.fingerprint[:12]} ≠ манифест {info['fingerprint'][:12]}")
+        return exp, m
 
     @staticmethod
     def load_bundle(path: str, dest: str):

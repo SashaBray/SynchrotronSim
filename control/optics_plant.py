@@ -35,9 +35,10 @@ FD_EPS = 1e-3                                                  # шаг коне
 
 class OpticsPlant:
     def __init__(self, model=None, lattice=26, nsl=8, observe=("tune", "chroma", "adts"),
-                 drift_k1=0.0, drift_k2=0.0, drift_k3=0.0, rho=1.0, seed=1, order=4, gap_mm=5.0, observer=None):
+                 drift_k1=0.0, drift_k2=0.0, drift_k3=0.0, rho=1.0, seed=1, order=4, gap_mm=5.0, observer=None,
+                 machine=None):
         self.own = model is None
-        self.rm = model if model is not None else RingModel(lattice=lattice, nsl=nsl)
+        self.rm = model if model is not None else RingModel(lattice=lattice, nsl=nsl, machine=machine)
         self.observe = tuple(observe); self.order = order
         self.base = self.rm.ring._python_ring()                # аналитическое кольцо (номинал)
         self.ids = list(self.rm.dk_ids) + list(self.rm.dk2_ids) + list(self.rm.dk3_ids)
@@ -234,8 +235,8 @@ class OpticsPlant:
     def _seed_undulators(self, state):
         """Живые зазоры ондуляторов на доску (по group_id), дефолт self.gap_mm — видят контуры."""
         try:
-            import errors as er
-            for g in er.load_groups(self.rm.lattice):
+            from synchrotronsim.machines import groups_of
+            for g in groups_of(self.rm.machine):
                 gid = g.get("group_id")
                 if gid and gid not in state.undulators:
                     state.undulators[gid] = UndulatorConfig(self.gap_mm, name=gid)

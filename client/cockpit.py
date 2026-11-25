@@ -324,6 +324,7 @@ class Cockpit(QMainWindow):
         self._ready = False
         self._panels_shown = False
         self.experiment = None                 # опыт (synchrotronsim.experiment.Experiment), который исполняет модель
+        self._machine_doc = None               # документ машины из пакета опыта (держится для пересборок той же решётки)
         self._session_subs: List[str] = []     # подписки панели/сцены текущей сборки (снимаются при пересборке)
         self._carry: Optional[dict] = None     # что перенести в новую сборку (запись, отметки, зазоры, пуск)
         self._opts = dict(gap_scale=1.0, gap_slew_mm_s=500.0, publish_every=3, autorun=False, restore_last=True,
@@ -772,10 +773,15 @@ class Cockpit(QMainWindow):
             self.set_status(f"раскладка загружена: {name}")
 
     # ---- опыт: сборка модели по опыту, пересборка (окна, подписки и запись сохраняются) ----
-    def build(self, experiment):
-        """Собрать модель по опыту в ФОНЕ (первый запуск или пересборка). Готовая сборка — `_attach`."""
-        from synchrotronsim.experiment import Experiment
-        exp = load_experiment(experiment) if not isinstance(experiment, Experiment) else experiment
+    def build(self, experiment, machine=None):
+        """Собрать модель по опыту в ФОНЕ (первый запуск или пересборка). Готовая сборка — `_attach`.
+        machine — документ машины (пакет опыта); None — документ, с которым уже работали (та же решётка), иначе
+        из хранилища по ссылке опыта (последняя ревизия: правки таблиц подхватываются пересборкой)."""
+        exp, m = load_experiment_doc(experiment)
+        machine = machine or m
+        if machine is None and self._machine_doc is not None and int(self._machine_doc.lattice_id) == int(exp.lattice_id):
+            machine = self._machine_doc
+        self._machine_doc = machine
         if exp.plant.kind not in COCKPIT_PLANTS:
             raise ValueError(f"опыт «{exp.name}»: модель {exp.plant.kind} без кольца — кокпит показывает только "
                              f"{'/'.join(COCKPIT_PLANTS)}; такой опыт исполняется Simulation(exp).run()")
@@ -784,27 +790,27 @@ class Cockpit(QMainWindow):
                         + (f" · {note}" if note else ""))
         if self.scene is None and self._placeholder is not None:
             self._placeholder.setText(f"строится модель кольца…\nопыт «{exp.name}», решётка {exp.lattice_id}")
-        b = _Builder(exp)
+        b = _Builder(exp, machine)
         self._builder = b
         b.done.connect(self._attach)
         b.start()
         return b
 
-    def rebuild(self, experiment):
+    def rebuild(self, experiment, machine=None):
         """Пересобрать модель по новому опыту: движок останавливается (проход записи закрывается), plant
         закрывается, новая сборка — в фоне; окна-подписчики, отметки «● запись», настройки записи, зазоры
-        ондуляторов и режим пуск/пауза переносятся."""
+        ондуляторов и режим пуск/пауза переносятся. machine — документ машины (пакет опыта)."""
         if self._builder is not None:
             self.set_status("модель ещё строится — дождитесь готовности")
             return None
-        from synchrotronsim.experiment import Experiment
-        exp = load_experiment(experiment) if not isinstance(experiment, Experiment) else experiment
+        exp, m = load_experiment_doc(experiment)
+        machine = machine or m
         if exp.plant.kind not in COCKPIT_PLANTS:                 # проверить ДО остановки текущей модели
             QMessageBox.warning(self, "Опыт", f"модель {exp.plant.kind} без кольца — кокпит её не показывает")
             return None
         self._carry = self._detach()
         self._opts["note"] = ""
-        return self.build(exp)
+        return self.build(exp, machine)
 
     def _detach(self) -> dict:
         """Остановить движок и закрыть plant текущей сборки; вернуть то, что переносится в следующую."""
@@ -878,7 +884,8 @@ class Cockpit(QMainWindow):
         for name in sch.loops:                           # живое состояние контуров → переключатели панели
             self._sub_session(f"loop.{name}.enabled")
 
-        scr_list = [(s["sid"], s.get("kind", "")) for s in (scene.model.screens or [])] or _read_screen_ids()
+        scr_list = [(s["sid"], s.get("kind", "")) for s in (scene.model.screens or [])] or \
+            _read_screen_ids(getattr(plant, "machine", None))
         self.build_tree(state, sch.loops, scr_list)
 
         from .engine import EngineThread
@@ -944,7 +951,7 @@ class Cockpit(QMainWindow):
         from .experiment_dialog import ExperimentDialog
         dlg = ExperimentDialog(self.current_experiment(), parent=self)
         if dlg.exec() and dlg.result_experiment() is not None:
-            self.rebuild(dlg.result_experiment())
+            self.rebuild(dlg.result_experiment(), dlg.result_machine())
 
     def closeEvent(self, event):
         try:
@@ -968,9 +975,10 @@ class _Builder(QObject):
     потоке; `done` эмитится в поток-владелец. Опыт кладётся в планировщик (`sch.experiment`) — паспорт прогона."""
     done = Signal(object)   # (plant, state, sch) | Exception
 
-    def __init__(self, experiment):
+    def __init__(self, experiment, machine=None):
         super().__init__()
         self.experiment = experiment
+        self.machine = machine                  # документ машины (пакет опыта); None — из хранилища по ссылке опыта
 
     def start(self):
         threading.Thread(target=self._run, name="session-build", daemon=True).start()
@@ -978,7 +986,7 @@ class _Builder(QObject):
     def _run(self):
         try:
             from synchrotronsim.simulation import build_session
-            S = build_session(self.experiment)
+            S = build_session(self.experiment, machine=self.machine)
             S.sch.experiment = self.experiment
             self.done.emit((S.plant, S.state, S.sch))
         except Exception as e:                      # noqa: BLE001 — ошибку доставим в UI
@@ -989,15 +997,23 @@ COCKPIT_PLANTS = ("tbt", "composite")            # модели с кольцо�
 START_ON = ("fofb_x", "fofb_y", "tune", "chroma")  # контуры, включённые при старте кокпита (adts ВЫКЛ: октуполи ранг-1)
 
 
-def load_experiment(spec):
-    """Опыт для кокпита: Experiment | путь к JSON (`Experiment.to_json`) | «fb:N» — опыт ОС из таблиц fb_*."""
+def load_experiment_doc(spec):
+    """Опыт и (если есть) документ машины: Experiment | путь к JSON | пакет .zip (`Experiment.save_bundle` — опыт
+    + документ машины, модель считает без БД) | «fb:N» — опыт ОС из таблиц fb_*. → (Experiment, Machine | None)."""
     from synchrotronsim.experiment import Experiment
     if isinstance(spec, Experiment):
-        return spec
+        return spec, None
     s = str(spec).strip()
     if s.lower().startswith("fb:"):
-        return Experiment.from_fb(int(s[3:]))
-    return Experiment.from_json(s)
+        return Experiment.from_fb(int(s[3:])), None
+    if s.lower().endswith(".zip"):
+        return Experiment.open_bundle(s)
+    return Experiment.from_json(s), None
+
+
+def load_experiment(spec):
+    """Опыт для кокпита (см. load_experiment_doc; документ машины пакета отбрасывается)."""
+    return load_experiment_doc(spec)[0]
 
 
 def cockpit_experiment(lattice: int = 26, settle_turns: int = 250, steps_per_cycle: int = 9, nsl: int = 8,
@@ -1077,8 +1093,10 @@ def init_undulators(state, slew, open_gid="und_01", open_mm=5.0, closed_mm=50.0)
             pass
 
 
-def _read_screen_ids() -> List[str]:
-    """Список экранов из таблицы screens (колонка screen_id; через synchrotronsim.db); пусто, если таблицы нет."""
+def _read_screen_ids(machine=None) -> List[str]:
+    """Список экранов: у документа машины — её экраны; без машины — таблица screens (через synchrotronsim.db)."""
+    if machine is not None:
+        return [s.screen_id for s in machine.screens]
     try:
         from synchrotronsim.db import Repository
         return [v.strip() for v in Repository(layoutmod._ROOT).table("screens", required=False).column("screen_id")
@@ -1106,9 +1124,9 @@ def launch_cockpit(lattice: int = 26, exp=None, parent=None, gap_scale: float = 
     неадиабатично. Дефолт 500 — КОМПРОМИСС: ~540 оборотов/мм (в 10× адиабатичнее прежних 5000), видно за ~13 с
     стенных. --gap-slew: меньше → ближе к реальному адиабатич. приводу (можно 0.5); больше → быстрее/нагляднее.
     Сцена отражает РЕАЛИЗОВАННЫЙ зазор; FOFB парирует возмущение орбиты от смены зазора."""
-    note = ""
+    note, m = "", None
     if experiment is not None:
-        e = load_experiment(experiment)
+        e, m = load_experiment_doc(experiment)       # пакет .zip — опыт + документ машины
     else:
         e, note = cockpit_experiment(lattice=lattice, settle_turns=settle_turns, steps_per_cycle=steps_per_cycle,
                                      nsl=nsl, n_part=n_part, stride=stride, fofb_on=fofb_on, optics=optics,
@@ -1120,7 +1138,7 @@ def launch_cockpit(lattice: int = 26, exp=None, parent=None, gap_scale: float = 
                      autorun=autorun, restore_last=restore_last, note=note)
     win.show()
     try:
-        win.build(e)
+        win.build(e, m)
     except Exception as ex:                          # опыт без кольца и т.п. — в окно, не падать
         win.set_status(f"опыт не запущен: {type(ex).__name__}: {ex}")
         if win._placeholder is not None:

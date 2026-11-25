@@ -61,8 +61,73 @@ def _unit(v):
     return v / n if n else v
 
 
+# ---- машина: номер решётки (таблицы, как раньше) ИЛИ документ synchrotronsim.model.Machine (docs/DATA_PROTOCOL.md:
+# модель во время счёта берёт данные из документа и таблиц не открывает). Адаптеры отдают ТЕ ЖЕ структуры, что
+# чтение таблиц: строки lattice_configs — строками (repr числа точно возвращает значение, «-0» — тоже), пусто — "".
+_LC_COLS = ("lattice_id", "instance_id", "device_type_id", "x", "y", "z", "yaw", "pitch", "roll", "arg_val",
+            "correct_coeff", "mat_B", "mat_G", "mat_S", "mat_O", "mat_Gv", "eff_length", "kind", "n_slices", "edge1",
+            "edge2")
+_LC_FIELD = {"device_type_id": "device_type"}
+_M_ROWS = {}                   # отпечаток машины → (ci, byid)
+
+
+def is_machine(x) -> bool:
+    return hasattr(x, "instances") and hasattr(x, "fingerprint")
+
+
+def lat_id(lattice) -> int:
+    """Номер решётки: у документа машины — его lattice_id."""
+    return int(lattice.lattice_id) if is_machine(lattice) else int(lattice)
+
+
+def lat_key(lattice):
+    """Ключ кэшей: номер решётки, у документа — (номер, отпечаток): разные ревизии не смешиваются."""
+    return (int(lattice.lattice_id), lattice.fingerprint) if is_machine(lattice) else int(lattice)
+
+
+def _cell(v):
+    if isinstance(v, float) or isinstance(v, np.floating):
+        return "" if v != v else repr(float(v))
+    if isinstance(v, (int, np.integer)):
+        return str(int(v))
+    return "" if v is None else str(v)
+
+
+def machine_rows(m):
+    """Строки lattice_configs машины в прежнем виде (ci, byid) — из документа, без таблиц."""
+    hit = _M_ROWS.get(m.fingerprint)
+    if hit is None:
+        I = m.instances
+        cols = [np.asarray(getattr(I, _LC_FIELD.get(c, c))) if c != "lattice_id" else None for c in _LC_COLS]
+        lat = str(int(m.lattice_id))
+        byid = {}
+        for j in range(len(I)):
+            row = [lat if a is None else _cell(a[j]) for a in cols]
+            byid[row[1]] = row
+        hit = _M_ROWS[m.fingerprint] = ({c: i for i, c in enumerate(_LC_COLS)}, byid)
+    return hit
+
+
+def machine_screen_rows(m):
+    """Строки screens машины в табличных единицах (мм, мрад) — для прежних потребителей строк."""
+    out = []
+    for s in m.screens:
+        r = {"lattice_id": str(int(m.lattice_id)), "screen_id": s.screen_id, "source_ref": s.source_ref,
+             "source_kind": s.source_kind, "mode": s.mode, "dist_m": repr(float(s.dist)),
+             "width_mm": repr(float(s.width) / 1e-3), "height_mm": repr(float(s.height) / 1e-3)}
+        for k, v in (("c", s.center), ("n", s.normal), ("u", s.u), ("v", s.v)):
+            for a, x in zip("xyz", v):
+                r[k + a] = repr(float(x))
+        for k in ("extract", "los_h", "los_v", "tilt_h", "tilt_v", "roll"):
+            r[k + "_mrad"] = repr(float(getattr(s, k)) / 1e-3)
+        out.append(r)
+    return out
+
+
 def load_groups(lattice):
-    """{group_id: set(instance_ids)} для решётки."""
+    """{group_id: set(instance_ids)} для решётки (или документа машины)."""
+    if is_machine(lattice):
+        return {g.group_id: set(g.instance_ids) for g in lattice.groups}
     out = {}
     for r in csv.DictReader(open(EG, encoding="utf-8-sig"), delimiter=";"):
         if r.get("lattice_id") == str(lattice):
@@ -71,6 +136,10 @@ def load_groups(lattice):
 
 
 def load_screens(lattice):
+    if is_machine(lattice):
+        return [dict(sid=s.screen_id, src=s.source_ref, C=np.array(s.center, float), n=np.array(s.normal, float),
+                     u=np.array(s.u, float), v=np.array(s.v, float), w=float(s.width) / 1e-3,
+                     h=float(s.height) / 1e-3, mode=s.mode) for s in lattice.screens]
     if not os.path.exists(SCR):
         raise SystemExit(f"нет {SCR} — сначала разместите экраны (build_screens.py)")
     out = []
@@ -85,6 +154,8 @@ def load_screens(lattice):
 
 
 def load_lattice(lattice, ws):
+    if is_machine(lattice):                                  # документ машины (возмущённая машина — свой документ)
+        return machine_rows(lattice)
     path = os.path.join(ws, "tables", "lattice_configs.csv") if ws else os.path.join(TB, "lattice_configs.csv")
     rows = list(csv.reader(open(path, encoding="utf-8-sig"), delimiter=";"))
     ci = {c: i for i, c in enumerate(rows[0])}
@@ -242,7 +313,10 @@ _LIVE = {}                     # (решётка, экран, веера) → т
 _BEND_SCR = {}                 # (решётка, dist) → экраны у центральных модулей линеек
 
 
-def _screen_rows():
+def _screen_rows(lattice=None):
+    """Строки экранов: у документа машины — только её экраны; по номеру — вся таблица screens (все решётки)."""
+    if lattice is not None and is_machine(lattice):
+        return machine_screen_rows(lattice)
     p = SCR if os.path.exists(SCR) else None
     if p is None:
         return []
@@ -254,7 +328,7 @@ def bend_line_screens(lattice, dist=SCREEN_DEFAULT_DIST, ci=None, byid=None, gro
     """Экраны у ЦЕНТРАЛЬНЫХ модулей (№3) линеек диполя из BEND_LINE_MODULES модулей встык (продольно-градиентный
     диполь: цепочки sr_trace.link_chains). Источник — центр дуги модуля №3, ось — касательная там (туда летит его
     СИ), экран поперёк на dist, u — горизонталь (плоскость веера). Имя SCR_DP<instance_id модуля>. Кэш по решётке."""
-    key = (int(lattice), float(dist))
+    key = (lat_key(lattice), float(dist))
     if key in _BEND_SCR:
         return _BEND_SCR[key]
     import sr_trace as st
@@ -309,9 +383,9 @@ def live_screen(lattice, screen_id, groups, ci, byid):
     диполя (SCR_DP…) — bend_line_screens; иначе экран ондулятора строится так же, как его рисует сцена кокпита:
     по оси ондулятора-источника (рамка железа) на dist_m строки с тем же screen_id из любой решётки (нет —
     SCREEN_DEFAULT_DIST), размер — из той же строки (нет — 50×50 мм), плоскость поперёк оси. None — не построить."""
-    rows = _screen_rows()
+    rows = _screen_rows(lattice)
     for r in rows:
-        if r.get("lattice_id") == str(lattice) and r.get("screen_id") == screen_id:
+        if r.get("lattice_id") == str(lat_id(lattice)) and r.get("screen_id") == screen_id:
             return next(s for s in load_screens(lattice) if s["sid"] == screen_id)
     if str(screen_id).startswith("SCR_DP"):
         return next((s for s in bend_line_screens(lattice, ci=ci, byid=byid, groups=groups) if s["sid"] == screen_id),
@@ -332,7 +406,7 @@ def live_screen(lattice, screen_id, groups, ci, byid):
 
 def live_context(lattice, screen_id, bends=True):
     """Кэш живого экрана: таблицы машины, геометрия экрана, веера диполей, достающие экран. None — не построить."""
-    key = (int(lattice), str(screen_id), bool(bends))
+    key = (lat_key(lattice), str(screen_id), bool(bends))
     c = _LIVE.get(key)
     if c is None:
         ci, byid = load_lattice(lattice, None)
@@ -378,11 +452,12 @@ _BEND_VIEW = {}               # (решётка, экран, сетка, вел�
 def _bend_traces(lattice, scr, cull=40.0):
     """Траектории цепочек диполей (мягкий край по картам поля), достающих экран, — отсеянные под экран."""
     import sr_trace as st
-    key = (int(lattice), scr["sid"])
+    key = (lat_key(lattice), scr["sid"])
     if key not in _BEND_TRACES:
-        if int(lattice) not in _TRACE_CTX:
-            _TRACE_CTX[int(lattice)] = st.make_context(int(lattice), None, None, 5.0)
-        ctx = _TRACE_CTX[int(lattice)]
+        lk = lat_key(lattice)
+        if lk not in _TRACE_CTX:
+            _TRACE_CTX[lk] = st.make_context(lattice if is_machine(lattice) else int(lattice), None, None, 5.0)
+        ctx = _TRACE_CTX[lk]
         trs = []
         for ic in st._chain_candidates(ctx, scr, cull):
             tr = st._chain_trace(ctx, ic, True)
@@ -399,7 +474,7 @@ def bend_view(lattice, screen_id, mesh=121, quantity="power"):
     один раз на (экран, сетка, величина). «power» — Вт/мм² (footprint_accurate, эффекты extended+fringe);
     «flux» — ф/с/мрад²/0.1%BW на ε_c центрального модуля. Возврат dict(S, extent, peak, [total, n_bend, cu, cv],
     ec, dev, D) или None."""
-    key = (int(lattice), str(screen_id), int(mesh), str(quantity))
+    key = (lat_key(lattice), str(screen_id), int(mesh), str(quantity))
     if key in _BEND_VIEW:
         return _BEND_VIEW[key]
     import sr_trace as st

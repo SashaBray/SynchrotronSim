@@ -148,7 +148,8 @@ def build_geometry(plant, state=None, *, decimate: int = 1) -> dict:
                                          "gap_mm": _gap_of(state, gid, default=5.0)})
     # экраны у ВСЕХ ондуляторов (даже без записи в screens.csv — тогда дефолтная дистанция/размер).
     # Дистанция/размер из таблицы по source_ref==gid, координаты — от ЖИВОГО якоря (совпадает с решёткой).
-    scr = _read_screens()
+    machine = getattr(plant, "machine", None)                # документ машины plant'а (нет — таблицы, как раньше)
+    scr = _read_screens(machine=machine)
     for gid, u in g["undulators"].items():
         sc = scr.get(gid, {})
         dist = float(sc.get("dist") or 0.0) or SCREEN_DEFAULT_DIST
@@ -160,7 +161,7 @@ def build_geometry(plant, state=None, *, decimate: int = 1) -> dict:
                              "axis": [ax[0], ax[1]],
                              "w": float(sc.get("w", 0) or 0), "h": float(sc.get("h", 0) or 0)})
     g["screens"] += _bend_line_screens(g["lattice"], mags if ring is not None and getattr(ring, "mags", None)
-                                       is not None else [])
+                                       is not None else [], machine=machine)
     # СТАРТ решётки/пучка s=0 — в глобальном начале координат (раскладка elegant). Первый элемент в ring.mags
     # (BPM) стоит ПОСЛЕ входного дрейфа DR_01, поэтому стартплоскость кладём на s=0, а не на mags[0].
     if len(g["centers"]) >= 2:
@@ -172,7 +173,7 @@ def build_geometry(plant, state=None, *, decimate: int = 1) -> dict:
     return g
 
 
-def _bend_line_screens(lattice: int, mags) -> List[dict]:
+def _bend_line_screens(lattice: int, mags, machine=None) -> List[dict]:
     """Экраны у центральных модулей (№3) линеек диполя из 5 модулей (`screen_analysis.bend_line_screens`, на
     SCREEN_DEFAULT_DIST по касательной). Берём только те, чей модуль-источник есть в кольце сцены (совпадение
     центра до 1 мм) — фейк-кольцо тестов их не получает. Ошибка/нет таблиц — пусто (сцена без них)."""
@@ -184,7 +185,7 @@ def _bend_line_screens(lattice: int, mags) -> List[dict]:
         if und not in sys.path:
             sys.path.insert(0, und)
         import screen_analysis as sa
-        bs = sa.bend_line_screens(int(lattice), dist=SCREEN_DEFAULT_DIST)
+        bs = sa.bend_line_screens(machine if machine is not None else int(lattice), dist=SCREEN_DEFAULT_DIST)
     except Exception:
         return []
     cen = np.asarray([[float(m.center[0]), float(m.center[1])] for m in mags], float)
@@ -208,10 +209,17 @@ def _table_dicts(name: str, root: Optional[str] = None) -> list:
         return []
 
 
-def _read_screens(root: Optional[str] = None) -> dict:
-    """Экраны из таблицы screens: {source_ref(gid): {dist(м), w,h(м), sid}}. {} если таблицы нет.
+def _read_screens(root: Optional[str] = None, machine=None) -> dict:
+    """Экраны {source_ref(gid): {dist(м), w,h(м), sid}}: у документа машины — её экраны (docs/DATA_PROTOCOL.md);
+    без машины — таблица screens (все решётки, как раньше). {} — экранов нет.
     source_ref — ондулятор-источник; привязываемся по нему, а координаты берём от живого якоря (решётко-незав.)."""
     out: dict = {}
+    if machine is not None:
+        for s in machine.screens:
+            if s.source_ref:
+                out[s.source_ref] = {"dist": float(s.dist) or 0.0, "w": float(s.width), "h": float(s.height),
+                                     "sid": s.screen_id}
+        return out
     try:
         for r in _table_dicts("screens", root):
             src = (r.get("source_ref") or "").strip()

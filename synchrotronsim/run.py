@@ -158,7 +158,7 @@ class Run:
     # ---- создание ---------------------------------------------------------------------------------
     @classmethod
     def create(cls, kind: str, config: Any = None, machine=None, seed=None, source: str = "", note: str = "",
-               root: Optional[str] = None, run_id: Optional[str] = None) -> "Run":
+               root: Optional[str] = None, run_id: Optional[str] = None, machine_ref: Optional[str] = None) -> "Run":
         """Новый прогон: папка, manifest (статус in_progress — прерванный прогон так и останется) и строка индекса.
         machine — synchrotronsim.model.Machine (берутся номер решётки, подпись, отпечаток) или None."""
         root = os.path.abspath(root or PROJECT_ROOT)
@@ -173,7 +173,8 @@ class Run:
         mach = None
         if machine is not None:
             mach = {"lattice_id": machine.lattice_id, "fingerprint": machine.fingerprint,
-                    "label": machine.meta.label if machine.meta else None, "source": machine.source}
+                    "label": machine.meta.label if machine.meta else None, "source": machine.source,
+                    "ref": machine_ref}                  # machine:<id>@<ревизия> — снимок документа в хранилище
         man = {"format": "synchrotronsim.run/1", "run_id": run_id, "kind": kind, "source": source, "note": note,
                "status": "in_progress", "started": _now(), "finished": None, "seed": _jsonable(seed),
                "machine": mach, "config": _jsonable(config), "provenance": provenance(root),

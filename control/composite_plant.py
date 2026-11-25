@@ -61,8 +61,9 @@ class CompositePlant:
 
     def __init__(self, lattice=26, nsl=8, settle_turns=250, meas_noise=1e-7, n_photon=1, gap_mm=5.0,
                  stride=15, disturbance_spec=None, relative_orbit=True, optics_nsl=2,
-                 drift=(1e-3, 1e-2, 3e-2), order=4, tbt_observer=None, optics_observer=None, **tbt_kw):
-        self.tbt = TbtPlant(lattice=lattice, nsl=nsl, settle_turns=settle_turns, meas_noise=meas_noise,
+                 drift=(1e-3, 1e-2, 3e-2), order=4, tbt_observer=None, optics_observer=None, machine=None,
+                 **tbt_kw):
+        self.tbt = TbtPlant(lattice=lattice, nsl=nsl, settle_turns=settle_turns, meas_noise=meas_noise, machine=machine,
                             n_photon=n_photon, gap_mm=gap_mm, stride=stride, disturbance_spec=disturbance_spec,
                             relative_orbit=relative_orbit, observer=tbt_observer, **tbt_kw)
         # Оптика (tune/chroma/adts) — ГЛОБАЛЬНЫЕ величины кольца, тонкая нарезка не нужна: считаем на
@@ -71,6 +72,7 @@ class CompositePlant:
         # алгебра 210 мономов) — грубое кольцо экономит лишь сборку кольца, а матрицы всё равно ~15 мин.
         # ЭТО ОДИН раз: результат кэшируется на диск по отпечатку кольца (resp_/optmodel_*.pkl). Орбита — своим nsl.
         self.optics = OpticsPlant(lattice=lattice, nsl=optics_nsl, observe=OPTICS_OBS, drift_k1=drift[0],
+                                  machine=self.tbt.machine,
                                   drift_k2=drift[1], drift_k3=drift[2], rho=1.0, order=order, gap_mm=gap_mm,
                                   observer=optics_observer)                 # своё аналитич. кольцо (нет гонки за C++)
         self.stride, self.TREV = self.tbt.stride, self.tbt.TREV             # движок читает их для dt

@@ -85,7 +85,22 @@ def _load_dev_kind():
     return out
 
 
-DEV_KIND = _load_dev_kind()
+_DEV_KIND = None
+
+
+def dev_kind():
+    """Ленивая карта kind по устройству: таблица читается при первом обращении, не при импорте модуля
+    (импорт тянется в модель счёта через facility_report/визуализацию — там таблицы не открываются)."""
+    global _DEV_KIND
+    if _DEV_KIND is None:
+        _DEV_KIND = _load_dev_kind()
+    return _DEV_KIND
+
+
+def __getattr__(name):                                   # прежнее имя модуля lte_warmstart.DEV_KIND
+    if name == "DEV_KIND":
+        return dev_kind()
+    raise AttributeError(name)
 
 
 def grouped_magnets(lattice_id=105):
@@ -103,7 +118,7 @@ def grouped_magnets(lattice_id=105):
 
 
 def our_kind(group):
-    return DEV_KIND.get(group[0]["device_type_id"], "other")
+    return dev_kind().get(group[0]["device_type_id"], "other")
 
 
 def load_eff():

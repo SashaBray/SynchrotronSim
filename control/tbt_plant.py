@@ -31,7 +31,6 @@ os.environ.setdefault("SS_SECTOR", "1")
 import numpy as np
 
 import ring_cpp
-import facility_report as fr
 import ring_analysis as ra
 import disturbance as dist
 
@@ -52,7 +51,13 @@ class TbtPlant:
     def __init__(self, lattice=26, nsl=8, n_part=NP, stride=STRIDE, dist_amp=0.3e-6,
                  dist_rho=1.0, meas_noise=0.0, settle_turns=300, seed=1, dist_seed=11, n_photon=8,
                  avg_chunks=9, resp_dims=4, sr=True, disturbance_spec=None, gap_mm=5.0, observer=None,
-                 relative_orbit=False, rf_actuator=False, center_bunch=None, id_pole_nsl=None, nsl_dev=None):
+                 relative_orbit=False, rf_actuator=False, center_bunch=None, id_pole_nsl=None, nsl_dev=None,
+                 machine=None):
+        if machine is None:                                   # машина — документ (docs/DATA_PROTOCOL.md); нет — из хранилища
+            from synchrotronsim.store import open_store
+            machine = open_store().machine(lattice)
+        self.machine = machine
+        lattice = int(machine.lattice_id)
         # срезы сектор/кик-тела по типу устройства: nsl_dev — полный набор (напр. рекомендация nsl_convergence.py),
         # id_pole_nsl — короткий путь «полюса ИД на N срезах»; оба — поверх nsl
         nsl_dev = dict(nsl_dev or {})
@@ -70,7 +75,7 @@ class TbtPlant:
         self._rng = np.random.default_rng(seed)
 
         # --- индексы/источники/K1L из RingModel (его 4D-кольцо) + матрицы отклика 4D-модели
-        model = RingModel(lattice=lattice, nsl=nsl, n_photon=n_photon)
+        model = RingModel(lattice=lattice, nsl=nsl, n_photon=n_photon, machine=machine)
         self.corr = model.corr; self.mon = model.mon; self.quads = model.quads
         self.K1L = np.asarray(model.K1L, float)
         self.hk_ids = list(model.hk_ids); self.vk_ids = list(model.vk_ids)
@@ -89,8 +94,9 @@ class TbtPlant:
         self.mon_ids = [f"ebpm.{j:03d}" for j in range(self.n_mon)]
 
         # --- нелинейное кольцо (6D, СИ+ВЧ): динамика пучка
-        inf = dict(fr.info_of(lattice)); inf["_id"] = lattice
-        self.ring = ring_cpp.CppRing(lattice=lattice, sr=self.sr,
+        from synchrotronsim.machines import info_of
+        inf = info_of(machine)                                # паспорт — из документа машины
+        self.ring = ring_cpp.CppRing(lattice=lattice, sr=self.sr, machine=machine,
             rf={"volt_mv": inf["rf"][0], "harmonic": inf["rf"][1], "phase_deg": PHASE_DEG},
             design_mev=inf["energy_mev"], nsl=nsl, nsl_dev=nsl_dev)
         if resp_dims == 6:                                    # модель контура снята на 6D-равновесии своего кольца
@@ -457,8 +463,8 @@ class TbtPlant:
         """Заполнить state.undulators живыми зазорами по group_id ондуляторов (дефолт self.gap_mm).
         Контуры видят их через StateView.undulators; зазор правится на лету и читается рекордерами."""
         try:
-            import errors as er
-            for g in er.load_groups(self.lattice):
+            from synchrotronsim.machines import groups_of
+            for g in groups_of(self.machine):
                 gid = g.get("group_id")
                 if gid and gid not in state.undulators:
                     state.undulators[gid] = UndulatorConfig(self.gap_mm, name=gid)
