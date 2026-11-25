@@ -5902,6 +5902,193 @@ class TestRevisionStore(unittest.TestCase):
         self.assertTrue(T.same_in_excel("001", "1") and T.same_in_excel("1e-05", "1,00E-05".replace(",", ".")))
 
 
+class TestCavityAndTargets(unittest.TestCase):
+    """ВЧ-резонатор (synchrotronsim.longitudinal + окно «Резонатор ВЧ») и панель «контуры: текущее → цель»:
+    яма из гамильтониана (φs, сепаратриса, δmax, νs) согласована с трекингом ядра; ручки V, φ, Δf — на ходу."""
+
+    def test_bucket_formulas(self):
+        from synchrotronsim.longitudinal import bucket, separatrix, inside
+        import math
+        b = bucket(8.0, 2.6, 6000.0, 1296, 5.12e-5, 165.0, 499.654e6, 499.654e6)
+        self.assertTrue(b["ok"])
+        self.assertAlmostEqual(math.sin(math.radians(b["phis_deg"])), 2.6 / 8.0, places=12)   # sin φs = U0/V
+        self.assertGreater(b["phis_deg"], 90.0)                                   # выше критической: cos φs < 0
+        self.assertAlmostEqual(b["phiu_deg"], 180.0 - b["phis_deg"], places=10)
+        sx, su = separatrix(b)
+        self.assertAlmostEqual(float(np.max(su)), b["delta_max"], delta=1e-4 * b["delta_max"])   # вершина над φs
+        self.assertLess(abs(float(su[0])), 1e-6); self.assertLess(abs(float(su[-1])), 1e-3 * b["delta_max"])
+        self.assertTrue(inside(b, [b["phis_deg"]], [0.0])[0])
+        self.assertFalse(inside(b, [b["phis_deg"]], [1.01 * b["delta_max"]])[0])
+        self.assertFalse(inside(b, [b["phiu_deg"] - 5.0], [0.0])[0])
+        nus = math.sqrt(-1296 * b["eta"] * 8.0 * math.cos(math.radians(b["phis_deg"])) / (2 * math.pi * 6000.0))
+        self.assertAlmostEqual(b["nus"], nus, places=14)
+        b2 = bucket(8.0, 2.6, 6000.0, 1296, 5.12e-5, 165.0, 499.654e6 + 500.0, 499.654e6)
+        self.assertAlmostEqual(b2["delta_s"], -(500.0 / (499.654e6 + 500.0)) / b2["eta"], places=12)   # Δf → δs
+        self.assertFalse(bucket(2.0, 2.6, 6000.0, 1296, 5.12e-5, 165.0, 1.0, 1.0)["ok"])        # V < U0
+
+    def test_derived_parameters(self):
+        """Все параметры окна: исходные → расчётные (периметр, f₀, места для сгустков, шаг, площадь ямы, fs,
+        затухание по Робинсону, σδ₀, σz₀, заряд сгустка); каждый параметр каталога форматируется."""
+        from synchrotronsim.longitudinal import bucket, derived, format_param, PARAMS, C_GAMMA, C_LIGHT
+        import math
+        C, h = 1110.0886, 1296
+        f = h * C_LIGHT / C
+        b = bucket(8.0, 2.6056, 6000.0, h, 5.12e-5, 165.0, f, f)
+        b.update(phi_mean=b["phis_deg"] + 1.0, phi_std=0.4, delta_mean=0.0, delta_std=5e-4, n_part=12, n_inside=12,
+                 n_lost=0, manual_df_hz=0.0, loop_df_hz=0.0)
+        I2 = 2.6056 / (C_GAMMA * 6.0 ** 4 / (2 * math.pi) * 1e3)                          # I₂ ровно под U₀
+        rad = {"I2": I2, "I3": 0.02, "I2_id": 0.2 * I2, "n_id": 38,
+               "damping": {"s": {"tau_turns": 4316.0, "tune": 3.65e-3}}}
+        derived(b, C, rad=rad, current_a=0.2)
+        self.assertAlmostEqual(b["f_rev_hz"] * b["T0_s"], 1.0, places=12)
+        self.assertAlmostEqual(b["f_rev_hz"], C_LIGHT / C, delta=1e-6 * C_LIGHT / C)        # β ≈ 1
+        self.assertEqual(b["n_buckets"], h)
+        self.assertAlmostEqual(b["lambda_rf_m"], C / h, places=9)                         # шаг = C/h
+        self.assertAlmostEqual(b["U0_i2_mev"], 2.6056, places=9)
+        self.assertAlmostEqual(b["Js"], 2 * 6000.0 / (2.6056 * 4316.0), places=12)
+        self.assertAlmostEqual(b["Jx"] + b["Jy"] + b["Js"], 4.0, places=12)                # Робинсон
+        self.assertAlmostEqual(b["fs_hz"], b["nus"] * b["f_rev_hz"], places=9)
+        self.assertAlmostEqual(b["q_bunch_c"] * h / b["T0_s"], 0.2, places=12)            # I = Q·n_b/T₀
+        self.assertAlmostEqual(b["dphi_deg"], 1.0, places=9)
+        # площадь ямы: интеграл сепаратрисы ≈ малое приближение 16·√(…)·α(q) не проверяем, но > прямоугольника
+        self.assertGreater(b["area_evs"], 0.0)
+        self.assertLess(b["area_evs"], 2 * b["delta_max"] * b["width_deg"] / 360.0 / f * 6000e6)
+        self.assertAlmostEqual(b["sz0_m"], C * b["eta"] * b["sdelta0"] / (2 * math.pi * 3.65e-3), places=12)
+        for _g, rows in PARAMS:                                                           # всё отображается
+            for row in rows:
+                self.assertNotEqual(format_param(row[0], b), "—", row[0])
+        self.assertIn("нс", format_param("lambda_rf_m", b))
+
+    def test_loop_targets_rows(self):
+        from types import SimpleNamespace
+        from client.engine import loop_targets
+        st = SimpleNamespace(observables={"ebpm.x": 0, "ebpm.y": 0, "rf.delta": 0, "tune": 0},
+                             refs={"tune.target": np.array([0.23, 0.39])})
+        L = lambda sensor, ref=None: SimpleNamespace(controller=SimpleNamespace(sensor=sensor, ref=ref))
+        rows = loop_targets(st, {"fofb_x": L("ebpm.x"), "rf": L("rf.delta"), "tune": L("tune", "tune.target"),
+                                 "chroma": L("chroma", "chroma.target")})
+        by = {(r["loop"], r["label"]): r for r in rows}
+        self.assertEqual(by[("fofb_x", "орбита x, СКО")]["cur"], "obs.ebpm.x:rms")
+        self.assertEqual(by[("fofb_x", "орбита x, СКО")]["tgt_value"], 0.0)                  # цель — проектная
+        self.assertEqual(by[("rf", "энергия δ̂")]["cur"], "obs.rf.delta:0")
+        self.assertEqual([r["tgt"] for r in rows if r["loop"] == "tune"], ["ref.tune.target:0", "ref.tune.target:1"])
+        self.assertFalse(any(r["loop"] == "chroma" for r in rows))                           # нет наблюдаемой
+        from synchrotronsim import addresses as AD
+        from control import StateView, ExperimentState, Schema
+        s = ExperimentState(Schema([])); s.refs["tune.target"] = np.array([0.23, 0.39])
+        self.assertAlmostEqual(AD.resolve(StateView(s), "ref.tune.target:1"), 0.39)
+        self.assertEqual(AD.meta("ref.tune.target:0").kind, "ref")
+        self.assertTrue(AD.meta("cavity.volt_mv").writable and not AD.meta("cavity.state").writable)
+
+    @unittest.skipUnless(_engine_ext_available() and os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")),
+                         "нет собранного расширения или БД")
+    def test_cavity_live_model(self):
+        """Реальная модель реш. 26: пучок в синхронной фазе; скачок программной фазы на 5° → колебания вокруг φs
+        с амплитудой ~5°; V < U0 — ямы нет."""
+        from client.cockpit import cockpit_experiment
+        from synchrotronsim.simulation import build_session
+        from client import InProcLink
+        from client.engine import EngineThread
+        exp, _ = cockpit_experiment(optics=False)
+        for l in exp.loops:
+            l.enabled = False
+        S = build_session(exp)
+        self.addCleanup(S.close)
+        S.plant.reset(S.state)
+        eng = EngineThread(InProcLink(), S.sch)
+        for _ in range(3):
+            S.sch.step()
+        b = eng._cavity_value("cavity.state")
+        self.assertTrue(b["ok"])
+        self.assertGreater(b["U0_mev"], 1.0)
+        self.assertAlmostEqual(b["U0_i2_mev"] / b["U0_mev"], 1.0, delta=1e-3)               # I₂ изгибов ≡ баланс
+        self.assertAlmostEqual(b["nus_m6"] / b["nus"], 1.0, delta=2e-3)                     # матрица 6D ≡ формула
+        self.assertTrue(1.5 < b["Jx"] < 2.5 and 0.5 < b["Js"] < 1.5)
+        self.assertAlmostEqual(eng._cavity_value("cavity.Ts_turns"), b["Ts_turns"])         # скаляр → график
+        self.assertLess(abs(b["phi_mean"] - b["phis_deg"]), 0.05)                           # равновесие = φs
+        self.assertEqual(b["n_inside"], b["n_part"])
+        eng._command("cavity.phase_deg", b["phase_deg"] + 5.0)
+        ph = []
+        for _ in range(40):                                                                   # 600 оборотов
+            S.sch.step()
+            ph.append(np.mean(np.asarray(eng._cavity_value("cavity.bunch")["phase_deg"]), axis=0))
+        ph = np.concatenate(ph)
+        self.assertAlmostEqual(eng._cavity_value("cavity.phase_deg"), b["phase_deg"] + 5.0)
+        self.assertAlmostEqual(0.5 * float(np.ptp(ph)), 5.0, delta=0.5)                     # амплитуда ≈ скачку
+        self.assertLess(abs(float(np.mean(ph[-int(1 / b['nus']):])) - b["phis_deg"]), 0.5)   # колебания вокруг φs
+        # U₀ — от ТЕКУЩЕЙ машины: развести все ондуляторы (5 → 50 мм) — излучение падает (~14,5 кэВ на ИД)
+        import math
+        import ring_analysis as ra
+        tp = eng._design_plant()
+        u_closed = eng._cavity_value("cavity.state")["U0_mev"]
+        for u in S.state.undulators.values():
+            u.gap_mm = u.gap_target = 50.0
+        S.sch.step()
+        u_open = eng._cavity_value("cavity.state")["U0_mev"]
+        n_id = len(S.state.undulators)
+        self.assertGreater(u_closed - u_open, 0.010 * n_id)
+        self.assertLess(u_closed - u_open, 0.020 * n_id)
+        co = ra.closed_orbit(tp.ring, dims=6)                                                # с нуля, полный Ньютон
+        rf = tp.ring.rf
+        u_co = float(rf["volt_mv"]) * math.sin(math.radians(float(rf["phase_deg"])) + 2 * math.pi *
+                                               float(rf["harmonic"]) * co[4] / tp.ring.rf_circumference())
+        self.assertAlmostEqual(u_open, u_co, delta=1e-6)                                     # < 1 эВ
+        eng._command("cavity.volt_mv", 0.5 * u_open)
+        self.assertFalse(eng._cavity_value("cavity.state")["ok"])
+        S.sch.step()
+        self.assertAlmostEqual(eng._cavity_value("cavity.state")["U0_mev"], u_open, delta=1e-4)   # и без ямы
+        eng._command("cavity.df_hz", 250.0)
+        self.assertEqual(eng._cavity_value("cavity.df_hz"), 250.0)
+
+    def test_windows_offscreen(self):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PySide6.QtWidgets import QApplication
+            from client.windows import CavityWindow, GraphWindow
+            from client.cockpit import ControlPanel
+        except Exception as e:
+            self.skipTest(f"нет Qt: {e}")
+        from client import Snapshot, InProcLink
+        from synchrotronsim.longitudinal import bucket
+        QApplication.instance() or QApplication([])
+        b = bucket(8.0, 2.6, 6000.0, 1296, 5.12e-5, 165.0, 499.654e6, 499.654e6)
+        b.update(manual_df_hz=0.0, loop_df_hz=0.0, phi_mean=b["phis_deg"], phi_std=0.6, delta_mean=0.0, delta_std=1e-3,
+                 n_inside=12, n_part=12)
+        rng = np.random.default_rng(1)
+        bunch = {"phase_deg": b["phis_deg"] + rng.normal(0, 1, (12, 15)), "delta": rng.normal(0, 1e-3, (12, 15))}
+        w = CavityWindow()
+        link = InProcLink(); w.bind_link(link)
+        self.assertFalse(w.b_apply.isEnabled())                                               # в полях ещё нули
+        w.show(); w.activateWindow(); w.sp_v.setFocus(); QApplication.processEvents()
+        w.on_snapshot(Snapshot(values={"cavity.state": b, "cavity.bunch": bunch}, meta={}))
+        self.assertTrue(w.b_apply.isEnabled())
+        self.assertGreater(len(w.c_up.getData()[0]), 100)                                    # сепаратриса нарисована
+        self.assertEqual(len(w.s_now.getData()[0]), 12)
+        self.assertAlmostEqual(w.sp_v.value(), 8.0)
+        self.assertIn("φs", w.info.text())
+        self.assertIn("°", w._rows["phis_deg"][0].text(1))                                   # таблица параметров
+        self.assertEqual(w._rows["circ_m"][0].text(1), "—")                                  # нет периметра — прочерк
+        asked = []
+        w.request_open.connect(lambda k, a: asked.append((k, a)))
+        w._graph_row(w._rows["delta_max"][0])                                                 # двойной клик → график
+        self.assertEqual(asked, [("graph", "cavity.delta_max|100.0|%")])
+        w.sp_v.setValue(6.5); w._apply()
+        msgs = link.pull()
+        self.assertIn(("cavity.volt_mv", 6.5), [(m.addr, m.value) for m in msgs])
+        g = GraphWindow("obs.ebpm.x:rms", ref_value=0.0, scale=1e6, units="мкм")
+        g.on_snapshot(Snapshot(values={"obs.ebpm.x:rms": 2e-6}, meta={"model_time": 1.0}))
+        self.assertEqual(list(g._y), [2.0]); self.assertEqual(list(g._r), [0.0])
+        self.assertEqual(g.params()["ref_value"], 0.0)
+        cp = ControlPanel(link)
+        cp.set_targets([{"loop": "tune", "label": "тюн νx", "cur": "obs.tune:0", "tgt": "ref.tune.target:0",
+                         "tgt_value": None, "scale": 1.0, "units": "", "fmt": "{:.4f}"},
+                        {"loop": "fofb_x", "label": "орбита x, СКО", "cur": "obs.ebpm.x:rms", "tgt": None,
+                         "tgt_value": 0.0, "scale": 1e6, "units": "мкм", "fmt": "{:.3f}"}], lambda *a: None)
+        cp.update_optics({"obs.tune:0": 0.231, "ref.tune.target:0": 0.230})
+        self.assertIn("0.2310", cp._opt_links["obs.tune:0"].text())
+        self.assertIn("0.2300", cp._opt_links["ref.tune.target:0"].text())
+
+
 @unittest.skipUnless(_engine_ext_available() and os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")),
                      "нет собранного расширения или БД")
 class TestProjectEdits(unittest.TestCase):

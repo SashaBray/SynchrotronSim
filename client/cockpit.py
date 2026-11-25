@@ -30,7 +30,7 @@ from . import layout as layoutmod
 ENGINE_META = ("meta.model_time", "meta.wall_time", "meta.speed", "meta.cycle",
                "meta.running", "meta.turn", "meta.alive")
 # размеры окон-подписчиков при открытии
-_WIN_SIZES = {"info": (340, 330), "graph": (480, 320), "point": (400, 380), "screen": (560, 460),
+_WIN_SIZES = {"info": (340, 330), "graph": (480, 320), "point": (400, 380), "screen": (560, 460), "cavity": (1400, 900),
               "orbit_modes": (820, 880)}
 
 
@@ -294,6 +294,50 @@ class ControlPanel(QWidget):
             self._opt_grid.addWidget(vl, r, 1)
         self.box_optics.setVisible(bool(specs))
 
+    def set_targets(self, rows: List[dict], emit):
+        """Контуры: ТЕКУЩЕЕ → ЦЕЛЬ (client.engine.loop_targets): по строке на величину, которую держит контур
+        (компоненты тюна/хроматизма/ADTS, СКО орбиты, энергия). Текущее и цель кликаются → график; «⇄» —
+        один график: текущее и цель пунктиром. Пусто → скрыть."""
+        from .windows import ValueLink, _LINK_CSS
+        for i in reversed(range(self._opt_grid.count())):      # очистить прежние виджеты (пересборка модели)
+            w = self._opt_grid.itemAt(i).widget()
+            if w is not None:
+                w.setParent(None)
+        self._opt_links = {}
+        self.box_optics.setTitle("контуры: текущее → цель")
+        for c, t in enumerate(("", "текущее", "цель", "")):
+            h = QLabel(f"<span style='color:#888'>{t}</span>")
+            self._opt_grid.addWidget(h, 0, c)
+        for r, row in enumerate(rows, start=1):
+            un = row.get("units", "")
+            sc = float(row.get("scale", 1.0))
+            fmt = row.get("fmt", "{:.6g}")
+            lab = QLabel(f"{row['label']} <span style='color:#888'>· {row['loop']}</span>")
+            lab.setTextFormat(Qt.RichText)
+            self._opt_grid.addWidget(lab, r, 0)
+            cur = ValueLink(row["cur"], fmt=fmt, units=un, scale=sc, emit=emit)
+            self._opt_links[row["cur"]] = cur
+            self._opt_grid.addWidget(cur, r, 1)
+            if row.get("tgt"):
+                tg = ValueLink(row["tgt"], fmt=fmt, units=un, scale=sc, emit=emit)
+                self._opt_links[row["tgt"]] = tg
+                self._opt_grid.addWidget(tg, r, 2)
+                ref = row["tgt"]
+            else:
+                v = float(row.get("tgt_value") or 0.0)
+                tl = QLabel(fmt.format(v * sc) + (f" {un}" if un else "") + " <span style='color:#888'>(проект)</span>")
+                tl.setTextFormat(Qt.RichText)
+                tl.setToolTip("у контура нет уставки на доске — цель: проектная величина")
+                self._opt_grid.addWidget(tl, r, 2)
+                ref = repr(v)
+            both = QLabel(f'<a href="graph_ref::{row["cur"]}|{ref}|{sc!r}|{un}" style="{_LINK_CSS}">⇄</a>')
+            both.setTextFormat(Qt.RichText)
+            both.setTextInteractionFlags(Qt.TextBrowserInteraction)
+            both.setToolTip("график: текущее и цель")
+            both.linkActivated.connect(lambda href: emit(*href.split("::", 1)))
+            self._opt_grid.addWidget(both, r, 3)
+        self.box_optics.setVisible(bool(rows))
+
     def update_optics(self, values: dict):
         """Обновить живые значения оптики из снимка (адрес есть в снимке только если подписан)."""
         for addr, vl in self._opt_links.items():
@@ -379,6 +423,7 @@ class Cockpit(QMainWindow):
         self.act_experiment = tb.addAction("Опыт…", self._experiment_dialog)   # точность/модель/контуры + пересборка
         self.act_experiment.setToolTip("опыт, который исполняет модель: правка точности и контуров с пересборкой, "
                                        "открыть/сохранить опыт (JSON)")
+        self.act_cavity = tb.addAction("Резонатор ВЧ", self._open_cavity)  # окно резонатора: яма, фазовый портрет
         self.act_edits = tb.addAction("Правки…", self._edits_dialog)       # журнал правок проекта (этап 4)
         self.act_edits.setToolTip("правки параметров проекта: список, отмена/повтор, пересборка, сохранение ревизией")
         tb.addSeparator()
@@ -532,7 +577,7 @@ class Cockpit(QMainWindow):
             win.request_edit.connect(self.design_edit)
             if getattr(win, "index", -1) >= 0:
                 self._fill_design(win)
-        if isinstance(win, (ScreenWindow, UndulatorInfoWindow)):
+        if isinstance(win, (ScreenWindow, UndulatorInfoWindow)) or hasattr(win, "bind_link"):
             win.bind_link(self.link)
         tw = _ToolWindow(win, win.title(), on_close=lambda w=win: self._on_window_closed(w), parent=self)
         win._toolwin = tw
@@ -574,7 +619,11 @@ class Cockpit(QMainWindow):
         (self.link.watch if on else self.link.unwatch)(addr)
 
     def _open_from_request(self, kind: str, addr: str):
-        if kind == "graph":
+        if kind == "graph" and "|" in addr:               # «адрес|множитель|единицы» — таблица окна резонатора
+            from .windows import GraphWindow
+            a, sc, un = (addr.split("|") + ["1.0", ""])[:3]
+            self.open_window(GraphWindow(a, scale=float(sc or 1.0), units=un or None))
+        elif kind == "graph":
             self._open_graph(addr)
         elif kind == "screen":
             self._open_screen(addr)                       # кнопка «тепловая карта» → окно-экран
@@ -583,6 +632,26 @@ class Cockpit(QMainWindow):
             self._open_point(ax, ay)
         elif kind == "diag":
             self._open_diag(addr)
+        elif kind == "graph_ref":                         # «⇄» панели: текущее и цель на одном графике
+            cur, ref, sc, un = (addr.split("|") + ["", "1.0", ""])[:4]
+            self._open_graph_ref(cur, ref, float(sc or 1.0), un)
+        elif kind == "cavity":
+            self._open_cavity()
+
+    def _open_graph_ref(self, cur: str, ref: str, scale: float = 1.0, units: str = ""):
+        from .windows import GraphWindow
+        try:
+            val = float(ref)
+            self.open_window(GraphWindow(cur, ref_value=val, scale=scale, units=units or None))
+        except ValueError:
+            self.open_window(GraphWindow(cur, ref_addr=ref, scale=scale, units=units or None))
+
+    def _open_cavity(self):
+        from .windows import CavityWindow
+        if (self._desc or {}).get("cavity") is False:
+            self.set_status("у модели нет ВЧ-резонатора")
+            return
+        self.open_window(CavityWindow())
 
     def _open_diag(self, name: str):
         """Стандартный график по имени (`diag.<name>` или `<name>`) → его окно из DIAG_WINDOWS."""
@@ -661,6 +730,8 @@ class Cockpit(QMainWindow):
         n_sens = node(None, "сенсоры")
         if "ebpm.x" in observables:
             node(n_sens, "e-BPM 0 (x×y)", ("point", "obs.ebpm.x:0", "obs.ebpm.y:0"))
+        n_rf = node(None, "ВЧ-резонатор")
+        node(n_rf, "резонатор: параметры, яма, фазовый портрет", ("cavity",))
         n_eng = node(None, "движок")
         for a, t in (("meta.speed", "скорость"), ("meta.model_time", "модельное время"),
                      ("meta.cycle", "цикл")):
@@ -685,6 +756,8 @@ class Cockpit(QMainWindow):
             self._open_point(payload[1], payload[2])
         elif kind == "diag":
             self._open_diag(payload[1])
+        elif kind == "cavity":
+            self._open_cavity()
 
     # ---- такт опроса ----
     def _scene_busy(self) -> bool:
@@ -954,10 +1027,18 @@ class Cockpit(QMainWindow):
         gids = list(D["undulators"])
         self.control.set_undulators(gids)
         self.control.set_loops(D["loops"])               # панель контуров САУ (имя файла логики + вкл/выкл)
-        opt_specs = [tuple(x) for x in D["optics"]]      # оптика кольца (тюн/хроматизм/adts) на панель + мониторинг
-        self.control.set_optics(opt_specs, self._open_from_request)
-        for addr, _, _ in opt_specs:
-            self._sub_session(addr)
+        targets = D.get("targets")                       # контуры: текущее → цель (панель + мониторинг)
+        if targets is not None:
+            self.control.set_targets(targets, self._open_from_request)
+            for row in targets:
+                self._sub_session(row["cur"])
+                if row.get("tgt"):
+                    self._sub_session(row["tgt"])
+        else:                                            # описание без целей (старый вычислитель) — как раньше
+            opt_specs = [tuple(x) for x in D["optics"]]
+            self.control.set_optics(opt_specs, self._open_from_request)
+            for addr, _, _ in opt_specs:
+                self._sub_session(addr)
         for a in ENGINE_META:
             self._sub_session(a)
         for gid in gids:

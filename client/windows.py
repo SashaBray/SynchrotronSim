@@ -23,7 +23,8 @@ from PySide6.QtCore import Qt, Signal, QRectF
 from PySide6.QtGui import QPainterPath
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton,
-                               QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+                               QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from . import addresses as A
 
@@ -278,25 +279,41 @@ class SubscriberWindow(QWidget):
 class GraphWindow(SubscriberWindow):
     KIND = "graph"
 
-    def __init__(self, addr: str, history: int = 600, color: str = _PALETTE[0], title: str = ""):
+    def __init__(self, addr: str, history: int = 600, color: str = _PALETTE[0], title: str = "",
+                 ref_addr: Optional[str] = None, ref_value: Optional[float] = None, scale: float = 1.0,
+                 units: Optional[str] = None):
         m = A.meta(addr)
-        super().__init__(title or f"{m.name}")
+        super().__init__(title or (f"{m.name} и цель" if (ref_addr or ref_value is not None) else f"{m.name}"))
         self.addr = addr
+        self.ref_addr = ref_addr                 # цель контура (адрес уставки) — пунктиром на том же графике
+        self.ref_value = None if ref_value is None else float(ref_value)   # или постоянная цель (0 — проектная)
+        self.scale = float(scale)                # масштаб показа (м → мкм и т.п.)
+        self.units = units
         self.history = int(history)
         self.color = color
         self._t = deque(maxlen=self.history)
         self._y = deque(maxlen=self.history)
+        self._r = deque(maxlen=self.history)
 
         self.plot = _plot()
         self.plot.setTitle(m.name)
         self.plot.showGrid(x=True, y=True, alpha=0.25)
-        self.plot.setLabel("left", m.name, units=m.units or None)
+        un = self.units if self.units is not None else (m.units if self.scale == 1.0 else "")
+        self.plot.setLabel("left", m.name, units=un or None)
         self.plot.setLabel("bottom", "модельное время", units="с")
         self.plot.setDownsampling(mode="peak")          # лёгкий рендер длинной истории
         self.plot.setClipToView(True)
         self.curve = self.plot.plot(pen=pg.mkPen(self.color, width=2), antialias=False)   # без сглаживания: ×2 дешевле
-        self._hover = CurveHover(self.plot, [(self.curve, m.name, lambda t: f"t = {_fmt_num(t)} с",
-                                              lambda v, u=m.units: f"{_fmt_num(v)} {u or ''}")], mode="x")
+        curves = [(self.curve, m.name, lambda t: f"t = {_fmt_num(t)} с", lambda v, u=un: f"{_fmt_num(v)} {u or ''}")]
+        self.ref_curve = None
+        if self.ref_addr or self.ref_value is not None:
+            self.ref_curve = self.plot.plot(pen=pg.mkPen(_PALETTE[1], width=2, style=Qt.DashLine), antialias=False)
+            curves.append((self.ref_curve, "цель", lambda t: f"t = {_fmt_num(t)} с",
+                           lambda v, u=un: f"цель {_fmt_num(v)} {u or ''}"))
+            leg = self.plot.addLegend(offset=(10, 10))
+            leg.addItem(self.curve, "текущее")
+            leg.addItem(self.ref_curve, "цель")
+        self._hover = CurveHover(self.plot, curves, mode="x")
 
         ctl = QHBoxLayout()
         ctl.addWidget(QLabel("история"))
@@ -320,18 +337,27 @@ class GraphWindow(SubscriberWindow):
         self._y = deque(self._y, maxlen=self.history)
 
     def addresses(self) -> List[str]:
-        return [self.addr]
+        return [self.addr] + ([self.ref_addr] if self.ref_addr else [])
 
     def on_snapshot(self, snap) -> None:
         y = _scalar(snap.values.get(self.addr))
         if y is None:
             return
         self._t.append(float(snap.meta.get("model_time", len(self._t))))
-        self._y.append(y)
+        self._y.append(y * self.scale)
         self.curve.setData(list(self._t), list(self._y))
+        if self.ref_curve is not None:
+            r = _scalar(snap.values.get(self.ref_addr)) if self.ref_addr else self.ref_value
+            self._r.append(float("nan") if r is None else r * self.scale)
+            self.ref_curve.setData(list(self._t), list(self._r), connect="finite")
 
     def params(self) -> dict:
-        return {"addr": self.addr, "history": self.history, "color": self.color}
+        d = {"addr": self.addr, "history": self.history, "color": self.color}
+        if self.ref_addr or self.ref_value is not None:
+            d.update(ref_addr=self.ref_addr, ref_value=self.ref_value)
+        if self.scale != 1.0 or self.units is not None:
+            d.update(scale=self.scale, units=self.units)
+        return d
 
 
 # ------------------------------------------------------------------ точка (x,y) со следом
@@ -1247,12 +1273,260 @@ class OrbitModesWindow(SubscriberWindow):
         return {"delta_ppm": self.delta_ppm, "corr": self.corr}
 
 
+# ------------------------------------------------------------------ ВЧ-резонатор: яма, синусоида, фазовый портрет
+class CavityWindow(SubscriberWindow):
+    """Резонатор ВЧ (synchrotronsim.longitudinal): НЕИДЕАЛЬНЫЙ резонатор — амплитуда V, фаза φ, частота f
+    (номинал h·c/C + сдвиг контура ВЧ + ручной Δf). Ручки меняют резонатор на ходу (команды cavity.*), пучок
+    отвечает синхротронными колебаниями.
+      синусоида   — V·sin φ (МВ) на периоде вокруг синхронной фазы, потеря U₀ за оборот, яма [φu, φ2] — где
+                    частицы устойчивы по фазе; точки — фазы, на которые частицы приходят на резонатор;
+      портрет     — (φ, δ): сепаратриса ямы, границы по импульсу δs ± δ_max и по фазе, частицы последнего такта и
+                    след последних тактов.
+    Яма и сепаратриса — гамильтониан продольного движения (без затухания: ~4·10⁻⁴ за оборот)."""
+    KIND = "cavity"
+
+    def __init__(self, trail: int = 40, title: str = ""):
+        super().__init__(title or "Резонатор ВЧ")
+        self.trail = int(trail)
+        self._link = None
+        self._b = None
+        self._design = None                   # первое состояние — проектный резонатор (кнопка «проектные»)
+        self._trail = deque(maxlen=self.trail)
+        self._edited = False
+
+        # ---- ручки
+        self.sp_v = QDoubleSpinBox(); self.sp_v.setRange(0.0, 200.0); self.sp_v.setDecimals(4)
+        self.sp_v.setSingleStep(0.1); self.sp_v.setSuffix(" МВ")
+        self.sp_phi = QDoubleSpinBox(); self.sp_phi.setRange(-360.0, 720.0); self.sp_phi.setDecimals(3)
+        self.sp_phi.setSingleStep(0.5); self.sp_phi.setSuffix(" °")
+        self.sp_df = QDoubleSpinBox(); self.sp_df.setRange(-1e6, 1e6); self.sp_df.setDecimals(2)
+        self.sp_df.setSingleStep(10.0); self.sp_df.setSuffix(" Гц")
+        for sp in (self.sp_v, self.sp_phi, self.sp_df):
+            sp.valueChanged.connect(self._mark_edited)
+            sp.textChanged.connect(self._mark_edited)       # набор с клавиатуры — уже правка (до Enter)
+            sp.setKeyboardTracking(False)
+        self.b_apply = QPushButton("Применить"); self.b_apply.clicked.connect(self._apply)
+        self.b_design = QPushButton("Проектные"); self.b_design.clicked.connect(self._to_design)
+        for b in (self.b_apply, self.b_design):              # до первого состояния модели в полях нули —
+            b.setEnabled(False)                              # «Применить» отправило бы V = 0
+        self.b_design.setToolTip("вернуть амплитуду и фазу, с которыми модель собрана, ручной Δf = 0")
+        form = QFormLayout()
+        form.addRow("амплитуда V", self.sp_v)
+        form.addRow("фаза φ (программная)", self.sp_phi)
+        form.addRow("сдвиг частоты Δf (ручной)", self.sp_df)
+        row = QHBoxLayout(); row.addWidget(self.b_apply); row.addWidget(self.b_design); row.addStretch(1)
+        form.addRow(row)
+        box_ctl = QGroupBox("резонатор (на ходу)")
+        box_ctl.setLayout(form)
+
+        # ---- сведения
+        self.info = QLabel("—")
+        self.info.setTextFormat(Qt.RichText)
+        self.info.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.info.setWordWrap(True)
+        box_info = QGroupBox("яма и пучок")
+        li = QVBoxLayout(box_info); li.addWidget(self.info)
+
+        # ---- синусоида
+        self.p_sin = _plot()
+        self.p_sin.setTitle("V·sin φ: куда приходят частицы")
+        self.p_sin.showGrid(x=True, y=True, alpha=0.25)
+        self.p_sin.setLabel("bottom", "фаза φ", units="°"); self.p_sin.setLabel("left", "прибавка энергии", units="МэВ")
+        self.c_sin = self.p_sin.plot(pen=pg.mkPen(_PALETTE[0], width=2))
+        self.l_u0 = pg.InfiniteLine(angle=0, pen=pg.mkPen(_PALETTE[1], width=1.5, style=Qt.DashLine),
+                                    label="U₀", labelOpts={"position": 0.05, "color": _PALETTE[1]})
+        self.r_sin = pg.LinearRegionItem(movable=False, brush=pg.mkBrush(89, 161, 79, 40))
+        self.l_phis = pg.InfiniteLine(angle=90, pen=pg.mkPen("#555", width=1, style=Qt.DotLine),
+                                      label="φs", labelOpts={"position": 0.92, "color": "#555"})
+        self.s_sin = pg.ScatterPlotItem(size=8, pen=pg.mkPen("#111", width=0.8), brush=pg.mkBrush(_PALETTE[4]))
+        for it in (self.r_sin, self.l_u0, self.l_phis, self.s_sin):
+            self.p_sin.addItem(it)
+        self._hs = CurveHover(self.p_sin, [(self.c_sin, "V·sin φ", lambda x: f"φ = {x:.2f}°",
+                                            lambda y: f"{_fmt_num(y)} МэВ")], mode="x")
+
+        # ---- фазовый портрет
+        self.p_ph = _plot()
+        self.p_ph.setTitle("фазовый портрет (φ, δ) и сепаратриса")
+        self.p_ph.showGrid(x=True, y=True, alpha=0.25)
+        self.p_ph.setLabel("bottom", "фаза φ", units="°"); self.p_ph.setLabel("left", "δ = Δp/p, 10⁻³")
+        self.c_up = self.p_ph.plot(pen=pg.mkPen(_PALETTE[1], width=2))
+        self.c_lo = self.p_ph.plot(pen=pg.mkPen(_PALETTE[1], width=2))
+        pen_b = pg.mkPen(_PALETTE[3], width=1.2, style=Qt.DashLine)
+        self.l_dp = pg.InfiniteLine(angle=0, pen=pen_b, label="δs+δmax", labelOpts={"position": 0.08, "color": _PALETTE[3]})
+        self.l_dm = pg.InfiniteLine(angle=0, pen=pen_b, label="δs−δmax", labelOpts={"position": 0.08, "color": _PALETTE[3]})
+        pen_f = pg.mkPen(_PALETTE[2], width=1.2, style=Qt.DashLine)
+        self.l_f1 = pg.InfiniteLine(angle=90, pen=pen_f, label="φu", labelOpts={"position": 0.95, "color": _PALETTE[2]})
+        self.l_f2 = pg.InfiniteLine(angle=90, pen=pen_f, label="φ2", labelOpts={"position": 0.95, "color": _PALETTE[2]})
+        self.s_tr = pg.ScatterPlotItem(size=3, pen=None, brush=pg.mkBrush(120, 120, 120, 90))
+        self.s_now = pg.ScatterPlotItem(size=8, pen=pg.mkPen("#111", width=0.8), brush=pg.mkBrush(_PALETTE[0]))
+        self.s_sync = pg.ScatterPlotItem(size=12, symbol="+", pen=pg.mkPen("#111", width=2))
+        for it in (self.l_dp, self.l_dm, self.l_f1, self.l_f2, self.s_tr, self.s_now, self.s_sync):
+            self.p_ph.addItem(it)
+        self._hp = CurveHover(self.p_ph, [(self.c_up, "сепаратриса", lambda x: f"φ = {x:.2f}°",
+                                           lambda y: f"δ = {_fmt_num(y)}·10⁻³"),
+                                          (self.c_lo, "сепаратриса", lambda x: f"φ = {x:.2f}°",
+                                           lambda y: f"δ = {_fmt_num(y)}·10⁻³")], mode="x")
+
+        # ---- все параметры системы «резонатор — пучок» (synchrotronsim.longitudinal.PARAMS)
+        from synchrotronsim.longitudinal import PARAMS
+        self.table = QTreeWidget()
+        self.table.setColumnCount(3)
+        self.table.setHeaderLabels(["параметр", "значение", "откуда / формула"])
+        self.table.setRootIsDecorated(True); self.table.setAlternatingRowColors(True)
+        self.table.setToolTip("двойной клик по параметру — график во времени")
+        self._rows = {}                           # ключ → (элемент дерева, множитель, единицы)
+        for group, rows in PARAMS:
+            g = QTreeWidgetItem([group]); f = g.font(0); f.setBold(True); g.setFont(0, f)
+            self.table.addTopLevelItem(g)
+            for key, name, un, sc, _fmt, src, _x in rows:
+                it = QTreeWidgetItem([name, "—", src]); it.setData(0, Qt.UserRole, key)
+                it.setToolTip(2, src)
+                g.addChild(it)
+                self._rows[key] = (it, sc, un)
+            g.setExpanded(True)
+        hd = self.table.header()
+        hd.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        hd.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        hd.setStretchLastSection(True)
+        self.table.itemDoubleClicked.connect(self._graph_row)
+
+        left = QWidget(); ll = QVBoxLayout(left); ll.setContentsMargins(0, 0, 0, 0)
+        ll.addWidget(box_ctl); ll.addWidget(box_info); ll.addWidget(self.table, 1)
+        right = QWidget(); rl = QVBoxLayout(right); rl.setContentsMargins(0, 0, 0, 0)
+        rl.addWidget(self.p_sin, 1); rl.addWidget(self.p_ph, 2)
+        split = QSplitter(Qt.Horizontal); split.addWidget(left); split.addWidget(right)
+        split.setStretchFactor(0, 1); split.setStretchFactor(1, 1); split.setSizes([700, 640])
+        lay = QVBoxLayout(self)
+        lay.addWidget(split)
+
+    def _graph_row(self, item, _col=0):
+        """Двойной клик по строке таблицы → график параметра во времени (адрес cavity.<ключ>)."""
+        key = item.data(0, Qt.UserRole)
+        if not key or key not in self._rows:
+            return
+        _it, sc, un = self._rows[key]
+        self.request_open.emit("graph", f"cavity.{key}|{sc!r}|{un}")
+
+    # ---- связь с движком
+    def bind_link(self, link):
+        self._link = link
+
+    def _mark_edited(self, *_):
+        self._edited = True
+
+    def _send(self, attr, value):
+        if self._link is not None:
+            self._link.command(f"cavity.{attr}", float(value))
+
+    def _apply(self):
+        self._send("volt_mv", self.sp_v.value())
+        self._send("phase_deg", self.sp_phi.value())
+        self._send("df_hz", self.sp_df.value())
+        self._edited = False
+        self._trail.clear()                      # след старого режима не мешает видеть новый
+
+    def _to_design(self):
+        if not self._design:
+            return
+        for sp, v in ((self.sp_v, self._design["V_mv"]), (self.sp_phi, self._design["phase_deg"]), (self.sp_df, 0.0)):
+            sp.blockSignals(True); sp.setValue(float(v)); sp.blockSignals(False)
+        self._apply()
+
+    def addresses(self) -> List[str]:
+        return ["cavity.state", "cavity.bunch"]
+
+    def params(self) -> dict:
+        return {"trail": self.trail}
+
+    # ---- кадр
+    @staticmethod
+    def _wrap(p, c):
+        return c + np.mod(np.asarray(p, float) - c + 180.0, 360.0) - 180.0
+
+    def on_snapshot(self, snap) -> None:
+        b = snap.values.get("cavity.state")
+        bunch = snap.values.get("cavity.bunch")
+        if not isinstance(b, dict):
+            return
+        if self._design is None:
+            self._design = dict(b)
+        self._b = b
+        if not self._edited:                     # ручки показывают резонатор модели, пока их не тронули
+            # (фокус — не правка: первое поле получает фокус при открытии окна и иначе осталось бы нулём)
+            for sp, v in ((self.sp_v, b["V_mv"]), (self.sp_phi, b["phase_deg"]), (self.sp_df, b.get("manual_df_hz", 0.0))):
+                sp.blockSignals(True); sp.setValue(float(v)); sp.blockSignals(False)
+        self.b_apply.setEnabled(True); self.b_design.setEnabled(True)
+        ok = bool(b.get("ok"))
+        c = float(b["phis_deg"]) if ok else float(b["phase_deg"])
+        V, U0 = float(b["V_mv"]), float(b["U0_mev"])
+        x = np.linspace(c - 180.0, c + 180.0, 721)
+        self.c_sin.setData(x, V * np.sin(np.radians(x)))
+        self.l_u0.setValue(U0)
+        if ok:
+            f1, f2 = sorted((float(b["phiu_deg"]), float(b["phi2_deg"])))
+            self.r_sin.setRegion((f1, f2)); self.r_sin.show()
+            self.l_phis.setValue(c); self.l_phis.show()
+            from synchrotronsim.longitudinal import separatrix
+            sx, su = separatrix(b)
+            ds = float(b["delta_s"])
+            self.c_up.setData(sx, su * 1e3)
+            self.c_lo.setData(sx, (2 * ds - su) * 1e3)
+            dm = float(b["delta_max"])
+            self.l_dp.setValue((ds + dm) * 1e3); self.l_dm.setValue((ds - dm) * 1e3)
+            self.l_f1.setValue(f1); self.l_f2.setValue(f2)
+            self.s_sync.setData([c], [ds * 1e3])
+            for it in (self.l_dp, self.l_dm, self.l_f1, self.l_f2, self.s_sync):
+                it.show()
+        else:
+            self.r_sin.hide(); self.l_phis.hide()
+            self.c_up.setData([], []); self.c_lo.setData([], [])
+            for it in (self.l_dp, self.l_dm, self.l_f1, self.l_f2, self.s_sync):
+                it.hide()
+        if isinstance(bunch, dict) and bunch.get("phase_deg") is not None:
+            ph = np.asarray(bunch["phase_deg"], float); dl = np.asarray(bunch["delta"], float)
+            good = np.isfinite(ph) & np.isfinite(dl)
+            ph, dl = np.where(good, ph, np.nan), np.where(good, dl, np.nan)
+            pw = self._wrap(ph, c)
+            self._trail.append((pw[:, :-1].ravel(), dl[:, :-1].ravel()))
+            last_p, last_d = pw[:, -1], dl[:, -1]
+            m = np.isfinite(last_p)
+            self.s_sin.setData(last_p[m], V * np.sin(np.radians(last_p[m])))
+            self.s_now.setData(last_p[m], last_d[m] * 1e3)
+            if self._trail:
+                tp = np.concatenate([t[0] for t in self._trail]); td = np.concatenate([t[1] for t in self._trail])
+                k = np.isfinite(tp) & np.isfinite(td)
+                self.s_tr.setData(tp[k], td[k] * 1e3)
+        self.info.setText(self._info_html(b))
+        from synchrotronsim.longitudinal import format_param
+        for key, (it, _sc, _un) in self._rows.items():
+            it.setText(1, format_param(key, b))
+
+    @staticmethod
+    def _info_html(b) -> str:
+        """Короткая сводка над таблицей: главное — есть ли яма, синхронная фаза, νs, пучок в яме."""
+        g = lambda k, f="{:.4g}", s=1.0: (f.format(float(b[k]) * s) if b.get(k) is not None else "—")
+        rows = [f"f = <b>{g('freq_hz', '{:.6f}', 1e-6)}</b> МГц · V = <b>{g('V_mv')}</b> МВ · φ<sub>прог</sub> = "
+                f"{g('phase_deg', '{:.3f}')}° · U₀ = <b>{g('U0_mev', '{:.2f}', 1e3)}</b> кэВ/об"]
+        if b.get("ok"):
+            rows.append(f"φs = <b>{g('phis_deg', '{:.3f}')}°</b> · νs = {g('nus', '{:.4e}')} "
+                        f"(период {g('Ts_turns', '{:.0f}')} об.) · аксептанс ±{g('delta_max', '{:.3f}', 100)} %")
+        else:
+            rows.append(f"<span style='color:#a00'><b>ямы нет:</b> {b.get('reason', '')}</span>")
+        if b.get("n_part"):
+            lost = int(b.get("n_lost", 0) or 0)
+            rows.append(f"пучок: в яме <b>{int(b.get('n_inside', 0) or 0)}</b> из {int(b['n_part'])}"
+                        + (f" · <span style='color:#a00'>потеряно {lost}</span>" if lost else "")
+                        + (f" · ⟨φ⟩ − φs = {g('dphi_deg', '{:+.3f}')}° · амплитуда {g('amp_deg', '{:.3f}')}°"
+                           if b.get("dphi_deg") is not None else ""))
+        return "<br>".join(rows)
+
+
 # стандартные графики (дерево «стандартные графики» → окно по имени diag.<name>)
 DIAG_WINDOWS = {"orbit_modes": OrbitModesWindow}
 
 WINDOW_REGISTRY = {c.KIND: c for c in (GraphWindow, PointWindow, InfoWindow, ScreenWindow,
                                        ScreenInfoWindow, UndulatorInfoWindow, SensorInfoWindow,
-                                       OrbitModesWindow)}
+                                       OrbitModesWindow, CavityWindow)}
 
 
 _ADDR_PARAMS = ("addr", "x_addr", "y_addr")                # параметры окон, в которых лежат адреса

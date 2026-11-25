@@ -23,6 +23,7 @@
 feed-down квадруполей по фикс. пространственному паттерну (амплитуда статична/медленна); опц. впрыск
 пользователя через state.dynamics (режим 5).
 """
+import math
 import os
 from collections import deque
 
@@ -108,6 +109,16 @@ class TbtPlant:
         self.F0 = float(self.ring.rf_frequency())             # номинал f_RF = h·c/C, Гц
         self.rf_ids = ["rf.freq"] if rf_actuator else []
         self._rf_key = (0.0, 0.0); self.rf_df = 0.0; self.rf_dC = 0.0   # применённые Δf (Гц) и ΔC (м)
+        self.rf_manual_df = 0.0                               # ручной сдвиг частоты резонатора, Гц (окно «Резонатор ВЧ»)
+        # потеря энергии за оборот U₀ (МэВ) — энергобаланс равновесной частицы на резонаторе (конец пролёта):
+        # V·sin(φ + 2πh·t_co/C_RF) = U₀ (δ_co ≈ 0); от ВЧ не зависит — для ямы при любых V, φ, f
+        self.U0_mev = float(self._rf0["volt_mv"]) * math.sin(math.radians(float(self._rf0["phase_deg"])) +
+                                                             2.0 * math.pi * float(self._rf0["harmonic"]) *
+                                                             float(self.CO[4]) / float(self.ring.rf_circumference()))
+        self._u0_co = np.asarray(self.CO, float).copy()       # орбита последнего решения U₀ (тёплый старт)
+        self._u0_key = None                                   # машина, для которой решён U₀ (None — сборочная)
+        self.long_tbt = None                                  # (частица, оборот, [t, δ]) последнего такта — портрет ВЧ
+        self.long_rf = None                                   # (φ_прог, h, C_RF) ВЧ, с которым трекался этот такт
         self.TREV = float(inf.get("t_rev", 0.0)) or self._trev_from_ring()
         # ондуляторы: полюса устройства (s-порядок ↔ group_id) — им живой зазор масштабирует изгиб (BSCALE); якорь —
         # выходной полюс (остаточный орбитный кик от неидеального замыкания I1, привязка сцены)
@@ -204,16 +215,113 @@ class TbtPlant:
             self.ring.rf = dict(self._rf0); self.ring._send_rf()
         else:
             hc = float(self._rf0["harmonic"]) * 2.99792458e8
-            self.ring.set_rf(freq_hz=hc / (hc / (self.F0 + df) - dC))
+            self.ring.rf = dict(self._rf0, freq_hz=hc / (hc / (self.F0 + df) - dC)); self.ring._send_rf()
         self.rf_df, self.rf_dC = float(df), float(dC)
 
     def _apply_rf(self, state):
         """Частота ВЧ (актуатор rf.freq) + возмущение длины кольца → резонатор. ΔC зовём РАЗ за такт (walk)."""
         df = float(state.actual["rf.freq"] + state.dynamics["rf.freq"]) if self.rf_ids else 0.0
+        df += self.rf_manual_df                                   # ручной сдвиг частоты (поверх контура ВЧ)
         dC = self.dist.circumference(self._t, self._dt) if self.dist is not None else 0.0
         if (df, dC) != self._rf_key:
             self._set_rf(df, dC)
             self._rf_key = (df, dC)
+
+    def set_cavity(self, volt_mv=None, phase_deg=None, df_hz=None):
+        """Неидеальный резонатор на ходу: амплитуда V (МВ), фаза φ (град), ручной сдвиг частоты Δf (Гц, поверх
+        контура ВЧ). Применяется на следующем шаге (команда RF ядру, без пересборки); пучок отвечает синхротронными
+        колебаниями вокруг новой синхронной точки."""
+        if volt_mv is not None:
+            self._rf0["volt_mv"] = float(volt_mv)
+        if phase_deg is not None:
+            self._rf0["phase_deg"] = float(phase_deg)
+        if df_hz is not None:
+            self.rf_manual_df = float(df_hz)
+        self._rf_key = None                                       # заставить _apply_rf переслать ВЧ
+
+    def u0_now(self, max_iter=3, eps=1e-8, step_tol=1e-7):
+        """Потеря энергии за оборот U₀ (МэВ) ТЕКУЩЕЙ машины — зазоры ондуляторов (один на 5 мм ≈ 14,5 кэВ/об на
+        реш. 26), кики, ряби поля, частота ВЧ (сдвиг энергии δs меняет излучение). Энергобаланс одного оборота
+        частицы у замкнутой 6D-орбиты: удар резонатора в ядре точный по полной энергии (конец пролёта), поэтому
+            U₀ = V·sin(φ + 2πh·t_вых/C_RF) − [E(δ_вых) − E(δ_вх)],  E(δ) = √((E₀(1+δ))² + m²).
+        На самой орбите скобка = 0 и это прежняя формула V·sin φ(t_co). Пересчёт — только когда машина в кольце
+        сменилась; точка — прежняя орбита, уточняемая шагом Ньютона (тот же оборот 7 частиц, ~10 мс; после смены
+        зазора — 2–3 шага). Точка нужна лишь близкой к орбите (излучение зависит от δ и поперечной орбиты, не от t):
+        шаг < step_tol = 1e-7 даёт ошибку U₀ < 0,1 эВ, а пол шума 6D-орбиты ~1e-10…1e-9 м. Без ямы (V ≤ U₀) 6D-орбиты
+        нет: шаг расходится и не делается, баланс берётся у прежней
+        орбиты — это по-прежнему потеря на излучение текущей машины."""
+        last = self._last_kick
+        rf = self.ring.rf
+        key = ((tuple(sorted(last[0].items())), tuple(sorted(last[1].items())), last[2]) if last is not None else None,
+               tuple(sorted((getattr(self, "_bs_applied", None) or {}).items())),
+               float(rf["volt_mv"]), float(rf["phase_deg"]), float(self.ring.rf_circumference()))
+        if key == self._u0_key:
+            return self.U0_mev
+        self._u0_key = key
+        V, h = float(rf["volt_mv"]), float(rf["harmonic"])
+        p0, crf = math.radians(float(rf["phase_deg"])), float(self.ring.rf_circumference())
+        E0, m2 = float(self.ring.design_mev), 0.51099895069 ** 2
+        Etot = lambda d: math.sqrt((E0 * (1.0 + float(d))) ** 2 + m2)
+        z = self._u0_co.copy()
+        u = None
+        try:
+            for _ in range(max(1, int(max_iter))):
+                pts = [z] + [z + eps * e for e in np.eye(6)]
+                fin = np.asarray(self.ring.track(pts), float)[:, :6]
+                u = V * math.sin(p0 + 2.0 * math.pi * h * fin[0, 4] / crf) - (Etot(fin[0, 5]) - Etot(z[5]))
+                J = ((fin[1:] - fin[0]) / eps).T
+                step = np.linalg.solve(J - np.eye(6), fin[0] - z)
+                # численная защита Ньютона (не физика): нет неподвижной точки — шаг уходит на метры/NaN
+                if not np.all(np.isfinite(step)) or float(np.max(np.abs(step))) > 0.1:
+                    break
+                z = z - step
+                if float(np.max(np.abs(step))) < step_tol:
+                    break
+        except Exception:                                         # noqa: BLE001
+            pass
+        if u is not None and math.isfinite(u):
+            self.U0_mev, self._u0_co = float(u), z
+        try:
+            rad = self._rad_geometry()
+            # продольная мода матрицы оборота 6D (4-точечная схема, ra.FD_EPS): τs и νs совпадают со спадом
+            # амплитуды при трекинге ~1 % и от шага не зависят. Поперечные моды матрицы здесь НЕ берём: их декременты
+            # ~4·10⁻⁴ за оборот тонут в шуме разностных производных (τx «гуляет» от шага в разы) — Jx, Jy окно
+            # получает по теореме Робинсона для плоского кольца (longitudinal.derived).
+            _, M = ra.one_turn_matrix(self.ring, orbit=self._u0_co)
+            if np.all(np.isfinite(M)):
+                rad["damping"] = {"s": ra.damping_from_matrix(M, float(self.ring.circumference))["s"]}
+            self._rad = rad
+        except Exception:                                         # noqa: BLE001
+            self._rad = None
+        return self.U0_mev
+
+    def radiation_now(self):
+        """Излучение и затухание ТЕКУЩЕЙ машины (окно «Резонатор ВЧ»): I₂, I₃ изгибов (в т.ч. полюсов ИД — I2_id) при
+        текущих зазорах, число ИД, продольная мода матрицы оборота 6D (`ra.damping_from_matrix`: τs оборотов, νs).
+        Пересчёт вместе с U₀ — только при смене машины."""
+        self.u0_now()
+        return getattr(self, "_rad", None)
+
+    def _rad_geometry(self):
+        """I₂ = Σθ²/L, I₃ = Σ|θ|³/L² по изгибам кольца (секторные тела, как ring_matrix.radiation_integrals) с
+        текущим масштабом полюсов ИД (жёсткий край, как в ядре); I2_id — вклад полюсов ИД."""
+        bs = getattr(self, "_bs_applied", None) or {}
+        poles = {j for p in self._und_poles.values() for j in p}
+        if getattr(self, "_bends", None) is None:
+            # изгибы (номер, θ проектный, L) — один раз: `ring.mags` после смены киков пересобирается (~0,5 с), а
+            # проектная кривизна секторных тел от киков не зависит; зазоры ИД — масштабом полюсов ниже
+            th0 = lambda m: float((getattr(m, "_bend0", None) or (getattr(m, "theta0", 0.0),))[0] or 0.0)  # без BSCALE
+            self._bends = [(j, th0(m), float(getattr(m, "Leff", 0.0) or 0.0))
+                           for j, m in enumerate(self.ring.mags)
+                           if getattr(m, "sector", False) and float(getattr(m, "Leff", 0.0) or 0.0) > 0 and th0(m)]
+        I2 = I3 = I2id = 0.0
+        for j, th, L in self._bends:
+            th *= float(bs.get(j, 1.0))
+            i2 = th * th / L
+            I2 += i2; I3 += abs(th) ** 3 / L ** 2
+            if j in poles:
+                I2id += i2
+        return {"I2": I2, "I3": I3, "I2_id": I2id, "n_id": len(self._und_poles)}
 
     def _build_rf_resp(self, observables, eps=5.0):
         """Отклик наблюдаемых на Δf (центральная разность ±eps Гц) на 6D-равновесии СОБСТВЕННОГО кольца (СИ+ВЧ):
@@ -434,6 +542,9 @@ class TbtPlant:
         """Провести пучок stride оборотов; накопить пооборотный центроид (фазовый портрет)."""
         adv = np.asarray(self.ring.track_tbt(self.bunch.tolist(), self.stride))   # (NP, stride+1, 6)
         self.bunch = adv[:, self.stride, :]
+        self.long_tbt = adv[:, 1:, 4:6].copy()                # продольные (t, δ) по оборотам — портрет ВЧ
+        rf = self.ring.rf
+        self.long_rf = (float(rf["phase_deg"]), float(rf["harmonic"]), float(self.ring.rf_circumference()))
         cen = np.mean(adv[:, 1:, :], axis=0)                  # центроид по частицам, обороты 1..stride
         self.centroid_tbt.extend(cen[:, [0, 1, 2, 3]].tolist())
         self.turn += self.stride

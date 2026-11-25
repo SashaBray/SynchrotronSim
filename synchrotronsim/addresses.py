@@ -47,8 +47,10 @@ W_INFO = "info"       # составной (инфо-панель)
 AREAS = {
     "obs": "наблюдаемая", "act": "актуатор и его привод", "undulator": "ондулятор", "optics": "линейная оптика",
     "element": "магнит", "loop": "контур", "meta": "мета прогона", "screen": "экран", "diag": "стандартный график",
-    "rec": "ряд рекордера", "design": "параметр проекта",
+    "rec": "ряд рекордера", "design": "параметр проекта", "ref": "уставка контура", "cavity": "ВЧ-резонатор",
 }
+CAVITY_WRITABLE = ("volt_mv", "phase_deg", "df_hz")         # ручки резонатора (окно «Резонатор ВЧ»)
+CAVITY_UNITS = {"volt_mv": "МВ", "phase_deg": "°", "df_hz": "Гц", "freq_hz": "Гц", "state": "", "bunch": ""}
 DRIVE_FIELDS = ("slew", "lag_tau", "res", "act", "odz_lo", "odz_hi")
 UND_ATTRS = ("gap", "gap_target", "K", "B0", "orbit_kick", "slew")
 OPTICS_AT = {"beta_x": "betax", "beta_y": "betay", "alpha_x": "alphax",
@@ -213,6 +215,9 @@ def resolve(view, addr: str, *, loops: Optional[Dict] = None, meta: Optional[Dic
             return _resolve_loop(loops, p)
         if p.area == "meta":
             return _ser(meta.get(p.obj)) if meta else None
+        if p.area == "ref":                                # уставка контура (state.refs): массив или скаляр
+            arr = view.ref(p.obj)
+            return None if arr is None else _reduce(arr, p.red)
     except (KeyError, IndexError, ValueError, AttributeError, TypeError):
         return None
     return None                                            # screen / diag / rec — не с доски
@@ -402,6 +407,20 @@ def meta(addr: str) -> AddrMeta:
     if k == "rec":
         nm, un = _rec_meta(p.obj)
         return AddrMeta(a, nm, un, W_GRAPH, k, owner="recorder")
+    if k == "ref":
+        base = p.obj.rsplit(".", 1)[0]
+        nm, un = _OBS_NAMES.get(base, (base, ""))
+        return AddrMeta(a, f"цель · {nm}" + (f" · {p.red}" if p.red else ""), un, W_GRAPH, k)
+    if k == "cavity":
+        title = {"volt_mv": "амплитуда V", "phase_deg": "фаза φ", "df_hz": "сдвиг частоты Δf (ручной)",
+                 "freq_hz": "частота f", "state": "состояние резонатора", "bunch": "пучок на резонаторе"}
+        from .longitudinal import PARAM_INDEX            # параметры окна «Резонатор ВЧ» (единицы — СИ, как в state)
+        if p.obj not in title and p.obj in PARAM_INDEX:
+            title[p.obj] = PARAM_INDEX[p.obj][1]
+        return AddrMeta(a, f"резонатор · {title.get(p.obj, p.obj)}", CAVITY_UNITS.get(p.obj, ""),
+                        W_INFO if p.obj in ("state", "bunch") else W_GRAPH, k,
+                        writable=p.obj in CAVITY_WRITABLE, owner="engine",
+                        shape="info" if p.obj in ("state", "bunch") else "scalar")
     if k == "design":
         from .edits import UNITS, TITLES, EDITABLE
         return AddrMeta(a, f"{p.obj} · {TITLES.get(p.attr, p.attr)} (проект)", UNITS.get(p.attr, ""), W_SCALAR, k,

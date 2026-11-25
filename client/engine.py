@@ -53,6 +53,7 @@ class EngineThread(threading.Thread):
         self._cycle = 0
         self._step = 0                                # счётчик базовых тактов (для кадра раз в publish_every)
         self._seq = 0
+        self._cav_cache = None                        # (ключ такта и ВЧ, состояние резонатора) — один расчёт на кадр
         self._wall_run = 0.0                 # накопленные стенные секунды шагов — знаменатель скорости
         self._screens: Dict[str, dict] = {}  # addr → {"area","res"} — настройки экрана (set_screen)
         self._screen_val: Dict[str, dict] = {}   # addr → последний посчитанный результат экрана
@@ -184,6 +185,13 @@ class EngineThread(threading.Thread):
                     self._mark_unknown(addr)
             elif kind == "design":                        # правка ПРОЕКТА (этап 4): горячая — ручкой ядра
                 self._design_edit(value)
+            elif kind == "cavity":                        # ручки резонатора: cavity.volt_mv | phase_deg | df_hz
+                obj = addr.split(".", 1)[1]
+                tp = self._design_plant()
+                if obj in A.CAVITY_WRITABLE and hasattr(tp, "set_cavity"):
+                    tp.set_cavity(**{obj: float(value)})
+                else:
+                    self._mark_unknown(addr)
             elif kind == "act":                           # привод актуатора: act.<aid>.<поле>
                 p = A.parse(addr)
                 aid, fld = p.obj, p.attr
@@ -240,6 +248,81 @@ class EngineThread(threading.Thread):
         except Exception as ex:                            # noqa: BLE001 — в мету, не ронять поток
             self._design = dict(self._design or {}, error=f"{type(ex).__name__}: {ex}")
 
+    # ---- ВЧ-резонатор (synchrotronsim.longitudinal): параметры, яма, пучок на резонаторе
+    def _cavity_bucket(self):
+        tp = self._design_plant()
+        ring = getattr(tp, "ring", None)
+        rf = getattr(ring, "rf", None)
+        if not rf or not hasattr(tp, "U0_mev"):
+            return None
+        from synchrotronsim.longitudinal import bucket
+        opt = getattr(self.state, "optics", None)
+        rf0 = getattr(tp, "_rf0", None) or rf               # заданные V, φ (ядру уходят шагом позже)
+        u0 = float(tp.u0_now()) if hasattr(tp, "u0_now") else float(tp.U0_mev)   # U₀ текущей машины (зазоры ИД…)
+        b = bucket(float(rf0["volt_mv"]), u0, float(ring.design_mev), float(rf0["harmonic"]),
+                   float(getattr(opt, "alphac", 0.0) or 0.0), float(rf0["phase_deg"]), float(ring.rf_frequency()),
+                   float(tp.F0))
+        b["manual_df_hz"] = float(getattr(tp, "rf_manual_df", 0.0))
+        b["loop_df_hz"] = float(getattr(tp, "rf_df", 0.0)) - b["manual_df_hz"]
+        return b
+
+    def _cavity_value(self, addr: str):
+        from synchrotronsim.longitudinal import particle_phase_deg, inside
+        obj = addr.split(".", 1)[1]
+        tp = self._design_plant()
+        try:
+            b = self._cavity_bucket()
+            if b is None:
+                return None
+            if obj == "volt_mv":
+                return b["V_mv"]
+            if obj == "phase_deg":
+                return b["phase_deg"]
+            if obj == "df_hz":
+                return b["manual_df_hz"]
+            if obj == "freq_hz":
+                return b["freq_hz"]
+            L = getattr(tp, "long_tbt", None)
+            ph = d = None
+            if L is not None and len(L):                   # фаза — по ВЧ, с которым такт трекался
+                p0, hh, crf = getattr(tp, "long_rf", None) or (b["phase_deg"], b["h"], b["c_rf"])
+                ph = particle_phase_deg(L[:, :, 0], p0, hh, crf)
+                d = L[:, :, 1]
+            if obj == "bunch":
+                if ph is None:
+                    return None
+                return {"phase_deg": np.asarray(ph, float), "delta": np.asarray(d, float),
+                        "turn": int(getattr(tp, "turn", 0)), "alive": bool(getattr(tp, "alive", True))}
+            ck = (int(getattr(tp, "turn", 0)), id(L), b["V_mv"], b["phase_deg"], b["freq_hz"], b["U0_mev"],
+                  b["alphac"], id(getattr(tp, "_rad", None)))
+            if self._cav_cache is not None and self._cav_cache[0] == ck:
+                out = self._cav_cache[1]
+            else:
+                out = dict(b)
+                if ph is not None:                         # пучок — последний оборот такта, живые частицы
+                    p, dd = ph[:, -1], d[:, -1]
+                    ok = np.isfinite(p) & np.isfinite(dd)
+                    out.update(n_part=int(len(p)), n_lost=int(np.sum(~ok)))
+                    if np.any(ok):
+                        p, dd = p[ok], dd[ok]
+                        out.update(phi_mean=float(np.mean(p)), phi_std=float(np.std(p)),
+                                   delta_mean=float(np.mean(dd)), delta_std=float(np.std(dd)),
+                                   n_inside=int(np.sum(inside(b, p, dd))))
+                    else:
+                        out["n_inside"] = 0
+                from synchrotronsim.longitudinal import derived
+                rad = tp.radiation_now() if hasattr(tp, "radiation_now") else None
+                P = getattr(getattr(tp, "_und_sr", None), "P", None)     # ток — допущение undulator_sr.P
+                derived(out, float(tp.ring.circumference), rad=rad,
+                        current_a=float(P.I) if P is not None and getattr(P, "I", None) else None)
+                self._cav_cache = (ck, out)
+            if obj == "state":
+                return out
+            v = out.get(obj)                               # скаляр каталога → ряд во времени (график)
+            return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+        except Exception:                                  # noqa: BLE001 — окно резонатора опционально
+            return None
+
     def _design_value(self, addr: str):
         """Значение `design.<instance_id>.<столбец>` из машины модели (ячейка строки; NaN — пусто → None)."""
         from synchrotronsim import addresses as AD
@@ -290,6 +373,8 @@ class EngineThread(threading.Thread):
                 values[a] = self._diag_value(a)
             elif A.kind_of(a) == "design":
                 values[a] = self._design_value(a)
+            elif A.kind_of(a) == "cavity":
+                values[a] = self._cavity_value(a)
             else:
                 values[a] = A.resolve(view, a, loops=self.sch.loops, meta=meta)
         self.link.publish(Snapshot(values=values, meta=meta))
@@ -604,6 +689,39 @@ def read_screen_ids(machine=None) -> list:
         return []
 
 
+def loop_targets(state, loops) -> list:
+    """Строки «контур: текущее → цель» для панели: [{loop, label, cur, tgt, tgt_value, scale, units}]. Текущее —
+    наблюдаемая-датчик контура (компоненты тюна/хроматизма/ADTS, СКО орбиты, энергия δ̂), цель — уставка контура
+    на доске (`ref.<имя>`) или ноль, если уставки нет (проектная орбита / энергия)."""
+    obs = getattr(state, "observables", {}) or {}
+    refs = getattr(state, "refs", {}) or {}
+    out = []
+    for name, spec in (loops or {}).items():
+        ctrl = getattr(spec, "controller", None)
+        sensor = getattr(ctrl, "sensor", None)
+        ref = getattr(ctrl, "ref", None)
+        if not sensor or sensor not in obs:
+            continue
+        has_ref = bool(ref) and ref in refs
+        if sensor in OPTICS_COMPONENTS:
+            for i, (addr, label) in enumerate(OPTICS_COMPONENTS[sensor]):
+                out.append(dict(loop=name, label=label, cur=addr, tgt=f"ref.{ref}:{i}" if has_ref else None,
+                                tgt_value=None if has_ref else 0.0, scale=1.0, units="", fmt="{:.4f}"))
+        elif sensor in ("ebpm.x", "ebpm.y"):
+            pl = sensor[-1]
+            out.append(dict(loop=name, label=f"орбита {pl}, СКО", cur=f"obs.{sensor}:rms",
+                            tgt=f"ref.{ref}:rms" if has_ref else None, tgt_value=None if has_ref else 0.0,
+                            scale=1e6, units="мкм", fmt="{:.3f}"))
+        elif sensor == "rf.delta":
+            out.append(dict(loop=name, label="энергия δ̂", cur="obs.rf.delta:0", tgt=f"ref.{ref}:0" if has_ref else None,
+                            tgt_value=None if has_ref else 0.0, scale=1e6, units="ppm", fmt="{:.2f}"))
+        else:
+            out.append(dict(loop=name, label=f"{sensor}, СКО", cur=f"obs.{sensor}:rms",
+                            tgt=f"ref.{ref}:rms" if has_ref else None, tgt_value=None if has_ref else 0.0,
+                            scale=1.0, units="", fmt="{:.6g}"))
+    return out
+
+
 def describe_session(plant, state, sch, exp=None) -> dict:
     """Описание собранного сеанса для интерфейса: опыт, геометрия сцены, ондуляторы, контуры, оптика, наблюдаемые,
     экраны, машина. Только числа и строки — уходит по сети как есть."""
@@ -616,5 +734,7 @@ def describe_session(plant, state, sch, exp=None) -> dict:
             "geometry": geom, "undulators": list(getattr(state, "undulators", {}) or {}),
             "loops": loops_info(sch.loops), "optics": optics_specs(state),
             "observables": sorted(getattr(state, "observables", {}) or {}), "screens": scr,
+            "targets": loop_targets(state, sch.loops),
+            "cavity": bool(hasattr(getattr(plant, "tbt", None) or plant, "set_cavity")),
             "machine": ({"lattice_id": int(m.lattice_id), "fingerprint": m.fingerprint, "source": str(m.source)}
                         if m is not None else None)}
