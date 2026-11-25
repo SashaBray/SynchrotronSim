@@ -3842,8 +3842,8 @@ class TestClientCockpitOffscreen(unittest.TestCase):
         self.assertNotIn("element.Q1.k2", iq.addresses())
         self.assertNotIn("element.Q1.theta0", iq.addresses())
         ic = InfoWindow("C1", kind="corrector", aids=["corr.000.hkick", "corr.000.vkick"])
-        self.assertIn("actual.corr.000.hkick", ic.addresses())      # корректор: живые H/V кики
-        self.assertIn("actual.corr.000.vkick", ic.addresses())
+        self.assertIn("act.corr.000.hkick", ic.addresses())         # корректор: живые H/V кики (канон. act.*, шаг 4)
+        self.assertIn("act.corr.000.vkick", ic.addresses())
         rt = make_window(ic.to_dict())                              # сериализация сохраняет kind/aids
         self.assertEqual((rt.kind, rt.aids), ("corrector", ["corr.000.hkick", "corr.000.vkick"]))
 
@@ -5535,6 +5535,296 @@ class TestExperimentAndSimulation(unittest.TestCase):
         eng._command("loop.fofb_x.gain", 0.25)
         self.assertEqual(sch.loops["fofb_x"].controller.params["gain"], 0.25)
         self.assertIsNone(eng._unknown)
+
+
+class TestCockpitOnExperiment(unittest.TestCase):
+    """Клиент на библиотеке: кокпит собирает модель ПО ОПЫТУ (`cockpit_experiment` / JSON / fb:N), окно «Опыт»
+    правит точность и контуры и даёт новый опыт, пересборка переносит отметки записи, лимит, зазоры и пуск."""
+
+    def _qt(self):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PySide6.QtWidgets import QApplication
+        except Exception as e:
+            self.skipTest(f"нет Qt: {e}")
+        return QApplication.instance() or QApplication([])
+
+    def test_cockpit_experiment_matches_previous_launch_and_roundtrips(self):
+        try:
+            from client.cockpit import cockpit_experiment, START_ON
+        except Exception as e:
+            self.skipTest(f"нет GUI-зависимостей: {e}")
+        from synchrotronsim.experiment import Experiment
+        e, note = cockpit_experiment(lattice=26, settle_turns=200, nsl=6, n_part=5, stride=10, nsl_dev=None)
+        old = Experiment.cockpit(lattice=26, settle_turns=200, steps_per_cycle=9, nsl=6, n_part=5, stride=10,
+                                 relative_orbit=True, optics=True, rf=True)          # прежние аргументы сборщика
+        for l in old.loops:
+            l.enabled = l.name in START_ON
+        self.assertEqual(e.to_dict(), old.to_dict())
+        self.assertEqual({l.name for l in e.loops if l.enabled}, {"fofb_x", "fofb_y", "tune", "chroma"})
+        off, _ = cockpit_experiment(fofb_on=False, optics=False, nsl_dev={"QF1": 3})
+        self.assertFalse(any(l.enabled for l in off.loops))
+        self.assertEqual(off.plant.kwargs["nsl_dev"], {"QF1": 3})
+        for x in (e, off):                                             # обратное к Experiment.cockpit
+            y = Experiment.cockpit(**x.cockpit_params())
+            for a, b in zip(y.loops, x.loops):
+                a.enabled = b.enabled
+            self.assertEqual(y.to_dict(), x.to_dict())
+
+    def test_load_experiment_json_and_fb(self):
+        import tempfile, shutil
+        try:
+            from client.cockpit import load_experiment, cockpit_experiment
+        except Exception as e:
+            self.skipTest(f"нет GUI-зависимостей: {e}")
+        e, _ = cockpit_experiment(nsl_dev=None)
+        tmp = tempfile.mkdtemp(prefix="ss_cexp_"); self.addCleanup(shutil.rmtree, tmp, True)
+        p = e.to_json(os.path.join(tmp, "c.json"))
+        self.assertEqual(load_experiment(p).to_dict(), e.to_dict())
+        self.assertIs(load_experiment(e), e)
+        self.assertEqual(load_experiment("fb:3").source, "fb_exp_id=3")
+
+    def test_experiment_dialog_form(self):
+        self._qt()
+        from client.experiment_dialog import ExperimentDialog, slices_for
+        from client.cockpit import cockpit_experiment
+        from synchrotronsim.experiment import Experiment
+        e, _ = cockpit_experiment(optics=False, nsl_dev=None)
+        d = ExperimentDialog(e)
+        self.assertEqual(d.experiment_from_form().to_dict(), e.to_dict())   # без правок — тот же опыт
+        d.sp_nsl.setValue(4); d.sp_part.setValue(3)
+        d.loop_chk["fofb_y"].setChecked(False)
+        d.chk_optics.setChecked(True)                                  # вид модели: + оптические контуры
+        n = d.experiment_from_form()
+        self.assertEqual((n.plant.kind, n.plant.kwargs["nsl"], n.plant.kwargs["n_part"]), ("composite", 4, 3))
+        en = {l.name: l.enabled for l in n.loops}
+        self.assertEqual(en, {"fofb_x": True, "fofb_y": False, "tune": False, "chroma": False, "adts": False,
+                              "rf": False})                            # новые контуры — ВЫКЛ, как в Experiment.cockpit
+        self.assertEqual((n.name, n.source, n.run.steps_per_cycle), (e.name, "cockpit", e.run.steps_per_cycle))
+        # опыт из БД: вид модели не меняется, в аргументы plant'а пишутся только правки
+        f = Experiment.from_fb(3)
+        df = ExperimentDialog(f)
+        self.assertFalse(df.chk_optics.isEnabled())
+        self.assertEqual(df.experiment_from_form().to_dict(), f.to_dict())
+        self.assertNotIn("n_part", f.plant.kwargs)
+        df.sp_part.setValue(5)
+        self.assertEqual(df.experiment_from_form().plant.kwargs["n_part"], 5)
+        # срезы: «как в опыте» на другой решётке — набор новой решётки (набор прежней к ней не относится)
+        self.assertEqual(slices_for("keep", 26, {"X": 2})[0], {"X": 2})
+        from synchrotronsim.convergence import cockpit_slices
+        self.assertEqual(slices_for("keep", 3, {"X": 2}, same_lattice=False)[0], cockpit_slices(3)[0])
+        self.assertIsNone(slices_for("none", 26, {"X": 2})[0])
+
+    def test_attach_and_rebuild_carry_over(self):
+        """Сборка → движок; пересборка (detach + attach) переносит отметки «● запись», лимит, зазоры, пуск;
+        подписки панели не копятся; опыт без кольца (optics) кокпит не принимает."""
+        import time as _t
+        from types import SimpleNamespace
+        self._qt()
+        try:
+            from client.cockpit import Cockpit
+            import client.scene3d as s3
+        except Exception as e:
+            self.skipTest(f"нет GUI-зависимостей: {e}")
+        from client import InProcLink
+        from control import ExperimentState, Scheduler
+        from synchrotronsim.experiment import Experiment, PlantSpec, RunLimits
+
+        class _Scene:                                                  # без VTK: сцена-заглушка
+            model = SimpleNamespace(screens=[])
+            n = 0
+            def set_geometry(self, b): self.n += 1
+            def fit_view(self): pass
+            def update_snapshot(self, s): pass
+            def animate_jaws(self): pass
+            def is_interacting(self): return False
+
+        orig = s3.build_geometry
+        s3.build_geometry = lambda plant, state=None, **k: {}
+        self.addCleanup(setattr, s3, "build_geometry", orig)
+
+        def session(name, max_turns=None):
+            plant = _FakeInfinitePlant()
+            state = ExperimentState(plant.schema())
+            plant.reset(state)
+            sch = Scheduler(plant, state, dt=1.0e-3)
+            sch.experiment = Experiment(name=name, plant=PlantSpec("tbt", {}), run=RunLimits(max_turns=max_turns))
+            return plant, state, sch
+
+        link = InProcLink()
+        win = Cockpit(link, project="unittest_tmp_cockpit", poll_ms=100000)
+        win.scene = _Scene()
+        try:
+            win._attach(session("t1", max_turns=777))
+            e1 = win._engine
+            self.assertEqual(win.experiment.name, "t1")
+            self.assertEqual(e1.runner.max_turns, 777)                 # лимит — из опыта
+            self.assertEqual(win.control.spin_turns.value(), 777)
+            link.watch("obs.ebpm.x:max")
+            link.command("undulator.und_01.gap", 9.0)
+            link.control("run")
+            end = _t.time() + 5
+            while _t.time() < end and not (e1.running and "obs.ebpm.x:max" in e1.runner.watches
+                                           and abs(win._state.undulators["und_01"].gap_mm - 9.0) < 1e-9):
+                _t.sleep(0.005)
+            cur = win.current_experiment()
+            self.assertEqual([w.addr for w in cur.record], ["obs.ebpm.x:max"])
+            self.assertEqual(cur.run.max_turns, 777)
+            n_subs = len(link.subscriptions())
+
+            win._carry = win._detach()                                 # = rebuild без фоновой сборки
+            self.assertFalse(e1.is_alive())
+            win._attach(session("t2"))
+            e2 = win._engine
+            self.assertIsNot(e2, e1)
+            self.assertEqual(win.experiment.name, "t2")
+            self.assertIn("obs.ebpm.x:max", e2.runner.watches)
+            self.assertEqual(e2.runner.max_turns, 777)                 # лимит прежней сборки, не опыта t2
+            self.assertTrue(e2._running)
+            self.assertAlmostEqual(win._state.undulators["und_01"].gap_mm, 9.0)
+            self.assertEqual(len(link.subscriptions()), n_subs)        # подписки панели не копятся
+            self.assertEqual(win.scene.n, 2)
+            with self.assertRaises(ValueError):                        # optics — без кольца
+                win.build(Experiment(name="o", plant=PlantSpec("optics", {})))
+        finally:
+            win._detach()
+            win.close()
+
+
+@unittest.skipUnless(_engine_ext_available() and os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")),
+                     "нет собранного расширения или БД")
+class TestParallelColumnsAndClosedOrbit(unittest.TestCase):
+    """Шаг 6: замкнутая орбита останавливается у шума округления (floor); копии кольца (`CppRing.clone`,
+    потоки на кольцо) и параллельные столбцы отклика — бит-в-бит как последовательно."""
+
+    LAT, MEV = 2, 3000.0                                    # Сибирь — маленькая решётка, быстро
+
+    def _ring(self, **kw):
+        import ring_cpp as rc
+        r = rc.CppRing(lattice=self.LAT, design_mev=self.MEV, nsl=5, **kw)
+        self.addCleanup(r.close)
+        return r
+
+    def test_closed_orbit_stops_at_noise_floor(self):
+        """СИЛА-26 (4882 магнита): шум округления орбиты ~1e-12 м — прежний критерий tol=1e-13 недостижим, Ньютон
+        шёл все 10 итераций; с floor — 4–5, то же решение в пределах шума."""
+        import ring_analysis as ra
+        import ring_cpp as rc
+        r = rc.CppRing(lattice=26, design_mev=6000.0, nsl=5)
+        self.addCleanup(r.close)
+        kk = [j for j, k in enumerate(r.kinds) if k == "kicker"][:1]
+        r.apply_perturb(kicks=[(kk[0], 2e-6)])
+        calls = {"n": 0}
+        orig = r.track
+
+        def counted(*a, **k):
+            calls["n"] += 1
+            return orig(*a, **k)
+        r.track = counted
+        co = ra.closed_orbit(r, dims=4)
+        n_new = calls["n"]; calls["n"] = 0
+        co_old = ra.closed_orbit(r, dims=4, floor=0.0)           # прежнее поведение: все max_iter итераций
+        self.assertEqual(calls["n"], 10)
+        self.assertLess(n_new, 10)
+        r.track = orig
+        res = np.max(np.abs(r.track([co])[0][:4] - co[:4]))
+        self.assertLess(res, ra.CO_FLOOR * 10)                   # замкнута до шума
+        self.assertLess(np.max(np.abs(co - co_old)), 1e-10)      # то же решение (в пределах шума)
+
+    def test_clone_and_threads(self):
+        r = self._ring()
+        q = [j for j, k in enumerate(r.kinds) if k == "quad"]
+        r.apply_perturb(dks=[(q[0], 1e-3)])
+        c = r.clone().set_threads(2)
+        self.addCleanup(c.close)
+        st = np.zeros((3, 6)); st[:, 0] = [1e-4, 0, -1e-4]
+        a = r.track_tbt(st, 3)
+        self.assertTrue(np.array_equal(c.track_tbt(st, 3).view(np.uint64), a.view(np.uint64)))   # то же состояние
+        c.apply_perturb()                                        # RESET копии не трогает оригинал
+        self.assertFalse(np.array_equal(c.track_tbt(st, 3), a))
+        self.assertTrue(np.array_equal(r.track_tbt(st, 3).view(np.uint64), a.view(np.uint64)))
+        self.assertEqual(c._be.x._r.threads, 2)
+
+    def test_parallel_response_bitwise_equals_serial(self):
+        from control import response as resp
+        import orbit_correct as oc
+        r = self._ring()
+        kick = [j for j, k in enumerate(r.kinds) if k in ("kicker", "quad")][:6]
+        mon = np.arange(1, r.n_mag + 1)
+        applier = lambda ring, j, eps: ring.apply_perturb(kicks=[(j, eps)])
+        reader = lambda o, orb: orb[mon, 0]
+        R1 = resp.build_response(r, kick, ["x"], applier, reader, workers=1)["x"]
+        R4 = resp.build_response(r, kick, ["x"], applier, reader, workers=4)["x"]
+        self.assertTrue(np.array_equal(R1.view(np.uint64), R4.view(np.uint64)))
+        os.environ["SS_RESP_WORKERS"] = "1"
+        try:
+            m1 = oc.response_matrix(r, corr=kick[:3])
+        finally:
+            os.environ.pop("SS_RESP_WORKERS", None)
+        m3 = oc.response_matrix(r, corr=kick[:3])                # авто: параллельно
+        for k in ("Rx", "Ry"):
+            self.assertTrue(np.array_equal(m1[k].view(np.uint64), m3[k].view(np.uint64)), k)
+
+
+class TestSliceConvergence(unittest.TestCase):
+    """Шаг 6: инструмент сходимости срезов — смена срезов элемента на лету (= сборка с nsl_dev, бит-в-бит) и
+    жадный подбор по допуску (уложиться при наименьшей цене элементы × срезы)."""
+
+    def test_recommend_greedy_meets_tolerance_cheaply(self):
+        from synchrotronsim.convergence import recommend
+        cand = [1, 2, 4, 8]
+        # тип A: много элементов, ошибка ∝ 1/n⁴; тип B: мало элементов, крупная ошибка
+        errs = {"A": {n: (1e-3 / n ** 4, 0.0, 1e-7 / n ** 4) for n in cand},
+                "B": {n: (8e-3 / n ** 4, 0.0, 8e-7 / n ** 4) for n in cand}}
+        S = {"ref": 40, "candidates": cand, "errors": errs, "count": {"A": 1000, "B": 10}}
+        rec = recommend(S, tol_nu=1e-3, tol_map=1e-6)
+        tot = sum(max(errs[d][rec[d]][0], errs[d][rec[d]][1]) for d in rec)
+        self.assertLessEqual(tot, 1e-3)
+        self.assertGreater(rec["B"], rec["A"])                         # дешёвый тип поднимается первым
+        self.assertEqual(recommend(S, tol_nu=1.0, tol_map=1.0), {"A": 1, "B": 1})   # допуск широк — минимум
+        # немонотонная кривая (как QF8D: карта на 2 срезах хуже, чем на 1) не должна застревать на 1 срезе
+        errs["C"] = {1: (0.4, 0.0, 3.7e-4), 2: (0.2, 0.0, 9.5e-4), 4: (1e-2, 0.0, 7e-5), 8: (7e-4, 0.0, 4e-6)}
+        S["count"]["C"] = 40
+        rec = recommend(S, tol_nu=1e-3, tol_map=1e-5)
+        self.assertGreaterEqual(rec["C"], 8)
+
+    @unittest.skipUnless(_engine_ext_available() and os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")),
+                         "нет расширения или БД")
+    def test_set_nsl_equals_nsl_dev_build(self):
+        from synchrotronsim.engine import ExtRing
+        a = ExtRing(lattice=2, design_mev=3000.0, nsl=10)
+        dev = next(nm for nm, k in zip(a.names, a.kinds) if k in ("dipole", "quad"))
+        idx = [j for j, nm in enumerate(a.names) if nm == dev]
+        a._r.set_nsl(idx, 3)
+        b = ExtRing(lattice=2, design_mev=3000.0, nsl=10, nsl_dev={dev: 3})
+        st = np.zeros((2, 6)); st[:, 0] = [1e-3, -5e-4]
+        self.assertTrue(np.array_equal(a.track(st, 2).view(np.uint64), b.track(st, 2).view(np.uint64)))
+        a._r.set_nsl(idx, 10)                                         # вернуть — снова как исходное
+        c0 = ExtRing(lattice=2, design_mev=3000.0, nsl=10)
+        self.assertTrue(np.array_equal(a.track(st, 2).view(np.uint64), c0.track(st, 2).view(np.uint64)))
+
+    @unittest.skipUnless(os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")), "нет БД")
+    def test_cockpit_default_slices_config(self):
+        """Кокпит по умолчанию берёт набор срезов из workspace/configs/slices_<lat>.json (tight для реш. 26);
+        нет конфига — как раньше (None); другой отпечаток машины — предупреждение в пояснении."""
+        import json, tempfile, shutil
+        from synchrotronsim import convergence as cv
+        if os.path.exists(cv.config_path(26)):
+            d, note = cv.cockpit_slices(26)
+            self.assertGreater(len(d), 50); self.assertIn("tight", note)
+            self.assertEqual(d.get("und_UPM"), 1)                        # полюса ИД — 1 срез
+        self.assertEqual(cv.cockpit_slices(9999)[0], None)
+        tmp = tempfile.mkdtemp(prefix="ss_slices_"); self.addCleanup(shutil.rmtree, tmp, True)
+        fake = os.path.join(tmp, "slices_3.json")
+        with open(fake, "w", encoding="utf-8") as f:
+            json.dump({"preset": "tight", "tol_nu": 1e-4, "fingerprint": "0" * 64, "nsl_dev": {"X": 3}}, f)
+        orig = cv.config_path
+        cv.config_path = lambda lattice, root=None: fake
+        try:
+            d, note = cv.cockpit_slices(3)
+        finally:
+            cv.config_path = orig
+        self.assertEqual(d, {"X": 3}); self.assertIn("решётка изменилась", note)
 
 
 if __name__ == "__main__":

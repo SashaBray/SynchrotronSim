@@ -125,6 +125,133 @@ def records_of(exp: Experiment):
     return out
 
 
+class Runner:
+    """Исполнитель опыта по шагам — ОДИН для пакетного прогона (`Simulation.run`) и живого кокпита
+    (`client.engine.EngineThread` — тонкий адаптер: поток + шов Link + публикация снимка).
+
+    Шаг планировщика, рестарт прохода (штатный reset plant'а, модельное время и вклады контуров — в ноль), лимит
+    оборотов прохода, запись прогона: Watch-адреса (`watch`) пишутся на каждом `record_tick`, каждый проход — свой
+    `Run` (`begin_pass`/`end_pass`), в паспорте — опыт с текущей подпиской и лимитом. Ошибки записи не роняют
+    исполнение — они в `err`."""
+
+    def __init__(self, sch, experiment=None, run_root: Optional[str] = None, kind: str = "cockpit",
+                 source: str = "cockpit"):
+        self.sch, self.state, self.plant = sch, sch.state, sch.plant
+        self.experiment = experiment if experiment is not None else getattr(sch, "experiment", None)
+        self.run_root, self.kind, self.source = run_root, kind, source
+        self.watches: set = set()             # канонические адреса, которые пишутся в прогон
+        self.rec_on = False                   # запись включена: каждый проход — свой Run
+        self.max_turns: Optional[int] = None  # лимит оборотов прохода (None — без лимита)
+        self.repeat = False                   # после лимита — новый проход (рестарт), иначе пауза
+        self.run: Optional[Run] = None        # текущий прогон или None
+        self.pass_no = 0                      # номер прохода (растёт на каждом рестарте)
+        self.err: Optional[str] = None        # последняя ошибка записи
+
+    # ---- шаг и проход ----
+    def step(self) -> None:
+        self.sch.step()
+
+    def turn(self) -> int:
+        return int(getattr(self.plant, "turn", 0) or 0)
+
+    def limit_reached(self) -> bool:
+        return bool(self.max_turns) and self.turn() >= self.max_turns
+
+    def reset_model(self) -> None:
+        """Новый проход с нуля: штатный reset plant'а, модельное время и такт — в ноль, вклады контуров прошлого
+        прохода — в ноль; при включённой записи — новый прогон."""
+        self.plant.reset(self.state)
+        self.state.t = 0.0
+        self.sch.tick = 0
+        for slot in self.state.target_slots.values():
+            slot.v[:] = 0.0
+        self.pass_no += 1
+        if self.rec_on:
+            self.begin_pass()
+
+    # ---- подписка и запись ----
+    def watch(self, addr: str) -> bool:
+        from . import addresses as AD
+        if not AD.is_address(addr):
+            return False
+        self.watches.add(AD.canonical(addr))
+        return True
+
+    def unwatch(self, addr: str) -> None:
+        from . import addresses as AD
+        self.watches.discard(AD.canonical(addr))
+
+    def set_recording(self, on: bool, max_turns: Optional[int] = None, repeat: bool = False) -> None:
+        self.max_turns = int(max_turns) if max_turns else None
+        self.repeat = bool(repeat)
+        if on and not self.rec_on:
+            self.rec_on = True
+            self.begin_pass()
+        elif not on and self.rec_on:
+            self.rec_on = False
+            self.end_pass("stopped")
+
+    def experiment_snapshot(self):
+        """Опыт с ТЕКУЩЕЙ подпиской и лимитом — в паспорт прогона; без опыта — сводка исполнителя."""
+        import dataclasses
+        from .run import Watch
+        exp = self.experiment
+        if exp is None:
+            return {"engine": self.kind, "plant": type(self.plant).__name__,
+                    "watches": sorted(self.watches), "max_turns": self.max_turns, "repeat": self.repeat}
+        return dataclasses.replace(exp, record=[Watch(a, cadence="per_step") for a in sorted(self.watches)],
+                                   run=dataclasses.replace(exp.run, max_turns=self.max_turns, repeat=self.repeat))
+
+    def _machine(self):
+        lat = getattr(self.experiment, "lattice_id", None) if self.experiment is not None else None
+        lat = lat if lat is not None else getattr(self.plant, "lattice", None)
+        if lat is None:
+            return None
+        try:
+            from .db import open_db
+            return open_db(self.run_root).machine(int(lat))
+        except Exception:
+            return None
+
+    def begin_pass(self, config=None, note: Optional[str] = None) -> Optional[Run]:
+        """Начать прогон (прежний, если был, — закрыть как stopped). config/note — для пакетного прогона."""
+        self.end_pass("stopped")
+        try:
+            self.run = Run.create(self.kind, config=self.experiment_snapshot() if config is None else config,
+                                  machine=self._machine(), seed=getattr(self.experiment, "seed", None),
+                                  source=self.source,
+                                  note=note if note is not None else
+                                  f"проход {self.pass_no}; старт с оборота {self.turn()}", root=self.run_root)
+        except Exception as e:                            # запись не должна ронять исполнение
+            self.run = None
+            self.err = f"запись прогона: {type(e).__name__}: {e}"
+        return self.run
+
+    def end_pass(self, status: str) -> None:
+        run, self.run = self.run, None
+        if run is not None:
+            try:
+                run.finish(status)
+            except Exception as e:
+                self.err = f"запись прогона: {type(e).__name__}: {e}"
+
+    def record_tick(self, step: int, meta: Optional[dict] = None) -> None:
+        """Точка прогона по каждому Watch-адресу: шаг = номер тика (у кокпита — цикл публикации), время — модельное."""
+        run = self.run
+        if run is None or not self.watches:
+            return
+        from control import StateView
+        from . import addresses as AD
+        view = StateView(self.state)
+        mt = float(self.state.t)
+        m = {"model_time": mt, "cycle": int(step), "turn": self.turn()}
+        m.update(meta or {})
+        for a in sorted(self.watches):
+            v = AD.resolve(view, a, loops=self.sch.loops, meta=m)
+            if v is not None:
+                run.record(a, step, v, t=mt)
+
+
 class Simulation:
     """Исполнение опыта без UI: шаги планировщика, рекордеры по окнам, прогон Run с паспортом.
 
@@ -147,20 +274,20 @@ class Simulation:
         return int(self.exp.source.split("=", 1)[1]) if self.legacy_fb else None
 
     def run(self, steps: Optional[int] = None, close: bool = True) -> Run:
+        """Пакетный прогон через Runner: один Run (паспорт — полный опыт), рекордеры подписки по окнам."""
         from control import recorders
-        from .db import open_db
         exp = self.exp
         S = self.build()
         n_steps = int(steps if steps is not None else (exp.run.steps or 0))
         if n_steps <= 0:
             raise ValueError("Simulation.run: не задано число шагов (exp.run.steps или steps=)")
         recs = recorders.build(records_of(exp), mesh=exp.run.record_mesh, loops=S.sch.loops)
-        try:
-            machine = open_db(self.root).machine(exp.lattice_id)
-        except Exception:
-            machine = None
-        run = Run.create("fb_mode4" if self.legacy_fb else "simulation", config=exp, machine=machine, seed=exp.seed,
-                         source=exp.source, note=exp.note, root=self.root)
+        R = Runner(S.sch, experiment=exp, run_root=self.root, kind="fb_mode4" if self.legacy_fb else "simulation",
+                   source=exp.source)
+        R.max_turns = exp.run.max_turns
+        run = R.begin_pass(config=exp, note=exp.note)
+        if run is None:
+            raise RuntimeError(R.err or "не удалось создать прогон")
         fb = None
         if self.legacy_fb:
             from control import fb_store
@@ -170,9 +297,8 @@ class Simulation:
         try:
             widx = 0
             window = S.window
-            max_turns = exp.run.max_turns
             for step in range(n_steps):
-                S.sch.step()
+                R.step()
                 if (step + 1) % window == 0:
                     t_win[widx] = float(S.state.t)
                     for rec in recs:
@@ -182,8 +308,8 @@ class Simulation:
                         last = recs[0].rows[-1] if (recs and recs[0].rows) else None
                         msg = f"{last[0]}={last[2]:.4g}" if last else "—"
                         self.progress(f"  окно {widx:3d}/{max(1, n_steps // window)}: {msg}")
-                if max_turns and int(getattr(S.plant, "turn", 0) or 0) >= max_turns:
-                    self.progress(f"  лимит {max_turns} оборотов — стоп")
+                if R.limit_reached():
+                    self.progress(f"  лимит {R.max_turns} оборотов — стоп")
                     break
             for rec in recs:
                 rec.finalize(S.state, S.plant)
@@ -206,7 +332,7 @@ class Simulation:
             status = "stopped"
             raise
         finally:
-            run.finish(status)
+            R.end_pass(status)
             if close:
                 S.close()
                 self.session = None

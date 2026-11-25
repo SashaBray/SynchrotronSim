@@ -217,6 +217,16 @@ class ControlPanel(QWidget):
     def _send_record(self, *_):
         self.link.record(self.chk_rec.isChecked(), int(self.spin_turns.value()) or None, self.chk_repeat.isChecked())
 
+    def set_record(self, on: bool, max_turns: Optional[int], repeat: bool):
+        """Показать настройки записи (лимит/повтор из опыта, перенос при пересборке) — без отправки в движок."""
+        for w in (self.chk_rec, self.spin_turns, self.chk_repeat):
+            w.blockSignals(True)
+        self.chk_rec.setChecked(bool(on))
+        self.spin_turns.setValue(int(max_turns or 0))
+        self.chk_repeat.setChecked(bool(repeat))
+        for w in (self.chk_rec, self.spin_turns, self.chk_repeat):
+            w.blockSignals(False)
+
     # ---- контуры САУ: список (имя файла логики) + переключатели вкл/выкл ----
     def set_loops(self, loops: List[dict]):
         """Заполнить панель контуров. `loops` — [{name, file, enabled, tip?}] из Scheduler.loops."""
@@ -313,6 +323,11 @@ class Cockpit(QMainWindow):
         self._windows: List = []               # открытые SubscriberWindow
         self._ready = False
         self._panels_shown = False
+        self.experiment = None                 # опыт (synchrotronsim.experiment.Experiment), который исполняет модель
+        self._session_subs: List[str] = []     # подписки панели/сцены текущей сборки (снимаются при пересборке)
+        self._carry: Optional[dict] = None     # что перенести в новую сборку (запись, отметки, зазоры, пуск)
+        self._opts = dict(gap_scale=1.0, gap_slew_mm_s=500.0, publish_every=3, autorun=False, restore_last=True,
+                          note="")
 
         # центр — 3D-сцена (всегда во всю область; доки её не теснят). До сборки — заглушка.
         self._placeholder = QLabel("строится модель кольца…")
@@ -353,6 +368,10 @@ class Cockpit(QMainWindow):
         tb.addAction("Панель управления", lambda: self._toggle_win(self.win_ctl))
         tb.addAction("Дерево", lambda: self._toggle_win(self.win_tree))
         tb.addAction("Вид сверху", self._reset_view)
+        tb.addSeparator()
+        self.act_experiment = tb.addAction("Опыт…", self._experiment_dialog)   # точность/модель/контуры + пересборка
+        self.act_experiment.setToolTip("опыт, который исполняет модель: правка точности и контуров с пересборкой, "
+                                       "открыть/сохранить опыт (JSON)")
         tb.addSeparator()
         tb.addAction("Закрыть окна", self._close_subscriber_windows)
         tb.addSeparator()
@@ -752,6 +771,181 @@ class Cockpit(QMainWindow):
             self.restore_layout(data)
             self.set_status(f"раскладка загружена: {name}")
 
+    # ---- опыт: сборка модели по опыту, пересборка (окна, подписки и запись сохраняются) ----
+    def build(self, experiment):
+        """Собрать модель по опыту в ФОНЕ (первый запуск или пересборка). Готовая сборка — `_attach`."""
+        from synchrotronsim.experiment import Experiment
+        exp = load_experiment(experiment) if not isinstance(experiment, Experiment) else experiment
+        if exp.plant.kind not in COCKPIT_PLANTS:
+            raise ValueError(f"опыт «{exp.name}»: модель {exp.plant.kind} без кольца — кокпит показывает только "
+                             f"{'/'.join(COCKPIT_PLANTS)}; такой опыт исполняется Simulation(exp).run()")
+        note = self._opts.get("note") or ""
+        self.set_status(f"строится модель кольца: опыт «{exp.name}», решётка {exp.lattice_id} — это ~15–20 с…"
+                        + (f" · {note}" if note else ""))
+        if self.scene is None and self._placeholder is not None:
+            self._placeholder.setText(f"строится модель кольца…\nопыт «{exp.name}», решётка {exp.lattice_id}")
+        b = _Builder(exp)
+        self._builder = b
+        b.done.connect(self._attach)
+        b.start()
+        return b
+
+    def rebuild(self, experiment):
+        """Пересобрать модель по новому опыту: движок останавливается (проход записи закрывается), plant
+        закрывается, новая сборка — в фоне; окна-подписчики, отметки «● запись», настройки записи, зазоры
+        ондуляторов и режим пуск/пауза переносятся."""
+        if self._builder is not None:
+            self.set_status("модель ещё строится — дождитесь готовности")
+            return None
+        from synchrotronsim.experiment import Experiment
+        exp = load_experiment(experiment) if not isinstance(experiment, Experiment) else experiment
+        if exp.plant.kind not in COCKPIT_PLANTS:                 # проверить ДО остановки текущей модели
+            QMessageBox.warning(self, "Опыт", f"модель {exp.plant.kind} без кольца — кокпит её не показывает")
+            return None
+        self._carry = self._detach()
+        self._opts["note"] = ""
+        return self.build(exp)
+
+    def _detach(self) -> dict:
+        """Остановить движок и закрыть plant текущей сборки; вернуть то, что переносится в следующую."""
+        eng, self._engine = self._engine, None
+        carry: dict = dict(self._carry or {})
+        if eng is not None:
+            R = eng.runner
+            carry.update(watches=set(R.watches), rec_on=bool(R.rec_on), max_turns=R.max_turns, repeat=bool(R.repeat),
+                         running=bool(eng.running), screens=dict(eng._screens))
+            eng.stop()
+            eng.join(timeout=15)
+        if self._state is not None:
+            carry["gaps"] = {gid: (float(u.gap_mm), float(u.gap_target), float(u.slew_mm_s))
+                             for gid, u in (getattr(self._state, "undulators", {}) or {}).items()}
+        if self._plant is not None:
+            try:
+                self._plant.close()
+            except Exception:
+                pass
+        self._plant = self._state = None
+        for a in self._session_subs:
+            self._unsubscribe(a)
+        self._session_subs = []
+        self._ready = False
+        return carry
+
+    def _sub_session(self, addr: str):
+        self._subscribe(addr)
+        self._session_subs.append(addr)
+
+    def _attach(self, result):
+        """Готовая сборка (plant, state, sch) → сцена, панель, дерево, подписки, движок; перенос из прежней."""
+        self._builder = None
+        if isinstance(result, Exception):
+            self.set_status(f"ошибка сборки модели: {type(result).__name__}: {result}")
+            if self._placeholder is not None:
+                self._placeholder.setText(f"не удалось построить модель:\n{result}")
+            return
+        plant, state, sch = result
+        exp = getattr(sch, "experiment", None)
+        first = self.scene is None
+        carry, self._carry = (self._carry or {}), None
+        self.experiment = exp
+        self._plant, self._state = plant, state
+        o = self._opts
+        init_undulators(state, o["gap_slew_mm_s"])      # один ондулятор сведён (5 мм), остальные разведены (50 мм)
+        for gid, (g, gt, slew) in (carry.get("gaps") or {}).items():   # пересборка: зазоры как были
+            u = state.undulators.get(gid)
+            if u is not None:
+                u.slew_mm_s = slew
+                u.gap_max = max(float(getattr(u, "gap_max", 20.0)), g, gt)
+                u.gap_mm, u.gap_target = g, gt
+        from .scene3d import make_ring_scene, build_geometry
+        scene = make_ring_scene(gap_scale=o["gap_scale"]) if first else self.scene
+        scene.set_geometry(build_geometry(plant, state))
+        if first:
+            self.bind_scene(scene)
+
+        gids = list(state.undulators)
+        self.control.set_undulators(gids)
+        self.control.set_loops(_loops_info(sch.loops))   # панель контуров САУ (имя файла логики + вкл/выкл)
+        opt_specs = _optics_specs(state)                 # оптика кольца (тюн/хроматизм/adts) на панель + мониторинг
+        self.control.set_optics(opt_specs, self._open_from_request)
+        for addr, _, _ in opt_specs:
+            self._sub_session(addr)
+        for a in ENGINE_META:
+            self._sub_session(a)
+        for gid in gids:
+            self._sub_session(f"undulator.{gid}.gap")
+            self._sub_session(f"undulator.{gid}.gap_target")
+        for name in sch.loops:                           # живое состояние контуров → переключатели панели
+            self._sub_session(f"loop.{name}.enabled")
+
+        scr_list = [(s["sid"], s.get("kind", "")) for s in (scene.model.screens or [])] or _read_screen_ids()
+        self.build_tree(state, sch.loops, scr_list)
+
+        from .engine import EngineThread
+        spc = int(getattr(getattr(exp, "run", None), "steps_per_cycle", 9) or 9)
+        eng = EngineThread(self.link, sch, steps_per_cycle=spc, publish_every=o["publish_every"])
+        R = eng.runner
+        for w in (getattr(exp, "record", None) or []):   # подписка опыта (адреса) → отмеченные величины
+            if not w.recorder:
+                R.watch(w.addr)
+        for a in carry.get("watches") or ():
+            R.watch(a)
+        eng._screens.update(carry.get("screens") or {})
+        if carry:
+            rec_on, max_turns, repeat = carry.get("rec_on", False), carry.get("max_turns"), carry.get("repeat", False)
+        else:
+            run = getattr(exp, "run", None)
+            rec_on, max_turns, repeat = False, getattr(run, "max_turns", None), bool(getattr(run, "repeat", False))
+        R.set_recording(rec_on, max_turns, repeat)       # до старта потока: запись нового опыта — новый прогон
+        self.control.set_record(rec_on, max_turns, repeat)
+        eng._running = bool(carry.get("running", False))
+        self._engine = eng
+        eng.start()
+        self._ready = True
+        if first:
+            if o["restore_last"]:
+                data = layoutmod.load_last(self.project)
+                if data:
+                    self.restore_layout(data, with_camera=False)   # не тащить устаревшую камеру
+            try:
+                self.scene.fit_view()                              # всегда стартуем с чистого вида сверху
+            except Exception:
+                pass
+        name = f"опыт «{exp.name}»" if exp is not None else "модель"
+        if first and o["autorun"]:
+            self.link.control(RUN)
+            self.set_status(f"{name} готов — идёт прогон")
+        elif eng._running:
+            self.set_status(f"{name} пересобран — прогон продолжается с нуля")
+        else:
+            self.set_status(f"{name} {'готов' if first else 'пересобран'} — нажмите «Пуск»")
+
+    def current_experiment(self):
+        """Опыт с ЖИВЫМИ флагами контуров, отмеченными величинами и лимитом записи — то, что сохранится в JSON
+        и с чего начнётся пересборка."""
+        import dataclasses
+        from synchrotronsim.run import Watch
+        exp = self.experiment
+        eng = self._engine
+        if exp is None or eng is None:
+            return exp
+        live = eng.sch.loops
+        loops = [dataclasses.replace(l, enabled=bool(live[l.name].enabled) if l.name in live else l.enabled)
+                 for l in exp.loops]
+        R = eng.runner
+        record = [w for w in exp.record if w.recorder] + [Watch(a, cadence="per_step") for a in sorted(R.watches)]
+        run = dataclasses.replace(exp.run, max_turns=R.max_turns, repeat=bool(R.repeat))
+        return dataclasses.replace(exp, loops=loops, record=record, run=run)
+
+    def _experiment_dialog(self):
+        if self.experiment is None:
+            self.set_status("модель ещё строится — опыт появится после сборки")
+            return
+        from .experiment_dialog import ExperimentDialog
+        dlg = ExperimentDialog(self.current_experiment(), parent=self)
+        if dlg.exec() and dlg.result_experiment() is not None:
+            self.rebuild(dlg.result_experiment())
+
     def closeEvent(self, event):
         try:
             if self._ready:
@@ -770,22 +964,64 @@ class Cockpit(QMainWindow):
 
 
 class _Builder(QObject):
-    """Строит тяжёлую сессию (TbtPlant+Scheduler) в фоновом потоке; `done` эмитится в поток-владелец."""
+    """Строит сессию опыта (plant + доска + планировщик — `synchrotronsim.simulation.build_session`) в фоновом
+    потоке; `done` эмитится в поток-владелец. Опыт кладётся в планировщик (`sch.experiment`) — паспорт прогона."""
     done = Signal(object)   # (plant, state, sch) | Exception
 
-    def __init__(self, kw):
+    def __init__(self, experiment):
         super().__init__()
-        self.kw = dict(kw)
+        self.experiment = experiment
 
     def start(self):
         threading.Thread(target=self._run, name="session-build", daemon=True).start()
 
     def _run(self):
         try:
-            from .engine import build_session
-            self.done.emit(build_session(**self.kw))
+            from synchrotronsim.simulation import build_session
+            S = build_session(self.experiment)
+            S.sch.experiment = self.experiment
+            self.done.emit((S.plant, S.state, S.sch))
         except Exception as e:                      # noqa: BLE001 — ошибку доставим в UI
             self.done.emit(e)
+
+
+COCKPIT_PLANTS = ("tbt", "composite")            # модели с кольцом (сцена, BPM, пучок); optics — без кольца
+START_ON = ("fofb_x", "fofb_y", "tune", "chroma")  # контуры, включённые при старте кокпита (adts ВЫКЛ: октуполи ранг-1)
+
+
+def load_experiment(spec):
+    """Опыт для кокпита: Experiment | путь к JSON (`Experiment.to_json`) | «fb:N» — опыт ОС из таблиц fb_*."""
+    from synchrotronsim.experiment import Experiment
+    if isinstance(spec, Experiment):
+        return spec
+    s = str(spec).strip()
+    if s.lower().startswith("fb:"):
+        return Experiment.from_fb(int(s[3:]))
+    return Experiment.from_json(s)
+
+
+def cockpit_experiment(lattice: int = 26, settle_turns: int = 250, steps_per_cycle: int = 9, nsl: int = 8,
+                       n_part: int = 12, stride: int = 15, fofb_on: bool = True, optics: bool = True,
+                       nsl_dev="auto"):
+    """Опыт кокпита по параметрам запуска → (Experiment, пояснение к срезам). Те же параметры, что прежде
+    передавались сборщику: BPM — отклонение от опорной орбиты, контур ВЧ (стартует ВЫКЛ), оптика по флагу;
+    `fofb_on` — контуры START_ON включены на старте. nsl_dev="auto" — набор workspace/configs/slices_<lat>.json."""
+    from synchrotronsim.experiment import Experiment
+    note = ""
+    if isinstance(nsl_dev, str) and nsl_dev == "auto":
+        from synchrotronsim.convergence import cockpit_slices
+        nsl_dev, note = cockpit_slices(lattice)
+    exp = Experiment.cockpit(lattice=lattice, settle_turns=settle_turns, steps_per_cycle=steps_per_cycle,
+                             nsl=nsl, n_part=n_part, stride=stride,       # nsl — главный рычаг модельной скорости
+                             **({"nsl_dev": dict(nsl_dev)} if nsl_dev else {}),   # срезы по типам (--slices)
+                             relative_orbit=True,                         # BPM — отклонение от опорной орбиты
+                             optics=optics,                               # +оптические контуры (tune/chroma/adts)
+                             rf=True)                                     # +контур ВЧ-частоты (энергия), ВЫКЛ
+    if fofb_on:
+        for l in exp.loops:
+            if l.name in START_ON:
+                l.enabled = True
+    return exp, note
 
 
 def _loops_info(loops: dict) -> List[dict]:
@@ -842,16 +1078,11 @@ def init_undulators(state, slew, open_gid="und_01", open_mm=5.0, closed_mm=50.0)
 
 
 def _read_screen_ids() -> List[str]:
-    """Список экранов из workspace/tables/screens.csv (колонка screen_id); пусто, если файла нет."""
-    import csv
-    import os
-    p = os.path.join(layoutmod._ROOT, "workspace", "tables", "screens.csv")
-    if not os.path.exists(p):
-        return []
+    """Список экранов из таблицы screens (колонка screen_id; через synchrotronsim.db); пусто, если таблицы нет."""
     try:
-        with open(p, encoding="utf-8-sig") as f:
-            return [((r.get("screen_id") or "").strip()) for r in csv.DictReader(f, delimiter=";")
-                    if (r.get("screen_id") or "").strip()]
+        from synchrotronsim.db import Repository
+        return [v.strip() for v in Repository(layoutmod._ROOT).table("screens", required=False).column("screen_id")
+                if v.strip()]
     except (OSError, ValueError):
         return []
 
@@ -860,88 +1091,38 @@ def launch_cockpit(lattice: int = 26, exp=None, parent=None, gap_scale: float = 
                    steps_per_cycle: int = 9, publish_every: int = 3, settle_turns: int = 250,
                    nsl: int = 8, n_part: int = 12, stride: int = 15, fofb_on: bool = True,
                    optics: bool = True, autorun: bool = False, gap_slew_mm_s: float = 500.0,
-                   project: Optional[str] = None, restore_last: bool = True) -> Cockpit:
-    """Открыть кокпит: создать Link и окно сразу, модель кольца собрать в фоне, затем привязать сцену,
+                   project: Optional[str] = None, restore_last: bool = True,
+                   nsl_dev="auto", experiment=None) -> Cockpit:
+    """Открыть кокпит: создать Link и окно сразу, модель кольца собрать в фоне ПО ОПЫТУ, затем привязать сцену,
     запустить EngineThread, подписать панель/сцену, построить дерево и (опц.) восстановить раскладку `last`.
-    Возвращает окно (держите ссылку, иначе соберётся GC). `exp` — хук на будущее (конфиг опыта из БД).
+    Возвращает окно (держите ссылку, иначе соберётся GC).
+
+    `experiment` — опыт (Experiment | путь к JSON | «fb:N»); без него опыт собирается из параметров запуска
+    (`cockpit_experiment`: lattice, nsl, срезы nsl_dev, n_part, stride, settle_turns, optics, fofb_on). Опыт
+    правится и пересобирается окном «Опыт…». `exp` — прежний хук оболочки (номер опыта проекта), не используется.
 
     `gap_slew_mm_s` — скорость привода зазора (мм/с МОДЕЛЬНОГО времени). Модельное время сжато ~1e-4× реала
     (6D-кольцо), поэтому физический привод (0.5 мм/с) за демо-время незаметен, а слишком быстрый пучок видит
     неадиабатично. Дефолт 500 — КОМПРОМИСС: ~540 оборотов/мм (в 10× адиабатичнее прежних 5000), видно за ~13 с
     стенных. --gap-slew: меньше → ближе к реальному адиабатич. приводу (можно 0.5); больше → быстрее/нагляднее.
     Сцена отражает РЕАЛИЗОВАННЫЙ зазор; FOFB парирует возмущение орбиты от смены зазора."""
-    project = project or f"sila{lattice}"
+    note = ""
+    if experiment is not None:
+        e = load_experiment(experiment)
+    else:
+        e, note = cockpit_experiment(lattice=lattice, settle_turns=settle_turns, steps_per_cycle=steps_per_cycle,
+                                     nsl=nsl, n_part=n_part, stride=stride, fofb_on=fofb_on, optics=optics,
+                                     nsl_dev=nsl_dev)
+    project = project or f"sila{e.lattice_id}"
     link = InProcLink()
     win = Cockpit(link, project=project, parent=parent)
+    win._opts.update(gap_scale=gap_scale, gap_slew_mm_s=gap_slew_mm_s, publish_every=publish_every,
+                     autorun=autorun, restore_last=restore_last, note=note)
     win.show()
-    win.set_status("строится модель кольца (6D-кольцо СИЛА) — это ~15–20 с…")
-
-    builder = _Builder(dict(lattice=lattice, settle_turns=settle_turns, steps_per_cycle=steps_per_cycle,
-                            nsl=nsl, n_part=n_part, stride=stride,    # nsl — главный рычаг модельной скорости
-                            relative_orbit=True,                      # BPM показывают отклонение от опорной орбиты
-                            optics=optics,                            # +оптические контуры (tune/chroma/adts)
-                            rf=True))                                 # +контур ВЧ-частоты (энергия), стартует ВЫКЛ
-    win._builder = builder
-
-    def _on_ready(result):
-        if isinstance(result, Exception):
-            win.set_status(f"ошибка сборки модели: {type(result).__name__}: {result}")
-            if win._placeholder is not None:
-                win._placeholder.setText(f"не удалось построить модель:\n{result}")
-            return
-        plant, state, sch = result
-        win._plant = plant
-        win._state = state
-        if fofb_on:                                 # по умолчанию ВКЛ: орбита (fofb_x/y) + оптика (tune/chroma);
-            for nm in ("fofb_x", "fofb_y", "tune", "chroma"):   # adts ВЫКЛ (октуполи СИЛА-26 ранг-1)
-                if nm in sch.loops:
-                    try:
-                        sch.set_enabled(nm, True)
-                    except Exception:
-                        pass
-        init_undulators(state, gap_slew_mm_s)       # один ондулятор сведён (5 мм), остальные разведены (50 мм)
-        from .scene3d import make_ring_scene, build_geometry
-        scene = make_ring_scene(gap_scale=gap_scale)
-        scene.set_geometry(build_geometry(plant, state))
-        win.bind_scene(scene)
-
-        gids = list(state.undulators)
-        win.control.set_undulators(gids)
-        win.control.set_loops(_loops_info(sch.loops))   # панель контуров САУ (имя файла логики + вкл/выкл)
-        opt_specs = _optics_specs(state)                # оптика кольца (тюн/хроматизм/adts) на панель + мониторинг
-        win.control.set_optics(opt_specs, win._open_from_request)
-        for addr, _, _ in opt_specs:
-            win._subscribe(addr)
-        for a in ENGINE_META:
-            win._subscribe(a)
-        for gid in gids:
-            win._subscribe(f"undulator.{gid}.gap")
-            win._subscribe(f"undulator.{gid}.gap_target")
-        for name in sch.loops:                          # живое состояние контуров → переключатели панели
-            win._subscribe(f"loop.{name}.enabled")
-
-        scr_list = [(s["sid"], s.get("kind", "")) for s in (scene.model.screens or [])] or _read_screen_ids()
-        win.build_tree(state, sch.loops, scr_list)
-
-        from .engine import EngineThread
-        eng = EngineThread(link, sch, steps_per_cycle=steps_per_cycle, publish_every=publish_every)
-        win._engine = eng
-        eng.start()
-        win._ready = True
-        if restore_last:
-            data = layoutmod.load_last(project)
-            if data:
-                win.restore_layout(data, with_camera=False)   # не тащить устаревшую камеру
-        try:
-            win.scene.fit_view()                              # всегда стартуем с чистого вида сверху
-        except Exception:
-            pass
-        if autorun:
-            link.control(RUN)
-            win.set_status("модель готова — идёт прогон")
-        else:
-            win.set_status("модель готова — нажмите «Пуск»")
-
-    builder.done.connect(_on_ready)
-    builder.start()
+    try:
+        win.build(e)
+    except Exception as ex:                          # опыт без кольца и т.п. — в окно, не падать
+        win.set_status(f"опыт не запущен: {type(ex).__name__}: {ex}")
+        if win._placeholder is not None:
+            win._placeholder.setText(f"опыт не запущен:\n{ex}")
     return win

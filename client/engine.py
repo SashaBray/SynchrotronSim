@@ -63,14 +63,10 @@ class EngineThread(threading.Thread):
         self.screen_period = float(screen_period)  # период пересчёта экрана, с (медленный такт)
         self._unknown: Optional[str] = None  # последняя нераспознанная команда (диагностика)
         self._err: Optional[str] = None      # последнее исключение тела потока
-        # запись прогона (шаг 5 плана библиотеки): что писать (Watch-адреса), включена ли запись, лимит прохода
+        # исполнитель опыта (библиотека): шаг, рестарт прохода, лимит оборотов, запись прогона (Watch → Run)
+        from synchrotronsim.simulation import Runner
         self.run_root = run_root             # корень проекта/рабочей папки для workspace/runs (None — проект)
-        self._watches: set = set()           # канонические адреса, которые пишутся в прогон
-        self._rec_on = False                 # запись включена: каждый проход (от рестарта до лимита) — свой Run
-        self._max_turns: Optional[int] = None  # лимит оборотов прохода (None — без лимита)
-        self._repeat = False                 # после лимита — новый проход (рестарт), иначе пауза
-        self._run = None                     # текущий synchrotronsim.run.Run или None
-        self._pass = 0                       # номер прохода (растёт на каждом рестарте)
+        self.runner = Runner(scheduler, run_root=run_root, kind="cockpit", source="cockpit")
 
     # ---- управление из главного потока ----
     def stop(self) -> None:
@@ -95,16 +91,16 @@ class EngineThread(threading.Thread):
                     time.sleep(self._idle)
                     continue
                 t0 = perf_counter()
-                self.sch.step()                           # ОДИН базовый такт = stride оборотов
+                self.runner.step()                        # ОДИН базовый такт = stride оборотов
                 self._wall_run += perf_counter() - t0
                 self._step += 1
                 if self._step % self.publish_every == 0:  # снимок раз в publish_every тактов (не каждый — дешевле)
                     self._cycle += 1
                     self._publish()
-                    self._record_tick()                   # запись прогона — с тем же темпом, что снимок
-                if self._max_turns and int(getattr(self.plant, "turn", 0) or 0) >= self._max_turns:
-                    self._end_pass("done")                # проход дошёл до лимита
-                    if self._repeat:
+                    self.runner.record_tick(self._cycle, {"wall_time": float(self._wall_run)})   # запись — темпом снимка
+                if self.runner.limit_reached():
+                    self.runner.end_pass("done")          # проход дошёл до лимита
+                    if self.runner.repeat:
                         self._restart()                   # новый проход с нуля (и новый прогон, если пишем)
                     else:
                         self._running = False
@@ -115,7 +111,7 @@ class EngineThread(threading.Thread):
             except Exception:
                 pass
         finally:
-            self._end_pass("stopped")
+            self.runner.end_pass("stopped")
 
     # ---- очередь команд ----
     def _drain(self) -> None:
@@ -127,23 +123,13 @@ class EngineThread(threading.Thread):
             elif m.kind == SET_SCREEN:
                 self._screens[m.addr] = dict(m.value or {})
             elif m.kind == WATCH:
-                if A.is_address(m.addr):
-                    self._watches.add(A.canonical(m.addr))
-                else:
+                if not self.runner.watch(m.addr):
                     self._mark_unknown(m.addr)
             elif m.kind == UNWATCH:
-                self._watches.discard(A.canonical(m.addr))
+                self.runner.unwatch(m.addr)
             elif m.kind == RECORD:
                 v = dict(m.value or {})
-                self._max_turns = int(v["max_turns"]) if v.get("max_turns") else None
-                self._repeat = bool(v.get("repeat"))
-                on = bool(v.get("on"))
-                if on and not self._rec_on:
-                    self._rec_on = True
-                    self._begin_pass()
-                elif not on and self._rec_on:
-                    self._rec_on = False
-                    self._end_pass("stopped")
+                self.runner.set_recording(bool(v.get("on")), v.get("max_turns"), bool(v.get("repeat")))
 
     def _control(self, action: str) -> None:
         if action == RUN:
@@ -151,82 +137,20 @@ class EngineThread(threading.Thread):
         elif action == STOP:
             self._running = False
         elif action == RESTART:
-            self._end_pass("stopped")                     # прерванный рестартом проход
+            self.runner.end_pass("stopped")               # прерванный рестартом проход
             self._restart()
         elif action == SHUTDOWN:
             self._stop.set()
 
     def _restart(self) -> None:
-        """Новый проход с нуля (штатный reset плана); режим пуск/пауза сохраняется; при записи — новый прогон."""
+        """Новый проход с нуля (Runner.reset_model) + счётчики публикации; режим пуск/пауза сохраняется."""
         was = self._running
         self._running = False
-        self.plant.reset(self.state)
-        self.state.t = 0.0
         self._cycle = 0
         self._step = 0
         self._wall_run = 0.0
-        self.sch.tick = 0
-        for slot in self.state.target_slots.values():      # обнулить вклады контуров прошлого прохода
-            slot.v[:] = 0.0
-        self._pass += 1
-        if self._rec_on:
-            self._begin_pass()
+        self.runner.reset_model()
         self._running = was
-
-    # ---- запись прогона (Run) ----
-    def _experiment_snapshot(self):
-        """Опыт этого кокпита (sch.experiment) с ТЕКУЩЕЙ подпиской и лимитом — в паспорт прогона."""
-        import dataclasses
-        exp = getattr(self.sch, "experiment", None)
-        if exp is None:
-            return {"engine": "cockpit", "plant": type(self.plant).__name__,
-                    "watches": sorted(self._watches), "max_turns": self._max_turns, "repeat": self._repeat}
-        from synchrotronsim.run import Watch
-        return dataclasses.replace(exp, record=[Watch(a, cadence="per_step") for a in sorted(self._watches)],
-                                   run=dataclasses.replace(exp.run, max_turns=self._max_turns, repeat=self._repeat))
-
-    def _begin_pass(self) -> None:
-        from synchrotronsim.run import Run
-        self._end_pass("stopped")
-        machine = None
-        lat = getattr(self.plant, "lattice", None)
-        if lat is not None:
-            try:
-                from synchrotronsim.db import open_db
-                machine = open_db().machine(int(lat))
-            except Exception:
-                machine = None
-        turn0 = int(getattr(self.plant, "turn", 0) or 0)
-        try:
-            exp = getattr(self.sch, "experiment", None)
-            self._run = Run.create("cockpit", config=self._experiment_snapshot(), machine=machine,
-                                   seed=getattr(exp, "seed", None), source="cockpit",
-                                   note=f"проход {self._pass}; старт с оборота {turn0}", root=self.run_root)
-        except Exception as e:                                # запись не должна ронять движок
-            self._run = None
-            self._err = f"запись прогона: {type(e).__name__}: {e}"
-
-    def _end_pass(self, status: str) -> None:
-        run, self._run = self._run, None
-        if run is not None:
-            try:
-                run.finish(status)
-            except Exception as e:
-                self._err = f"запись прогона: {type(e).__name__}: {e}"
-
-    def _record_tick(self) -> None:
-        """Точка прогона по каждому Watch-адресу: шаг = номер цикла публикации, время = модельное."""
-        run = self._run
-        if run is None or not self._watches:
-            return
-        view = StateView(self.state)
-        mt = float(self.state.t)
-        meta = {"model_time": mt, "wall_time": float(self._wall_run), "cycle": int(self._cycle),
-                "turn": int(getattr(self.plant, "turn", 0) or 0)}
-        for a in sorted(self._watches):
-            v = A.resolve(view, a, loops=self.sch.loops, meta=meta)
-            if v is not None:
-                run.record(a, self._cycle, v, t=mt)
 
     def _command(self, addr: str, value) -> None:
         """Применить ручку ШТАТНЫМ путём (команда → доска). Диспетчер по типу адреса. Неизвестное —
@@ -284,11 +208,14 @@ class EngineThread(threading.Thread):
         m = {"model_time": mt, "wall_time": float(self._wall_run), "speed": float(speed),
              "cycle": int(self._cycle), "seq": int(self._seq), "running": bool(self._running),
              "turn": int(getattr(self.plant, "turn", 0)), "alive": bool(getattr(self.plant, "alive", True))}
-        m["recording"] = self._run is not None
-        m["run_id"] = self._run.run_id if self._run is not None else ""
-        m["pass"] = int(self._pass)
-        m["max_turns"] = int(self._max_turns or 0)
-        m["watches"] = sorted(self._watches)
+        R = self.runner
+        m["recording"] = R.run is not None
+        m["run_id"] = R.run.run_id if R.run is not None else ""
+        m["pass"] = int(R.pass_no)
+        m["max_turns"] = int(R.max_turns or 0)
+        m["watches"] = sorted(R.watches)
+        if R.err and not self._err:
+            self._err = R.err
         if self._unknown:
             m["unknown_command"] = self._unknown
         if self._err:

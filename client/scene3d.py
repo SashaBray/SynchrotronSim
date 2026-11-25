@@ -198,25 +198,30 @@ def _bend_line_screens(lattice: int, mags) -> List[dict]:
     return out
 
 
-def _read_screens(root: Optional[str] = None) -> dict:
-    """Экраны из workspace/tables/screens.csv: {source_ref(gid): {dist(м), w,h(м), sid}}. {} если файла нет.
-    source_ref — ондулятор-источник; привязываемся по нему, а координаты берём от живого якоря (решётко-незав.)."""
-    import csv
-    p = os.path.join(root or _project_root(), "workspace", "tables", "screens.csv")
-    out: dict = {}
-    if not os.path.exists(p):
-        return out
+def _table_dicts(name: str, root: Optional[str] = None) -> list:
+    """Строки таблицы БД (synchrotronsim.db.Repository — общий для библиотеки разбор `;`-CSV и кэш по mtime)
+    словарями; [] если таблицы/папки нет или она не читается."""
     try:
-        with open(p, encoding="utf-8-sig") as f:
-            for r in csv.DictReader(f, delimiter=";"):
-                src = (r.get("source_ref") or "").strip()
-                if not src:
-                    continue
-                out[src] = {"dist": float(r.get("dist_m") or 0) or 0.0,
-                            "w": float(r.get("width_mm") or 0) / 1000.0,
-                            "h": float(r.get("height_mm") or 0) / 1000.0,
-                            "sid": (r.get("screen_id") or "").strip()}
+        from synchrotronsim.db import Repository
+        return Repository(root or _project_root()).table(name, required=False).dicts()
     except (OSError, ValueError, KeyError):
+        return []
+
+
+def _read_screens(root: Optional[str] = None) -> dict:
+    """Экраны из таблицы screens: {source_ref(gid): {dist(м), w,h(м), sid}}. {} если таблицы нет.
+    source_ref — ондулятор-источник; привязываемся по нему, а координаты берём от живого якоря (решётко-незав.)."""
+    out: dict = {}
+    try:
+        for r in _table_dicts("screens", root):
+            src = (r.get("source_ref") or "").strip()
+            if not src:
+                continue
+            out[src] = {"dist": float(r.get("dist_m") or 0) or 0.0,
+                        "w": float(r.get("width_mm") or 0) / 1000.0,
+                        "h": float(r.get("height_mm") or 0) / 1000.0,
+                        "sid": (r.get("screen_id") or "").strip()}
+    except (ValueError, KeyError):
         pass
     return out
 
@@ -487,15 +492,14 @@ def build_magnet_stl_meshes(magnets, *, tri_cap: int = STL_TRI_CAP, root: Option
         import visualize as vz
     except Exception:
         return {}
-    ws = os.path.join(root or _project_root(), "workspace")
-    hwp = os.path.join(ws, "tables", "hardware_library.csv")
-    if not os.path.exists(hwp):
-        return {}
-    try:
-        import csv
-        with open(hwp, encoding="utf-8") as f:
-            hw = {r["device_type_id"]: r for r in csv.DictReader(f, delimiter=";")}
+    try:                                                         # справочник устройств — через библиотеку
+        from synchrotronsim.db import Repository
+        repo = Repository(root or _project_root())
+        ws = repo.workspace
+        hw = {r["device_type_id"]: r for r in repo.table("hardware_library", required=False).dicts()}
     except (OSError, KeyError, ValueError):
+        return {}
+    if not hw:
         return {}
     bydev: Dict[str, list] = defaultdict(list)                   # устройство → список трансформов инстансов
     kindof: Dict[str, str] = {}

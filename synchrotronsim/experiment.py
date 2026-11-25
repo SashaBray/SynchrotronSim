@@ -169,6 +169,23 @@ class Experiment:
                    run=RunLimits(steps_per_cycle=steps_per_cycle, optics_period_ticks=optics_period_ticks),
                    source="cockpit")
 
+    def cockpit_params(self) -> Dict[str, Any]:
+        """Обратное к `Experiment.cockpit`: параметры, из которых этот опыт кокпита собирается заново
+        (`Experiment.cockpit(**exp.cockpit_params())` даёт тот же опыт; флаги «контур включён» — отдельно)."""
+        kw = dict(self.plant.kwargs)
+        p = dict(lattice=self.lattice_id, nsl=kw.pop("nsl", 8), settle_turns=kw.pop("settle_turns", 250),
+                 fofb=any(l.name in ("fofb_x", "fofb_y") for l in self.loops),
+                 disturbance_spec=kw.pop("disturbance_spec", None), gap_mm=kw.pop("gap_mm", 5.0),
+                 steps_per_cycle=self.run.steps_per_cycle, meas_noise=kw.pop("meas_noise", 1e-7),
+                 n_photon=kw.pop("n_photon", 1), optics=self.plant.kind == "composite",
+                 optics_period_ticks=self.run.optics_period_ticks, rf=bool(kw.pop("rf_actuator", False)),
+                 id_pole_nsl=kw.pop("id_pole_nsl", 1))
+        if p["optics"]:
+            p.update(optics_drift=tuple(kw.pop("drift", (1e-3, 1e-2, 3e-2))), optics_order=kw.pop("order", 4),
+                     optics_nsl=kw.pop("optics_nsl", 2))
+        p.update(kw)                                           # прочее (n_part, stride, relative_orbit, nsl_dev…)
+        return p
+
     # ---- сериализация ----------------------------------------------------------------------------
     def to_dict(self) -> Dict[str, Any]:
         return _jsonable(asdict(self))
