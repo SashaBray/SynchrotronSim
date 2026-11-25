@@ -306,8 +306,9 @@ _STORES: Dict[tuple, Store] = {}
 
 
 def open_store(site=None, root: Optional[str] = None, overlay: Optional[str] = None) -> Store:
-    """Хранилище площадки: site=None / "local" — локальное (LocalCsvStore над таблицами проекта, или root /
-    overlay); сетевые площадки — этап 3 (`synchrotronsim.Site`)."""
+    """Хранилище площадки: site=None / "local" — локальное: есть `workspace/store/store.sqlite` — SqliteStore
+    (ревизии + рабочая копия таблиц), иначе LocalCsvStore (таблицы + снимки); overlay (возмущённая машина) —
+    всегда LocalCsvStore. Сетевые площадки — этап 3 (`synchrotronsim.Site`)."""
     if site not in (None, "local"):
         store = getattr(site, "store", None)
         if store is not None:
@@ -316,5 +317,17 @@ def open_store(site=None, root: Optional[str] = None, overlay: Optional[str] = N
     key = (os.path.abspath(root) if root else None, os.path.abspath(overlay) if overlay else None)
     st = _STORES.get(key)
     if st is None:
-        st = _STORES[key] = LocalCsvStore(root, overlay)
+        from .store_sqlite import SqliteStore, find_store_file
+        f = find_store_file(root) if overlay is None else None
+        if f is not None:                                    # этап 2: хранилище ревизий + рабочая копия таблиц
+            from .db import PROJECT_ROOT
+            st = SqliteStore(f, working=root or PROJECT_ROOT)
+        else:                                                # этап 1: таблицы + снимки ревизий
+            st = LocalCsvStore(root, overlay)
+        _STORES[key] = st
     return st
+
+
+def reset_stores():
+    """Забыть открытые хранилища (после создания/удаления файла хранилища — open_store выберет заново)."""
+    _STORES.clear()

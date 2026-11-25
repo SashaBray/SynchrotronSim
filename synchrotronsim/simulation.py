@@ -78,8 +78,18 @@ def resolve_machine(exp: Experiment, store=None, machine=None):
         if int(machine.lattice_id) != int(exp.lattice_id):
             raise ValueError(f"машина решётки {machine.lattice_id}, а опыт «{exp.name}» — на решётке {exp.lattice_id}")
         if exp.machine_rev and not machine.fingerprint.startswith(exp.machine_rev):
-            raise ValueError(f"опыт «{exp.name}» ссылается на ревизию {exp.machine_rev[:12]}, а передана машина "
-                             f"{machine.fingerprint[:12]}")
+            fp = None                                      # ревизия хранилища (срез таблиц) → её отпечаток
+            try:
+                if store is None:
+                    from .store import open_store
+                    store = open_store()
+                if hasattr(store, "revision"):
+                    fp = store.revision("machine", str(exp.lattice_id), exp.machine_rev).get("fingerprint")
+            except Exception:
+                fp = None
+            if fp != machine.fingerprint:
+                raise ValueError(f"опыт «{exp.name}» ссылается на ревизию {exp.machine_rev[:12]}, а передана машина "
+                                 f"{machine.fingerprint[:12]}")
         return machine
     if store is None:
         from .store import open_store

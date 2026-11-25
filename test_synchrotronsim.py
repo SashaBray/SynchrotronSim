@@ -5769,6 +5769,139 @@ class TestDocumentsAndStore(unittest.TestCase):
         self.assertEqual(st.blob_get(h), b"abc")
 
 
+@unittest.skipUnless(os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")), "нет БД")
+class TestRevisionStore(unittest.TestCase):
+    """Протокол данных, этап 2: хранилище ревизий SQLite. Ревизия машины — срез её таблиц без потерь; документ
+    Machine из среза = из CSV; рабочая копия (таблицы) — статус, разница, фиксация, конфликт, выгрузка ревизии
+    байт-в-байт; обмен с Excel — только настоящие правки (15 значащих цифр), наложение на рабочую копию."""
+
+    def _copy(self):
+        import tempfile, shutil
+        tmp = tempfile.mkdtemp(prefix="ss_rev_"); self.addCleanup(shutil.rmtree, tmp, True)
+        shutil.copytree(mt.TB, os.path.join(tmp, "tables"))
+        return tmp
+
+    @staticmethod
+    def _md5(tmp):
+        import glob, hashlib
+        out = {}
+        for p in glob.glob(os.path.join(tmp, "tables", "*.csv")):
+            with open(p, "rb") as f:
+                out[os.path.basename(p)] = hashlib.md5(f.read()).hexdigest()
+        return out
+
+    def test_slices_roundtrip_and_machine_equal(self):
+        from synchrotronsim import tableset as T, open_db
+        tmp = self._copy()
+        h0 = self._md5(tmp)
+        lib = T.library_slice(tmp)
+        db = open_db()
+        for lat in (2, 26, 27):
+            sl = T.machine_slice(tmp, lat)
+            self.assertEqual(T.machine_from_slices(sl, lib).fingerprint, db.machine(lat).fingerprint)
+            self.assertEqual(T.write_machine(tmp, sl), [])                 # без изменений — не переписывается
+        self.assertEqual(T.write_library(tmp, lib), [])
+        self.assertEqual(self._md5(tmp), h0)
+        sl = T.machine_slice(tmp, 26)
+        lc = sl["tables"]["lattice_configs"]; j = lc["header"].index("mat_G")
+        lc["rows"][3][j] = "1.25"
+        self.assertEqual(T.write_machine(tmp, sl), ["lattice_configs"])
+        d = T.diff_slices(T.machine_slice(tmp, 26), sl)
+        self.assertEqual(d, [])                                             # записанное читается тем же срезом
+        for lat in (25, 27):                                               # чужие решётки не тронуты
+            self.assertEqual(T.diff_slices(T.machine_slice(mt.TB.rsplit(os.sep, 1)[0], lat), T.machine_slice(tmp, lat)), [])
+
+    def test_commit_status_conflict_checkout(self):
+        from synchrotronsim import tableset as T
+        from synchrotronsim.store_sqlite import SqliteStore
+        from synchrotronsim.store import ConflictError, StoreError
+        tmp = self._copy()
+        h0 = self._md5(tmp)
+        st = SqliteStore(os.path.join(tmp, "store", "store.sqlite"), working=tmp)
+        refs = st.init_from_working()
+        self.assertEqual(len(refs), 1 + len(T.lattices_in(tmp)))           # справочник + все решётки
+        self.assertEqual({r["state"] for r in st.status()}, {"clean"})
+        self.assertEqual(st.init_from_working(), [])
+        r0 = st.head("machine", "26")
+        self.assertEqual(st.get("machine", "26", "head").fingerprint, st.get("machine", "26").fingerprint)
+        p = os.path.join(tmp, "tables", "lattice_configs.csv")
+        s = T.read_sheet(p); L, i, j = s.col("lattice_id"), s.col("instance_id"), s.col("mat_G")
+        k = next(k for k, r in enumerate(s.rows) if r[L] == "26" and r[i] == "101")
+        s.rows[k][j] = "12.5"; T.write_sheet(p, s)
+        st26 = {r["id"]: r["state"] for r in st.status() if r["kind"] == "machine"}
+        self.assertEqual(st26["26"], "modified"); self.assertEqual(st26["27"], "clean")
+        d = st.diff("machine", "26")
+        self.assertEqual([(x.table, x.cells) for x in d], [("lattice_configs", [("101", "mat_G", "0", "12.5")])])
+        mw = st.get("machine", "26")
+        ref_d = st.pin(mw)                                                 # прогон на рабочей копии — черновик
+        self.assertEqual(st.head("machine", "26"), r0)
+        self.assertEqual(st.get("machine", "26", ref_d.rev).fingerprint, mw.fingerprint)
+        refs = st.commit_working(note="правка 101")
+        self.assertEqual([r.short for r in refs], [ref_d.short])           # черновик стал ревизией
+        r1 = st.head("machine", "26")
+        self.assertEqual(st.history("machine", "26")[-1]["note"], "правка 101")
+        other = T.machine_slice(tmp, 26); other["library"] = st.head("library", "devices")
+        other["tables"]["lattice_configs"]["rows"][0][j] = "7.0"
+        st._commit_machine_slice("26", other, r1, "чужая правка")          # кто-то успел зафиксировать
+        s = T.read_sheet(p); s.rows[k][j] = "13.0"; T.write_sheet(p, s)
+        with self.assertRaises(ConflictError):
+            st.commit_working(note="моя")
+        with self.assertRaises(StoreError):                                # изменённую рабочую копию не затираем
+            st.checkout("machine", "26", r0)
+        st.checkout("machine", "26", r0, force=True)
+        self.assertEqual(self._md5(tmp), h0)                               # ревизия выгружена байт-в-байт
+        self.assertEqual(st.revision("machine", "26", st.get("machine", "26", r0).fingerprint[:12])["rev"], r0)
+        srv = SqliteStore(st.path, working=None)                           # «сервер»: без рабочей копии
+        self.assertEqual(srv.get("machine", "26").fingerprint, st.get("machine", "26", "head").fingerprint)
+        from synchrotronsim.experiment import Experiment
+        ex = Experiment.cockpit(lattice=26)
+        er = st.commit("experiment", "demo", ex)
+        with self.assertRaises(ConflictError):
+            st.commit("experiment", "demo", Experiment.cockpit(lattice=26, nsl=4))
+        self.assertEqual(srv.get("experiment", "demo").to_dict(), ex.to_dict())
+        self.assertEqual(er.rev, srv.head("experiment", "demo"))
+
+    def test_excel_export_import(self):
+        from synchrotronsim import tableset as T
+        from synchrotronsim.store_sqlite import SqliteStore
+        tmp = self._copy()
+        st = SqliteStore(os.path.join(tmp, "store", "store.sqlite"), working=tmp)
+        st.init_from_working()
+        out = os.path.join(tmp, "xl")
+        T.export_slice(st.machine_slice_at("26", st.head("machine", "26")), out, excel=True)
+        p = os.path.join(out, "lattice_configs.csv")
+        s = T.read_sheet(p)
+        self.assertTrue(s.bom)
+        i, j, x = s.col("instance_id"), s.col("mat_G"), s.col("x")
+        self.assertIn(",", s.rows[5][x])                                   # десятичная запятая
+        info, base, edited = T.read_export(out)
+        self.assertEqual(T.diff_slices(base, edited), [])                  # без правок — без разницы
+        k = next(k for k, r in enumerate(s.rows) if r[i] == "101")
+        s.rows[k][j] = "12,75"
+        for kk in range(10, 20):                                           # Excel: 15 значащих цифр
+            s.rows[kk][x] = f"{float(s.rows[kk][x].replace(',', '.')):.15g}".replace(".", ",")
+        T.write_sheet(p, s)
+        info, base, edited = T.read_export(out)
+        d = T.diff_slices(base, edited)
+        self.assertEqual([(x_.table, x_.cells) for x_ in d], [("lattice_configs", [("101", "mat_G", "0", "12.75")])])
+        q = os.path.join(tmp, "tables", "lattice_configs.csv")            # независимая правка в рабочей копии
+        w = T.read_sheet(q); L = w.col("lattice_id")
+        k2 = next(k for k, r in enumerate(w.rows) if r[L] == "26" and r[w.col("instance_id")] == "102")
+        w.rows[k2][w.col("mat_G")] = "3.5"; T.write_sheet(q, w)
+        new, conflicts = T.apply_edits(st.working_slices([26])[1]["26"], base, edited)
+        self.assertEqual(conflicts, [])
+        T.write_machine(tmp, new)
+        cells = [c for x_ in st.diff("machine", "26") for c in x_.cells]
+        self.assertEqual(sorted(cells), [("101", "mat_G", "0", "12.75"), ("102", "mat_G", "0", "3.5")])
+        w = T.read_sheet(q)
+        k1 = next(k for k, r in enumerate(w.rows) if r[L] == "26" and r[w.col("instance_id")] == "101")
+        w.rows[k1][w.col("mat_G")] = "9"
+        T.write_sheet(q, w)                                                # та же ячейка с двух сторон — конфликт
+        _, conflicts = T.apply_edits(st.working_slices([26])[1]["26"], base, edited)
+        self.assertEqual([(c.key, c.column, c.ours, c.theirs) for c in conflicts], [("101", "mat_G", "9", "12.75")])
+        self.assertTrue(T.same_in_excel("001", "1") and T.same_in_excel("1e-05", "1,00E-05".replace(",", ".")))
+
+
 @unittest.skipUnless(_engine_ext_available() and os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")),
                      "нет собранного расширения или БД")
 class TestModelFromDocuments(unittest.TestCase):

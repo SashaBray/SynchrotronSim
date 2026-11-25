@@ -346,9 +346,52 @@ class Repository:
         inf = LATTICE_INFO.get(lat)
         if not inf:
             return None
-        volt, harm = inf["rf"]
-        return MachineMeta(label=inf["label"], design_energy_mev=float(inf["energy_mev"]),
-                           rf_volt_mv=float(volt), rf_harmonic=int(harm), superperiods=int(inf["superperiods"]))
+        return _meta_from_info(inf)
+
+
+def _meta_from_info(inf) -> Optional[MachineMeta]:
+    if not inf:
+        return None
+    volt, harm = inf["rf"]
+    return MachineMeta(label=inf["label"], design_energy_mev=float(inf["energy_mev"]),
+                       rf_volt_mv=float(volt), rf_harmonic=int(harm), superperiods=int(inf["superperiods"]))
+
+
+class MemoryRepository(Repository):
+    """Repository над таблицами В ПАМЯТИ (срезы ревизий хранилища, synchrotronsim.tableset): тот же разбор, что из
+    CSV, без файлов. tables — {имя: {"header": [...], "rows": [[...]]}}; passport — {lattice_id: паспорт} (как в
+    LATTICE_INFO; паспорт хранится в ревизии — не зависит от кода machines.py); label — уникальная метка
+    содержимого (ключ кэша машин, источник Machine.source)."""
+
+    def __init__(self, tables: Dict[str, dict], passport: Optional[Dict[int, dict]] = None, label: str = "memory"):
+        self.workspace = None
+        self.tables_dir = label
+        self.overlay_dir = None
+        self._mem = {}
+        for name, t in tables.items():
+            rows = [list(r) for r in t.get("rows", []) if r and any(c.strip() for c in r)]
+            self._mem[name] = Table(f"{label}/{name}.csv", [h.strip() for h in t.get("header", [])], rows)
+        self._passport = dict(passport or {})
+
+    def path(self, name: str) -> str:
+        return f"{self.tables_dir}/{name if name.endswith('.csv') else name + '.csv'}"
+
+    def exists(self, name: str) -> bool:
+        return (name[:-4] if name.endswith(".csv") else name) in self._mem
+
+    def table(self, name: str, required: bool = True) -> Table:
+        key = name[:-4] if name.endswith(".csv") else name
+        if key in self._mem:
+            return self._mem[key]
+        if required:
+            raise FileNotFoundError(f"нет таблицы {key} в {self.tables_dir}")
+        return Table(self.path(name), [], [])
+
+    def _signature(self, lat: int) -> tuple:
+        return ("memory", self.tables_dir, repr(self._passport.get(lat)))
+
+    def _meta(self, lat: int) -> Optional[MachineMeta]:
+        return _meta_from_info(self._passport.get(int(lat)))
 
 
 def open_db(root: Optional[str] = None, overlay: Optional[str] = None) -> Repository:

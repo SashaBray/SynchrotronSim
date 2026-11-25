@@ -960,31 +960,65 @@ exp, m = Experiment.open_bundle("exp3.zip")       # → опыт и машина
 (`exp.plant.kwargs`), поэтому `mode4_run` после перехода даёт ряды бит-в-бит как раньше. Пакет `save_bundle`
 сверяет отпечаток машины при распаковке (`load_bundle` — с таблицами, `open_bundle` — документом).
 
-### Хранилище и документы машины (`synchrotronsim.store`, `synchrotronsim.documents`)
+### Хранилище ревизий и рабочая копия таблиц (`ss_store.py`, `synchrotronsim.store`)
 
-Библиотека получает машину и опыт **документами** (протокол — `docs/DATA_PROTOCOL.md`); модель во время счёта
-таблиц не открывает (проверяется тестом `TestModelFromDocuments`).
+Источник правды проекта — **хранилище ревизий** `workspace/store/store.sqlite` (протокол — `docs/DATA_PROTOCOL.md`).
+Таблицы `workspace/tables` — **рабочая копия** (как в git): скрипты, Excel и модель работают с ней, а правка
+становится ревизией по `commit` — с показом разницы. Ревизия машины — срез строк её решётки во всех таблицах
+машины (текст ячеек без потерь) + паспорт + ссылка на ревизию справочника устройств.
+
+```powershell
+py -3.14 ss_store.py status
+```
+```powershell
+py -3.14 ss_store.py diff 26
+```
+```powershell
+py -3.14 ss_store.py commit -m "заметка к правке"
+```
+```powershell
+py -3.14 ss_store.py log 26
+```
+
+| Команда | Что делает |
+|---|---|
+| `init [-m …]` | первые ревизии из рабочей копии: справочник + все решётки (сделано 2026-11-25) |
+| `status [--lattice 26] [--all]` | что изменено и не зафиксировано (изменена / новая / отстала / нет в таблицах) |
+| `diff 26[@рев] [--to рев]` | разница по ячейкам: ревизия (по умолчанию последняя) → рабочая копия или другая ревизия |
+| `commit -m … [--lattice …]` | изменённое → новые ревизии; если с момента выгрузки кто-то зафиксировал — конфликт |
+| `log 26` \| `log library` | история (* — последняя, ч — черновик прогона) |
+| `checkout 26@рев [--force] [--with-library]` | ревизию — в рабочую копию (файлы байт-в-байт); правки без `--force` не затираются |
+| `export 26[@рев\|@working] папка [--no-excel]` | выгрузка для Excel: запятая, «;», UTF-8 с BOM (+ `.base.json`, `export.json`) |
+| `import папка [--commit -m …] [--partial]` | правки из Excel → рабочая копия (наложением; конфликт по одной ячейке — стоп) |
+
+Правка через Excel: `export 26 out\sila26` → открыть `out\sila26\lattice_configs.csv`, поправить, сохранить как CSV →
+`import out\sila26` → `status` / `diff 26` → `commit -m …`. Ячейка, совпавшая с исходной на 15 значащих цифрах
+(точность Excel), правкой не считается; столбцы в выгрузке не правятся. Миграции (`insert_undulators`, `apply_*`)
+правят рабочую копию как раньше — затем `commit`.
+
+Из Python:
 
 ```python
 from synchrotronsim.store import open_store
-st = open_store()                                  # локальное хранилище над нынешними таблицами
-m = st.get("machine", "26")                        # последняя ревизия (Machine)
-ref = st.pin(m)                                    # снимок → machine:26@<отпечаток>
-st.get("machine", "26", ref.rev)                   # та же машина, даже если таблицы потом поправят
+st = open_store()                                  # SqliteStore (есть store.sqlite) или хранилище этапа 1
+m = st.get("machine", "26")                        # рабочая копия (Machine); "head" — последняя зафиксированная
+m0 = st.get("machine", "26", "fb37a0fd27f6")       # ревизия по номеру, префиксу или отпечатку Machine
+ref = st.pin(m)                                    # для прогона: найденная ревизия или черновик рабочей копии
+st.status(); st.diff("machine", "26"); st.commit_working(note="…")
 e = st.get("experiment", "fb:3")                   # опыт; st.commit("experiment", "my", e, parent=…) — ревизия
 from synchrotronsim.documents import save_machine, load_machine
-save_machine(m, "sila26.ssd"); load_machine("sila26.ssd")   # zip: document.json + arrays.npz; отпечаток сверяется
+save_machine(m, "sila26.ssd"); load_machine("sila26.ssd")   # документ Machine: zip document.json + arrays.npz
 ```
 
-- Ревизия машины — её отпечаток (sha256 содержимого). Опыт ссылается на машину `exp.lattice_id` +
-  `exp.machine_rev` (пусто — последняя); `Simulation(exp, store=…, machine=…)`.
-- Каждый прогон фиксирует ревизию машины: снимок документа — `workspace/store/machine/<id>/<ревизия>.ssd`,
-  в паспорте прогона — `machine.ref`. Папка `workspace/store/` в git не хранится.
-- Ревизии опытов — `workspace/store/experiment/<id>/` (указатель `HEAD`, история `index.jsonl`); `commit` поверх
-  устаревшей ревизии — `ConflictError`, не перезапись.
-- Машины пишутся ревизиями на этапе 2 (SQLite + импорт/экспорт CSV); пока источник последней ревизии — таблицы.
+- Модель счёта таблиц не открывает — получает документ `Machine` (тест `TestModelFromDocuments`). Опыт
+  ссылается на машину `exp.lattice_id` + `exp.machine_rev` (пусто — рабочая копия / последняя);
+  `Simulation(exp, store=…, machine=…)`.
+- Каждый прогон фиксирует ревизию машины (`machine.ref` в паспорте): та же, что уже зафиксирована, или черновая
+  ревизия незафиксированной рабочей копии. Без файла `store.sqlite` (хранилище этапа 1) — снимок документа в
+  `workspace/store/machine/<id>/<ревизия>.ssd`.
 - Экраны решётки берутся только из её машины: у решётки 26 своих строк в `screens` нет — все экраны кокпита
   `SCR_und_NN`, 50×50 мм на 20 м (раньше два из них брали имя и размер из строк решётки 27).
+- Правка справочника устройств даёт новые ревизии всех машин (ссылка на справочник — часть ревизии машины).
 
 ## 10. Сравнение моделей — диффур vs кик (element_compare)
 
