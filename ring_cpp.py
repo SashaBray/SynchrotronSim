@@ -623,6 +623,29 @@ class CppRing:
                            + [("VKICK", int(j), float(v)) for j, v in vkicks]
                            + [("YAW", int(j), float(v)) for j, v in yaws])
 
+    # ---- копии для параллельной работы (шаг 6) ---------------------------------------------------
+    def clone(self):
+        """Независимая копия кольца в ТЕКУЩЕМ состоянии: базовые (with_*) и транзитные (apply_perturb) возмущения
+        и ВЧ те же, семантика RESET та же. ext — копия модели в памяти (~30 мс); pipe — новый процесс сервера
+        с проигрыванием возмущений (~1 с). Для параллельных столбцов отклика, сканов, ансамблей."""
+        r = copy.copy(self)
+        r._perturb, r._transient = list(self._perturb), list(self._transient)
+        r.rf = dict(self.rf) if self.rf else self.rf
+        r._py = None
+        if self.backend == "ext":
+            r._be = _ExtBackend(_ext=self._be.x.clone())
+            _LIVE.add(r)
+        else:
+            r._be = None
+            r._start()
+        return r
+
+    def set_threads(self, n):
+        """Потоков OpenMP на пакетный запрос этого кольца (0 — все). Только ext (у сервера — все потоки)."""
+        if self.backend == "ext":
+            self._be.x._r.threads = int(n)
+        return self
+
     def junction(self, states, A, B):
         """Стык плоскостей C++-ядра: выход рамки A → вход рамки B (рамки — (p, axis, u, v))."""
         a = self._states(states)

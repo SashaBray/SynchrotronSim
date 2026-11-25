@@ -252,10 +252,18 @@ def yaw_element(m, alpha):
 
 
 # ============================================================================ алгоритмы (общие для трекеров)
-def closed_orbit(ring, delta=0.0, tol=1e-13, eps=1e-8, max_iter=10, dims=4):
+CO_FLOOR = 1e-11   # м: шум округления орбиты за оборот (~1e-12 м на тысячах элементов, см. FD_EPS ниже)
+
+
+def closed_orbit(ring, delta=0.0, tol=1e-13, eps=1e-8, max_iter=10, dims=4, floor=CO_FLOOR):
     """Замкнутая орбита: Ньютон по T(z)−z, якобиан — разностями.
     dims=4 — поперечная (x,px,y,py) при заданном δ (без ВЧ); dims=6 — неподвижная точка 6D (с ВЧ и излучением:
-    синхронная частица с её δ_s и фазой)."""
+    синхронная частица с её δ_s и фазой).
+
+    floor — остановка у шума округления (2026-11-25, шаг 6 docs/LIBRARY_ARCHITECTURE.md): невязка Ньютона за
+    3–4 итерации падает до ~1e-12 м и дальше лишь блуждает в пределах 1e-12…1e-11 (tol = 1e-13 недостижим),
+    поэтому раньше выполнялись все max_iter итераций — 10 оборотов вместо 4–5, без выигрыша в точности. Как
+    только невязка опустилась ниже floor, возвращается текущая точка. floor=0 — прежнее поведение бит-в-бит."""
     z = np.zeros(dims)
     if dims == 6:
         z[5] = delta
@@ -266,7 +274,7 @@ def closed_orbit(ring, delta=0.0, tol=1e-13, eps=1e-8, max_iter=10, dims=4):
             q = z.copy(); q[k] += eps; pts.append(full(q))
         fin = ring.track(pts)[:, [0, 1, 2, 3] if dims == 4 else slice(0, 6)]
         F = fin[0] - z
-        if np.max(np.abs(F)) < tol:
+        if np.max(np.abs(F)) < max(tol, floor or 0.0):
             break
         J = ((fin[1:] - fin[0]) / eps).T
         z = z - np.linalg.solve(J - np.eye(dims), F)

@@ -29,18 +29,85 @@ def _orbit(ring, dims=4):
     return ring.track_elements([co])[0]
 
 
-def build_response(ring, actuators, observables, applier, reader, eps=EPS_DEFAULT, dims=4):
+def _workers(ring, n_cols):
+    """Сколько копий кольца гонять параллельно: env SS_RESP_WORKERS; по умолчанию — половина потоков OpenMP
+    (≈ физические ядра; больше копий не ускоряет, а каждая стоит ~30 мс на создание), если кольцо умеет дешёвые
+    копии (бэкенд ext модуля расширения), иначе 1 (последовательно, как раньше)."""
+    env = os.environ.get("SS_RESP_WORKERS", "").strip()
+    if env:
+        return max(1, min(int(env), n_cols))
+    if getattr(ring, "backend", None) != "ext" or not hasattr(ring, "clone"):
+        return 1
+    try:
+        import synchrotronsim
+        nt = int(synchrotronsim._engine.omp_threads())
+    except Exception:
+        return 1
+    return max(1, min(max(1, nt // 2), n_cols))
+
+
+def parallel_columns(ring, n, fn, workers=None):
+    """[fn(r, j) for j in range(n)] — независимые «столбцы» на кольце. С бэкендом ext — ПАРАЛЛЕЛЬНО на копиях
+    кольца (`CppRing.clone`, потоки Python; GIL отпущен в ядре; потоки OpenMP поровну между копиями), иначе
+    последовательно на самом кольце. fn обязан делать RESET сам (apply_perturb) — тогда столбец не зависит от
+    порядка, и параллельный результат совпадает с последовательным бит-в-бит. workers: None — авто
+    (env SS_RESP_WORKERS или число потоков OpenMP), 1 — последовательно. Кольцо после вызова — как было до
+    (копии закрываются; само кольцо в параллельном режиме не трогается)."""
+    nw = _workers(ring, n) if workers is None else max(1, min(int(workers), n))
+    if nw <= 1:
+        return [fn(ring, j) for j in range(n)]
+    import queue
+    import threading
+    # потоки OpenMP на копию НЕ ограничиваем, столбцы раздаём очередью: так хвост прогона (последние столбцы)
+    # тоже идёт на всех ядрах. Замер (реш. 26, 60 столбцов): 8–16 копий ×3,1 к последовательному; ограничение
+    # «потоков на копию = все/копии» давало ×2,8, статическая раздача — то же или хуже (замер 2026-11-25)
+    clones = [ring.clone() for _ in range(nw)]
+    res = [None] * n
+    errors = []
+    todo = queue.Queue()
+    for j in range(n):
+        todo.put(j)
+
+    def work(w):
+        try:
+            while not errors:
+                try:
+                    j = todo.get_nowait()
+                except queue.Empty:
+                    return
+                res[j] = fn(clones[w], j)
+        except Exception as e:                               # ошибка столбца — поднять в основном потоке
+            errors.append(e)
+
+    th = [threading.Thread(target=work, args=(w,), name=f"col-{w}") for w in range(nw)]
+    [t.start() for t in th]
+    [t.join() for t in th]
+    for c in clones:
+        c.close()
+    if errors:
+        raise errors[0]
+    return res
+
+
+def build_response(ring, actuators, observables, applier, reader, eps=EPS_DEFAULT, dims=4, workers=None):
     """Снять {observable_id: R[rows × actuators]} с кольца единичными возмущениями актуаторов.
-    dims=6 снимает отклик на 6D-равновесии (дисперсия/энергия в горизонтали) — модель «как на машине»."""
+    dims=6 снимает отклик на 6D-равновесии (дисперсия/энергия в горизонтали) — модель «как на машине».
+    Столбцы — `parallel_columns` (с бэкендом ext — параллельно, бит-в-бит как последовательно)."""
     ring.apply_perturb()                                     # чистое кольцо (RESET киков)
     base = _orbit(ring, dims)
     base_obs = {o: np.asarray(reader(o, base), float) for o in observables}
-    out = {o: np.zeros((len(base_obs[o]), len(actuators))) for o in observables}
-    for j, a in enumerate(actuators):
-        applier(ring, a, eps)                                # apply_perturb с RESET внутри
-        orb = _orbit(ring, dims)
+    acts = list(actuators)
+
+    def column(r, j):
+        applier(r, acts[j], eps)                             # apply_perturb с RESET внутри
+        orb = _orbit(r, dims)
+        return {o: (np.asarray(reader(o, orb), float) - base_obs[o]) / eps for o in observables}
+
+    cols = parallel_columns(ring, len(acts), column, workers)
+    out = {o: np.zeros((len(base_obs[o]), len(acts))) for o in observables}
+    for j, c in enumerate(cols):
         for o in observables:
-            out[o][:, j] = (np.asarray(reader(o, orb), float) - base_obs[o]) / eps
+            out[o][:, j] = c[o]
     ring.apply_perturb()                                     # вернуть кольцо в исходное
     return out
 

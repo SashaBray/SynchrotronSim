@@ -62,13 +62,21 @@ def shift_basis(ideal, elems=None, bpm=None, theta=1e-5, lattice=None, nsl=None,
     bx0, by0 = base[bpm, 0], base[bpm, 2]
     Bx = np.zeros((len(bpm), len(elems)))
     By = np.zeros((len(bpm), len(elems)))
-    for k, j in enumerate(elems):
-        ideal.apply_perturb(kicks=[(j, theta)])
-        co = ra.closed_orbit(ideal, dims=4); orb = ideal.track_elements([co])[0]
-        Bx[:, k] = k1l[k] * (orb[bpm, 0] - bx0) / theta          # сдвиг dx → θx=+K1L·dx
-        ideal.apply_perturb(vkicks=[(j, theta)])
-        co = ra.closed_orbit(ideal, dims=4); orb = ideal.track_elements([co])[0]
-        By[:, k] = -k1l[k] * (orb[bpm, 2] - by0) / theta         # сдвиг dy → θy=−K1L·dy
+    elems_l = list(elems)
+
+    def column(r, k):
+        j = elems_l[k]
+        r.apply_perturb(kicks=[(j, theta)])
+        co = ra.closed_orbit(r, dims=4); orb = r.track_elements([co])[0]
+        bx = k1l[k] * (orb[bpm, 0] - bx0) / theta                # сдвиг dx → θx=+K1L·dx
+        r.apply_perturb(vkicks=[(j, theta)])
+        co = ra.closed_orbit(r, dims=4); orb = r.track_elements([co])[0]
+        by = -k1l[k] * (orb[bpm, 2] - by0) / theta               # сдвиг dy → θy=−K1L·dy
+        return bx, by
+
+    from control.response import parallel_columns               # ext — параллельно на копиях, бит-в-бит
+    for k, (bx, by) in enumerate(parallel_columns(ideal, len(elems_l), column)):
+        Bx[:, k] = bx; By[:, k] = by
     ideal.apply_perturb()
     b = dict(elems=elems, bpm=bpm, Bx=Bx, By=By, k1l=k1l, k1=k1, n_mag=ideal.n_mag, nsl=nsl)
     if path:

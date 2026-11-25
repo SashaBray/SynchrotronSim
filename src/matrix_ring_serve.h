@@ -92,6 +92,16 @@ struct RingModel {
     double end_share = -1.0;                         // доля резонаторов в плоскости наблюдения (< 0 ⇒ нет)
     bool has_cav = false;
     uint64_t requests = 0;
+    // Потоков OpenMP на пакетный запрос: 0 — все доступные (как всегда). Копии машины, работающие параллельно
+    // (столбцы отклика по клонам), ставят себе долю потоков, чтобы не забивать ядра процессора друг другу.
+    int threads = 0;
+    int nthreads() const {
+#ifdef _OPENMP
+        return threads > 0 ? threads : omp_get_max_threads();
+#else
+        return 1;
+#endif
+    }
 
     void build() {
         Settings stg;
@@ -287,7 +297,7 @@ struct RingModel {
         ++requests;
         const double NaN = std::numeric_limits<double>::quiet_NaN();
         std::vector<double> out(in.size() * 6, NaN);
-        #pragma omp parallel for schedule(dynamic)
+        #pragma omp parallel for schedule(dynamic) num_threads(nthreads())
         for (long p = 0; p < (long)in.size(); ++p) {
             IsrRng rng(particleSeed(p)); IsrRng* r = cfg.isr ? &rng : nullptr;
             State s = in[p]; bool ok = true;
@@ -302,7 +312,7 @@ struct RingModel {
         const double NaN = std::numeric_limits<double>::quiet_NaN();
         size_t row = (size_t)(turns + 1) * 6;
         std::vector<double> out(in.size() * row, NaN);
-        #pragma omp parallel for schedule(dynamic)
+        #pragma omp parallel for schedule(dynamic) num_threads(nthreads())
         for (long p = 0; p < (long)in.size(); ++p) {
             IsrRng rng(particleSeed(p)); IsrRng* r = cfg.isr ? &rng : nullptr;
             State s = in[p];
@@ -325,7 +335,7 @@ struct RingModel {
         const double NaN = std::numeric_limits<double>::quiet_NaN();
         size_t n = mags.size(), row = (n + 1) * 6;
         std::vector<double> out(in.size() * row, NaN);
-        #pragma omp parallel for schedule(dynamic)
+        #pragma omp parallel for schedule(dynamic) num_threads(nthreads())
         for (long p = 0; p < (long)in.size(); ++p) {
             auto put = [&](size_t k, const State& q) {
                 double* o = &out[p * row + k * 6];
@@ -377,7 +387,7 @@ struct RingModel {
         const double NaN = std::numeric_limits<double>::quiet_NaN();
         size_t n = pcs.size(), row = (n + 1) * 6;
         std::vector<double> out(in.size() * row, NaN);
-        #pragma omp parallel for schedule(dynamic)
+        #pragma omp parallel for schedule(dynamic) num_threads(nthreads())
         for (long p = 0; p < (long)in.size(); ++p) {
             auto put = [&](size_t k, const State& q) {
                 double* o = &out[p * row + k * 6];
@@ -425,6 +435,15 @@ struct RingModel {
         if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("DKV: нет магнита");
         mags[j].phys.k1v += dq;                       // киковое тело читает k1v напрямую (секторное k1v не берёт)
         mags[j].phys.precache();                      // флаг кикового тела — по полю
+        pieces_stale = true;
+    }
+    // Срезы сектор/кик-тела элемента j на лету (инструмент сходимости срезов): то же, что собрать кольцо с
+    // nsl_dev для его типа (precache пересчитывает длину среза и sin/cos стадий), но без пересборки.
+    void setNsl(int j, int n) {
+        if (j < 0 || j >= (int)mags.size()) throw std::runtime_error("NSL: нет магнита");
+        if (n < 1) throw std::runtime_error("NSL: срезов должно быть ≥ 1");
+        mags[j].phys.nsl = n;
+        mags[j].phys.precache();
         pieces_stale = true;
     }
     void bscale(int j, double f) {                    // живой зазор ИД: угол и грани изгиба = f × исходные

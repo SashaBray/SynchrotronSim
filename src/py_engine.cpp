@@ -148,20 +148,21 @@ struct Ring {
         std::lock_guard<std::mutex> g(mu);
         return new Snapshot{ R };
     }
-    void restore(const Snapshot& s) {                // номер запроса (зерно ISR) не откатывается
+    // Номер запроса (зерно ISR) и число потоков (настройка исполнения, не состояние машины) не откатываются.
+    void restore(const Snapshot& s) {
         std::lock_guard<std::mutex> g(mu);
-        uint64_t rq = R.requests;
+        uint64_t rq = R.requests; int th = R.threads;
         R = s.R;
-        R.requests = rq;
+        R.requests = rq; R.threads = th;
     }
     // RESET без пересборки: магниты и срезы — из снимка свежего кольца, а ВЧ (cfg) — текущий, как у
     // команды RESET сервера (параметры ВЧ живут в конфиге и переживают RESET).
     void reset_to(const Snapshot& s) {
         std::lock_guard<std::mutex> g(mu);
-        uint64_t rq = R.requests;
+        uint64_t rq = R.requests; int th = R.threads;
         mc::RingConfig cfg = R.cfg;
         R = s.R;
-        R.requests = rq; R.cfg = cfg;
+        R.requests = rq; R.cfg = cfg; R.threads = th;
         R.updateRf();
     }
 
@@ -246,6 +247,10 @@ struct Ring {
     void dk2(int j, double v)    { std::lock_guard<std::mutex> g(mu); R.dk2(j, v); }
     void dk3(int j, double v)    { std::lock_guard<std::mutex> g(mu); R.dk3(j, v); }
     void bscale(int j, double v) { std::lock_guard<std::mutex> g(mu); R.bscale(j, v); }
+    void set_nsl(const std::vector<int>& idx, int n) {
+        std::lock_guard<std::mutex> g(mu);
+        for (int j : idx) R.setNsl(j, n);
+    }
     void set_rf(bool on, double volt_mv, double harmonic, double phase_deg, double freq_hz) {
         std::lock_guard<std::mutex> g(mu); R.setRf(on, volt_mv, harmonic, phase_deg, freq_hz);
     }
@@ -314,11 +319,16 @@ NB_MODULE(_engine, m) {
         .def("dk2", &Ring::dk2, "j"_a, "dk"_a)
         .def("dk3", &Ring::dk3, "j"_a, "dk"_a)
         .def("bscale", &Ring::bscale, "j"_a, "f"_a)
+        .def("set_nsl", &Ring::set_nsl, "indices"_a, "n"_a,
+             "срезы сектор/кик-тела у элементов (на лету, как nsl_dev при сборке)")
         .def("set_rf", &Ring::set_rf, "on"_a, "volt_mv"_a, "harmonic"_a, "phase_deg"_a, "freq_hz"_a)
         .def("reset", &Ring::reset)
         .def_prop_ro("n_mag", [](Ring& r) { return r.R.mags.size(); })
         .def_prop_ro("n_pieces", [](Ring& r) { return r.R.pieces.size(); })
         .def_prop_ro("circumference", [](Ring& r) { return r.R.circumference; })
         .def_prop_ro("c_rf", [](Ring& r) { return r.R.c_rf; })
-        .def_prop_ro("requests", [](Ring& r) { return r.R.requests; });
+        .def_prop_ro("requests", [](Ring& r) { return r.R.requests; })
+        .def_prop_rw("threads", [](Ring& r) { return r.R.threads; },
+                     [](Ring& r, int n) { std::lock_guard<std::mutex> g(r.mu); r.R.threads = n < 0 ? 0 : n; },
+                     "потоков OpenMP на пакетный запрос (0 — все)");
 }

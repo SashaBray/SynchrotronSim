@@ -60,15 +60,26 @@ def response_matrix(ideal, corr=None, bpm=None, theta=1e-5):
     bx0, by0 = base[bpm, 0], base[bpm, 2]
     Rx = np.zeros((len(bpm), len(corr)))
     Ry = np.zeros((len(bpm), len(corr)))
-    for j, c in enumerate(corr):
-        ideal.apply_perturb(kicks=[(c, theta)])
-        co, orb = _orbit(ideal, bpm)
+    corr = list(corr)
+
+    def column(r, j):                                           # столбец: RESET внутри apply_perturb
+        c, rx, ry = corr[j], None, None
+        r.apply_perturb(kicks=[(c, theta)])
+        co, orb = _orbit(r, bpm)
         if co is not None:
-            Rx[:, j] = (orb[bpm, 0] - bx0) / theta
-        ideal.apply_perturb(vkicks=[(c, theta)])
-        co, orb = _orbit(ideal, bpm)
+            rx = (orb[bpm, 0] - bx0) / theta
+        r.apply_perturb(vkicks=[(c, theta)])
+        co, orb = _orbit(r, bpm)
         if co is not None:
-            Ry[:, j] = (orb[bpm, 2] - by0) / theta
+            ry = (orb[bpm, 2] - by0) / theta
+        return rx, ry
+
+    from control.response import parallel_columns              # ext — параллельно на копиях, бит-в-бит
+    for j, (rx, ry) in enumerate(parallel_columns(ideal, len(corr), column)):
+        if rx is not None:
+            Rx[:, j] = rx
+        if ry is not None:
+            Ry[:, j] = ry
     ideal.apply_perturb()                                       # вернуть в исходное состояние
     return dict(corr=list(corr), bpm=bpm, Rx=Rx, Ry=Ry)
 
@@ -83,13 +94,18 @@ def threading_response(ideal, corr, bpm, theta=1e-5):
     bx0, by0 = base[bpm, 0], base[bpm, 2]
     Tx = np.zeros((len(bpm), len(corr)))
     Ty = np.zeros((len(bpm), len(corr)))
-    for j, c in enumerate(corr):
-        ideal.apply_perturb(kicks=[(c, theta)])
-        tr = ideal.track_elements([np.zeros(6)])[0]
-        Tx[:, j] = (tr[bpm, 0] - bx0) / theta
-        ideal.apply_perturb(vkicks=[(c, theta)])
-        tr = ideal.track_elements([np.zeros(6)])[0]
-        Ty[:, j] = (tr[bpm, 2] - by0) / theta
+    corr = list(corr)
+
+    def column(r, j):
+        r.apply_perturb(kicks=[(corr[j], theta)])
+        tx = (r.track_elements([np.zeros(6)])[0][bpm, 0] - bx0) / theta
+        r.apply_perturb(vkicks=[(corr[j], theta)])
+        ty = (r.track_elements([np.zeros(6)])[0][bpm, 2] - by0) / theta
+        return tx, ty
+
+    from control.response import parallel_columns
+    for j, (tx, ty) in enumerate(parallel_columns(ideal, len(corr), column)):
+        Tx[:, j] = tx; Ty[:, j] = ty
     ideal.apply_perturb()
     return Tx, Ty
 

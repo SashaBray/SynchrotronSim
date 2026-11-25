@@ -52,8 +52,13 @@ class TbtPlant:
     def __init__(self, lattice=26, nsl=8, n_part=NP, stride=STRIDE, dist_amp=0.3e-6,
                  dist_rho=1.0, meas_noise=0.0, settle_turns=300, seed=1, dist_seed=11, n_photon=8,
                  avg_chunks=9, resp_dims=4, sr=True, disturbance_spec=None, gap_mm=5.0, observer=None,
-                 relative_orbit=False, rf_actuator=False, center_bunch=None, id_pole_nsl=None):
-        nsl_dev = {d: int(id_pole_nsl) for d in ID_POLE_DEVS} if id_pole_nsl else None   # срезы полюсов ИД
+                 relative_orbit=False, rf_actuator=False, center_bunch=None, id_pole_nsl=None, nsl_dev=None):
+        # срезы сектор/кик-тела по типу устройства: nsl_dev — полный набор (напр. рекомендация nsl_convergence.py),
+        # id_pole_nsl — короткий путь «полюса ИД на N срезах»; оба — поверх nsl
+        nsl_dev = dict(nsl_dev or {})
+        if id_pole_nsl:
+            nsl_dev.update({d: int(id_pole_nsl) for d in ID_POLE_DEVS})
+        nsl_dev = nsl_dev or None
         self.stride = stride
         self.gap_mm = float(gap_mm)                           # стартовый зазор ондуляторов (мм); живёт в state.undulators
         self.sr = bool(sr)                                    # СИ вкл/выкл (режим 2: затухание vs сохранение)
