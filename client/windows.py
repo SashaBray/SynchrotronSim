@@ -22,8 +22,8 @@ import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal, QRectF
 from PySide6.QtGui import QPainterPath
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QPushButton, QSpinBox,
-                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+                               QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QPushButton,
+                               QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from . import addresses as A
 
@@ -425,13 +425,16 @@ class InfoWindow(SubscriberWindow):
     """Справка по элементу, СПЕЦИФИЧНАЯ ВИДУ: корректор → кик H/V, квадруполь → k1, секступоль → k2 и т.д.
     Значения — кликабельные гиперссылки (клик → график этого адреса)."""
     KIND = "info"
+    request_edit = Signal(int, str, str)   # (индекс магнита, столбец, значение) — правка ПРОЕКТА (этап 4)
 
-    def __init__(self, element: str, kind: str = "", aids=None, title: str = ""):
+    def __init__(self, element: str, kind: str = "", aids=None, title: str = "", index: int = -1):
         super().__init__(title or f"{_KIND_TITLE.get(kind, 'элемент')} {element}")
         self.element = element
         self.kind = kind
         self.aids = list(aids or [])
+        self.index = int(index)    # индекс магнита (порядок пучка); ≥ 0 — можно править параметры проекта
         self._rows = {}            # addr → ValueLink
+        self._design = {}          # столбец → (QLabel текущее, QLineEdit новое)
 
         grid = QGridLayout()
         head = f"<b>{element}</b>"
@@ -449,7 +452,47 @@ class InfoWindow(SubscriberWindow):
             r += 1
         lay = QVBoxLayout(self)
         lay.addLayout(grid)
+        if self.index >= 0:
+            lay.addWidget(self._design_box())
         lay.addStretch(1)
+
+    def _design_box(self):
+        """Параметры ПРОЕКТА элемента (ячейки таблицы решётки): текущее проектное значение и правка. Сила
+        (G, S, O) — модель применяет сразу; остальное — пересборкой («Правки…»)."""
+        from synchrotronsim.edits import FIELDS_BY_KIND, GEOMETRY, TITLES, UNITS, EDITABLE
+        box = QGroupBox("проект (правка)")
+        g = QGridLayout(box)
+        cols = list(dict.fromkeys(list(FIELDS_BY_KIND.get(self.kind, ())) + list(GEOMETRY)))
+        for n, c in enumerate(cols):
+            u = UNITS.get(c, "")
+            hot = EDITABLE[c][1] == "hot"
+            lab = QLabel(f"{TITLES.get(c, c)}{', ' + u if u else ''}")
+            lab.setToolTip(f"столбец {c}; {'модель применит сразу' if hot else 'применится пересборкой модели'}")
+            cur = QLabel("—")
+            cur.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            ed = QLineEdit()
+            ed.setPlaceholderText("на ходу" if hot else "пересборкой")
+            ed.returnPressed.connect(lambda col=c: self._apply_design(col))
+            btn = QPushButton("→")
+            btn.setFixedWidth(28)
+            btn.setToolTip("применить правку")
+            btn.clicked.connect(lambda _=False, col=c: self._apply_design(col))
+            g.addWidget(lab, n, 0); g.addWidget(cur, n, 1); g.addWidget(ed, n, 2); g.addWidget(btn, n, 3)
+            self._design[c] = (cur, ed)
+        return box
+
+    def _apply_design(self, col: str):
+        cur, ed = self._design[col]
+        t = ed.text().strip().replace(",", ".")
+        if t:
+            self.request_edit.emit(self.index, col, t)
+            ed.clear()
+
+    def set_design_values(self, values: dict) -> None:
+        """Проектные значения (текст ячеек журнала правок) — показать в блоке «проект»."""
+        for c, (cur, _) in self._design.items():
+            v = values.get(c)
+            cur.setText("—" if v is None else (v if v != "" else "(пусто)"))
 
     def addresses(self) -> List[str]:
         return list(self._rows)
@@ -459,7 +502,7 @@ class InfoWindow(SubscriberWindow):
             vl.set_value(_scalar(snap.values.get(addr)))
 
     def params(self) -> dict:
-        return {"element": self.element, "kind": self.kind, "aids": self.aids}
+        return {"element": self.element, "kind": self.kind, "aids": self.aids, "index": self.index}
 
 
 # ------------------------------------------------------------------ экран (цветная карта + спектр в точке)

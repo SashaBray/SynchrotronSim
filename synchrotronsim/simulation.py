@@ -180,6 +180,7 @@ class Runner:
         self.pass_no = 0                      # номер прохода (растёт на каждом рестарте)
         self.err: Optional[str] = None        # последняя ошибка записи
         self.on_finish = None                 # callable(run) после завершения прохода (None — ничего)
+        self.design_edits: list = []          # правки проекта, применённые в модели (synchrotronsim.edits) → паспорт
 
     # ---- шаг и проход ----
     def step(self) -> None:
@@ -271,7 +272,8 @@ class Runner:
         try:
             m = self._machine()
             self.run = Run.create(self.kind, config=self.experiment_snapshot() if config is None else config,
-                                  machine=m, machine_ref=self._pin(m), seed=getattr(self.experiment, "seed", None),
+                                  machine=m, machine_ref=self._pin(m), machine_edits=list(self.design_edits) or None,
+                                  seed=getattr(self.experiment, "seed", None),
                                   source=self.source,
                                   note=note if note is not None else
                                   f"проход {self.pass_no}; старт с оборота {self.turn()}", root=self.run_root)

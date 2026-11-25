@@ -5902,6 +5902,187 @@ class TestRevisionStore(unittest.TestCase):
         self.assertTrue(T.same_in_excel("001", "1") and T.same_in_excel("1e-05", "1,00E-05".replace(",", ".")))
 
 
+@unittest.skipUnless(_engine_ext_available() and os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")),
+                     "нет собранного расширения или БД")
+class TestProjectEdits(unittest.TestCase):
+    """Протокол данных, этап 4: журнал правок проекта. Правка ячеек среза машины; горячая (сила) — модель
+    применяет ручкой ядра и пересчитывает свою машину (= сборке из среза, ядро — бит-в-бит как пересобранное);
+    холодная — пересборкой; отмена/повтор; сохранение — через рабочую копию в ревизию хранилища, конфликт по ячейке."""
+
+    def _store(self):
+        import tempfile, shutil
+        from synchrotronsim.store_sqlite import SqliteStore
+        tmp = tempfile.mkdtemp(prefix="ss_edits_"); self.addCleanup(shutil.rmtree, tmp, True)
+        shutil.copytree(mt.TB, os.path.join(tmp, "tables"))
+        st = SqliteStore(os.path.join(tmp, "store", "store.sqlite"), working=tmp)
+        st.init_from_working()
+        return tmp, st
+
+    @staticmethod
+    def _quad(m):
+        return int(np.nonzero(m.elements.kind == "quad")[0][7])
+
+    def test_journal_undo_redo_save_conflict(self):
+        from synchrotronsim.edits import Journal, EditError
+        from synchrotronsim import tableset as T
+        tmp, st = self._store()
+        lib, sls = st.working_slices([26])
+        J = Journal(sls["26"], lib, "26")
+        m0 = J.machine()
+        self.assertEqual(m0.fingerprint, st.get("machine", "26").fingerprint)
+        q = self._quad(m0)
+        e1 = J.push(J.make(q, "mat_G", 3.25, name="Q"))
+        self.assertEqual((e1.cost, e1.addr.split(".")[0], J.rebuild_needed), ("hot", "design", False))
+        self.assertAlmostEqual(float(J.machine().elements.mat_G[q]), 3.25)
+        e2 = J.push(J.make(q, "x", float(m0.elements.x[q]) + 1e-4, name="Q"))
+        self.assertEqual((e2.cost, J.rebuild_needed), ("cold", True))
+        self.assertEqual(len(e2.keys), int(m0.elements.member_count[q]))     # положение — все обмотки
+        inv, send = J.undo()
+        self.assertFalse(send); self.assertFalse(J.rebuild_needed)           # неприменённая холодная — просто убрана
+        J.redo(); self.assertTrue(J.rebuild_needed)
+        J.mark_rebuilt(); self.assertFalse(J.rebuild_needed)
+        inv, send = J.undo(); self.assertTrue(J.rebuild_needed)              # применённую холодную снимет пересборка
+        J.redo(); J.mark_rebuilt()
+        with self.assertRaises(EditError):
+            J.make(q, "device_type_id", "X")                                  # столбец не правится
+        with self.assertRaises(EditError):
+            J.make(q, "mat_G", "abc")
+        # независимая правка в рабочей копии сохраняется, своя — уходит ревизией
+        p = os.path.join(tmp, "tables", "lattice_configs.csv")
+        s = T.read_sheet(p); L, i, g = s.col("lattice_id"), s.col("instance_id"), s.col("mat_G")
+        other = str(m0.instances.instance_id[int(m0.elements.member_start[q + 3])])
+        k = next(k for k, r in enumerate(s.rows) if r[L] == "26" and r[i] == other)
+        s.rows[k][g] = "1.5"; T.write_sheet(p, s)
+        refs = J.save(st, "правки из теста")
+        self.assertEqual([r.kind for r in refs], ["machine"])
+        self.assertEqual(J.entries, [])
+        cells = sorted((c[0], c[1], c[3]) for d in st.diff("machine", "26", a=st.history("machine", "26")[0]["rev"],
+                                                            b=st.head("machine", "26")) for c in d.cells)
+        self.assertIn((other, "mat_G", "1.5"), cells)                         # независимая — тоже в ревизии
+        self.assertIn((e1.keys[0], "mat_G", "3.25"), cells)
+        self.assertEqual({r["state"] for r in st.status([26]) if r["kind"] == "machine"}, {"clean"})
+        # конфликт: та же ячейка изменена и в рабочей копии, и в журнале
+        e3 = J.push(J.make(q, "mat_G", 4.0))
+        s = T.read_sheet(p); k2 = next(k for k, r in enumerate(s.rows) if r[L] == "26" and r[i] == e3.keys[0])
+        s.rows[k2][g] = "9.0"; T.write_sheet(p, s)
+        with self.assertRaises(EditError):
+            J.save(st, "конфликт")
+
+    def test_engine_hot_edit_matches_rebuild(self):
+        from synchrotronsim.edits import Journal, apply_machine
+        from synchrotronsim import tableset as T
+        from synchrotronsim.engine import ExtRing
+        from client import InProcLink
+        from client.engine import EngineThread
+        from control import ExperimentState, Scheduler
+        import ring_cpp
+        lib = T.library_slice(mt.TB.rsplit(os.sep, 1)[0]); sl = T.machine_slice(mt.TB.rsplit(os.sep, 1)[0], 26)
+        sl["library"] = T.content_rev(lib)
+        J = Journal(sl, lib, "26")
+        m0 = J.machine()
+        plant = _FakeInfinitePlant()
+        plant.machine = m0
+        rf = {"volt_mv": 8.0, "harmonic": 1296, "phase_deg": 165.0}
+        plant.ring = ring_cpp.CppRing(machine=m0, sr=True, rf=rf, design_mev=6000.0)
+        state = ExperimentState(plant.schema())
+        sch = Scheduler(plant, state, dt=1.0e-3)
+        eng = EngineThread(InProcLink(), sch)
+        q = self._quad(m0)
+        g0 = float(m0.elements.mat_G[q])
+        for col, v in (("mat_G", g0 * 1.01), ("mat_Gv", g0 * 1.02)):           # реальные правки (частица не теряется)
+            e = J.push(J.make(q, col, v, name="Q"))
+            eng._command(e.addr, e.to_dict())
+        self.assertIsNone((eng._design or {}).get("error"))
+        self.assertEqual(plant.machine.fingerprint, J.machine().fingerprint)  # машина модели = журнал
+        self.assertIs(sch.machine, plant.machine)
+        self.assertEqual(len(eng.runner.design_edits), 2)
+        plant.ring.apply_perturb()                                            # RESET: базовые правки остаются
+        x0 = np.array([[1e-4, 0, 5e-5, 0, 0, 1e-3]])
+        ta = np.asarray(plant.ring.track(x0, 20))
+        tb = np.asarray(ExtRing(machine=J.machine(), sr=True, rf=rf).track(x0, 20))
+        self.assertTrue(np.array_equal(ta, tb))                               # ручка = пересобранное кольцо
+        cold = J.make(q, "x", float(m0.elements.x[q]) + 1e-3)
+        eng._command(cold.addr, cold.to_dict())                               # холодная — не на ходу
+        self.assertIn("пересборкой", eng._design.get("error", ""))
+        self.assertTrue(np.all(np.isfinite(ta)))
+        self.assertEqual(eng._design_value(f"design.{e.keys[0]}.mat_G"), float(repr(g0 * 1.01)))
+        from synchrotronsim import addresses as AD
+        mm = AD.meta("design.101.mat_G")
+        self.assertEqual((mm.scope, mm.edit, mm.writable), ("project", "hot", True))
+        self.assertEqual(AD.meta("design.101.x").edit, "cold")
+
+    def test_cockpit_edit_flow(self):
+        from types import SimpleNamespace
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from PySide6.QtWidgets import QApplication
+            from client.cockpit import Cockpit
+        except Exception as e:
+            self.skipTest(f"нет Qt: {e}")
+        import client.scene3d as s3
+        from client import InProcLink
+        from client.windows import InfoWindow
+        from control import ExperimentState, Scheduler
+        from synchrotronsim.experiment import Experiment, PlantSpec
+        import ring_cpp
+        app = QApplication.instance() or QApplication([])
+        tmp, st = self._store()
+
+        class _Scene:
+            model = SimpleNamespace(screens=[], named=[])
+            def set_geometry(self, b): self.g = b
+            def fit_view(self): pass
+            def update_snapshot(self, s): pass
+            def animate_jaws(self): pass
+            def is_interacting(self): return False
+        orig = s3.build_geometry
+        self.addCleanup(setattr, s3, "build_geometry", orig)
+
+        def session(machine):
+            plant = _FakeInfinitePlant()
+            plant.machine = machine
+            plant.ring = ring_cpp.CppRing(machine=machine, design_mev=6000.0)
+            state = ExperimentState(plant.schema()); plant.reset(state)
+            sch = Scheduler(plant, state, dt=1.0e-3)
+            sch.experiment = Experiment(name="ed", lattice_id=26, plant=PlantSpec("tbt", {}))
+            return plant, state, sch
+        m0 = st.get("machine", "26")
+        q = self._quad(m0)
+        s3.build_geometry = lambda plant, state=None, **k: {"named": [{"name": "SP01.Q", "s_idx": q, "kind": "quad"}]}
+        win = Cockpit(InProcLink(), project="unittest_tmp_cockpit", poll_ms=100000)
+        win.scene = _Scene()
+        win._edit_store = lambda: st
+        try:
+            win._attach(session(m0))
+            iw = InfoWindow("SP01.Q", kind="quad", index=q)
+            win.open_window(iw)
+            self.assertIsNotNone(win.journal)                                 # журнал — по рабочей копии
+            self.assertEqual(iw._design["mat_G"][0].text(), win.journal.cell([win.journal.edits and "" or
+                                                                              win.journal.machine().instances.instance_id[int(m0.elements.member_start[q])]], "mat_G"))
+            iw._design["mat_G"][1].setText("2,5")                             # запятая — тоже число
+            iw._apply_design("mat_G")
+            self.assertEqual(len(win.journal.entries), 1)
+            self.assertEqual(iw._design["mat_G"][0].text(), "2.5")
+            win._engine._drain()                                              # движок принял команду правки
+            self.assertEqual(win._plant.machine.fingerprint, win.journal.machine().fingerprint)
+            e = win.design_edit(q, "x", str(float(m0.elements.x[q]) + 1e-4))
+            self.assertEqual(e.cost, "cold"); self.assertTrue(win.journal.rebuild_needed)
+            win._edits_dialog(); app.processEvents()
+            self.assertEqual(win._edits_win.inner.table.rowCount(), 2)
+            self.assertTrue(win._edits_win.inner.b_rebuild.isEnabled())
+            win._carry = win._detach()                                        # пересборка по машине журнала
+            win._attach(session(win.journal.machine()))
+            self.assertFalse(win.journal.rebuild_needed)
+            self.assertTrue(all(x.applied for x in win.journal.entries))
+            refs = win._save_edits("из кокпита")
+            self.assertEqual([r.kind for r in refs], ["machine"])
+            self.assertEqual(st.get("machine", "26", "head").fingerprint, win._plant.machine.fingerprint)
+            self.assertEqual(win.journal.entries, [])
+        finally:
+            win._detach()
+            win.close()
+
+
 @unittest.skipUnless(os.path.exists(os.path.join(mt.TB, "lattice_configs.csv")), "нет БД")
 class TestNetwork(unittest.TestCase):
     """Протокол данных, этап 3: сетевой формат, сервер хранилища (токен, рабочая копия против сервера), площадка

@@ -63,6 +63,8 @@ class EngineThread(threading.Thread):
         self.screen_period = float(screen_period)  # период пересчёта экрана, с (медленный такт)
         self._unknown: Optional[str] = None  # последняя нераспознанная команда (диагностика)
         self._err: Optional[str] = None      # последнее исключение тела потока
+        self._design: Optional[dict] = None  # правки проекта, применённые в модели: отпечаток машины, число, ошибка
+        self._kcur: Dict[int, list] = {}     # магнит → силы ядра (k1, k1v, k2, k3) после горячих правок
         # исполнитель опыта (библиотека): шаг, рестарт прохода, лимит оборотов, запись прогона (Watch → Run)
         from synchrotronsim.simulation import Runner
         self.run_root = run_root             # корень проекта/рабочей папки для workspace/runs (None — проект)
@@ -180,6 +182,8 @@ class EngineThread(threading.Thread):
                     spec.controller.params["gain"] = float(value)   # закон контура читает params["gain"]
                 else:
                     self._mark_unknown(addr)
+            elif kind == "design":                        # правка ПРОЕКТА (этап 4): горячая — ручкой ядра
+                self._design_edit(value)
             elif kind == "act":                           # привод актуатора: act.<aid>.<поле>
                 p = A.parse(addr)
                 aid, fld = p.obj, p.attr
@@ -201,6 +205,55 @@ class EngineThread(threading.Thread):
     def _mark_unknown(self, addr: str) -> None:
         self._unknown = addr
 
+    # ---- правки проекта (synchrotronsim.edits)
+    def _design_plant(self):
+        """Plant с кольцом орбиты (у CompositePlant — его TbtPlant)."""
+        return getattr(self.plant, "tbt", None) or self.plant
+
+    def _design_edit(self, value) -> None:
+        """Горячая правка проекта: машина модели пересчитывается (тем же разбором, что из таблиц), сила
+        реализуется ручкой ядра базовым возмущением (переживает шаги и рестарт). Холодная — только пересборкой.
+        Ошибка — в мете design.error, поток не падает."""
+        from synchrotronsim.edits import Edit, apply_machine, hot_commands
+        try:
+            e = Edit.from_dict(value)
+            if e.cost != "hot":
+                raise ValueError(f"{e.addr}: правка применяется пересборкой модели, не на ходу")
+            tp = self._design_plant()
+            m_old = getattr(tp, "machine", None) or getattr(self.sch, "machine", None)
+            if m_old is None:
+                raise ValueError("у модели нет документа машины")
+            m_new = apply_machine(m_old, e)
+            ring = tp.ring
+            cmds, cur = hot_commands(m_old, m_new, e.element, self._kcur.get(int(e.element)))
+            for c, j, v in cmds:
+                ring.add_base(c, j, v)
+            self._kcur[int(e.element)] = cur               # силы ядра после правки (те же операции, что в C++)
+            if hasattr(tp, "_last_kick"):
+                tp._last_kick = None                       # следующий шаг — RESET + базовые: ровно как пересборка
+            tp.machine = m_new
+            if hasattr(ring, "_machine"):
+                ring._machine = m_new
+            self.sch.machine = m_new                       # паспорт прогона — машина, которая считается
+            self.runner.design_edits.append(e.to_dict())
+            self._design = {"fingerprint": m_new.fingerprint, "edits": len(self.runner.design_edits), "error": None}
+        except Exception as ex:                            # noqa: BLE001 — в мету, не ронять поток
+            self._design = dict(self._design or {}, error=f"{type(ex).__name__}: {ex}")
+
+    def _design_value(self, addr: str):
+        """Значение `design.<instance_id>.<столбец>` из машины модели (ячейка строки; NaN — пусто → None)."""
+        from synchrotronsim import addresses as AD
+        try:
+            p = AD.parse(addr)
+            m = getattr(self._design_plant(), "machine", None)
+            I = m.instances
+            r = int(np.nonzero(I.instance_id == p.obj)[0][0])
+            v = getattr(I, p.attr)[r]
+            v = float(v)
+            return None if v != v else v
+        except Exception:                                  # noqa: BLE001
+            return None
+
     # ---- публикация снимка ----
     def _meta(self) -> dict:
         mt = float(self.state.t)
@@ -209,6 +262,8 @@ class EngineThread(threading.Thread):
              "cycle": int(self._cycle), "seq": int(self._seq), "running": bool(self._running),
              "turn": int(getattr(self.plant, "turn", 0)), "alive": bool(getattr(self.plant, "alive", True))}
         R = self.runner
+        if self._design:
+            m["design"] = dict(self._design)
         m["recording"] = R.run is not None
         m["run_id"] = R.run.run_id if R.run is not None else ""
         m["pass"] = int(R.pass_no)
@@ -233,6 +288,8 @@ class EngineThread(threading.Thread):
                 values[a] = self._screen_value(a)
             elif A.kind_of(a) == "diag":
                 values[a] = self._diag_value(a)
+            elif A.kind_of(a) == "design":
+                values[a] = self._design_value(a)
             else:
                 values[a] = A.resolve(view, a, loops=self.sch.loops, meta=meta)
         self.link.publish(Snapshot(values=values, meta=meta))

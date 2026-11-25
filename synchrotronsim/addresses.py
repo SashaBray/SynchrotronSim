@@ -47,7 +47,7 @@ W_INFO = "info"       # составной (инфо-панель)
 AREAS = {
     "obs": "наблюдаемая", "act": "актуатор и его привод", "undulator": "ондулятор", "optics": "линейная оптика",
     "element": "магнит", "loop": "контур", "meta": "мета прогона", "screen": "экран", "diag": "стандартный график",
-    "rec": "ряд рекордера",
+    "rec": "ряд рекордера", "design": "параметр проекта",
 }
 DRIVE_FIELDS = ("slew", "lag_tau", "res", "act", "odz_lo", "odz_hi")
 UND_ATTRS = ("gap", "gap_target", "K", "B0", "orbit_kick", "slew")
@@ -87,6 +87,8 @@ class AddrMeta:
     shape: str = "scalar"
     owner: str = "board"
     cost: str = "cheap"
+    scope: str = "state"      # state — живое состояние (ток, зазор, усиление); project — параметр проекта (машина)
+    edit: str = ""            # для параметров проекта: hot — модель применяет сразу; cold — пересборкой
 
 
 @dataclass(frozen=True)
@@ -159,7 +161,7 @@ def parse(addr: str) -> Parsed:
     if area == "optics":
         attr, _, dev = body.partition("@")
         return Parsed(area, "", attr, at=dev, red=red)
-    if area in ("element", "loop"):
+    if area in ("element", "loop", "design"):
         obj, _, attr = body.rpartition(".")
         return Parsed(area, obj, attr, red=red)
     if area == "undulator":
@@ -400,4 +402,9 @@ def meta(addr: str) -> AddrMeta:
     if k == "rec":
         nm, un = _rec_meta(p.obj)
         return AddrMeta(a, nm, un, W_GRAPH, k, owner="recorder")
+    if k == "design":
+        from .edits import UNITS, TITLES, EDITABLE
+        return AddrMeta(a, f"{p.obj} · {TITLES.get(p.attr, p.attr)} (проект)", UNITS.get(p.attr, ""), W_SCALAR, k,
+                        writable=p.attr in EDITABLE, owner="machine", scope="project",
+                        edit=EDITABLE.get(p.attr, ("", "cold"))[1])
     return AddrMeta(a, a, "", W_SCALAR, k)

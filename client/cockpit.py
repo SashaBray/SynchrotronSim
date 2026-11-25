@@ -327,6 +327,10 @@ class Cockpit(QMainWindow):
         self.experiment = None                 # опыт (synchrotronsim.experiment.Experiment), который исполняет модель
         self._machine_doc = None               # документ машины из пакета опыта (держится для пересборок той же решётки)
         self._desc = None                      # описание сеанса (client.engine.describe_session / с вычислителя)
+        self.journal = None                    # журнал правок проекта (synchrotronsim.edits.Journal) — лениво
+        self._journal_reason = ""              # почему правка недоступна
+        self._edits_win = None                 # окно «Правки проекта» (_ToolWindow)
+        self._engine_design_fp = ""            # отпечаток машины модели после горячих правок (мета design)
         self._session_subs: List[str] = []     # подписки панели/сцены текущей сборки (снимаются при пересборке)
         self._carry: Optional[dict] = None     # что перенести в новую сборку (запись, отметки, зазоры, пуск)
         self._opts = dict(gap_scale=1.0, gap_slew_mm_s=500.0, publish_every=3, autorun=False, restore_last=True,
@@ -375,6 +379,8 @@ class Cockpit(QMainWindow):
         self.act_experiment = tb.addAction("Опыт…", self._experiment_dialog)   # точность/модель/контуры + пересборка
         self.act_experiment.setToolTip("опыт, который исполняет модель: правка точности и контуров с пересборкой, "
                                        "открыть/сохранить опыт (JSON)")
+        self.act_edits = tb.addAction("Правки…", self._edits_dialog)       # журнал правок проекта (этап 4)
+        self.act_edits.setToolTip("правки параметров проекта: список, отмена/повтор, пересборка, сохранение ревизией")
         tb.addSeparator()
         tb.addAction("Закрыть окна", self._close_subscriber_windows)
         tb.addSeparator()
@@ -522,6 +528,10 @@ class Cockpit(QMainWindow):
             win.request_watch.connect(self._watch_from_window)
         except Exception:
             pass
+        if hasattr(win, "request_edit"):                       # окно элемента: правка проекта
+            win.request_edit.connect(self.design_edit)
+            if getattr(win, "index", -1) >= 0:
+                self._fill_design(win)
         if isinstance(win, (ScreenWindow, UndulatorInfoWindow)):
             win.bind_link(self.link)
         tw = _ToolWindow(win, win.title(), on_close=lambda w=win: self._on_window_closed(w), parent=self)
@@ -588,16 +598,16 @@ class Cockpit(QMainWindow):
     def _open_info(self, addr: str, name: str = ""):
         from .windows import InfoWindow
         element = name or (addr[len("element."):] if addr.startswith("element.") else addr)
-        kind, aids = "", None                              # вид и актуаторы объекта — из геометрии сцены
+        kind, aids, idx = "", None, -1                     # вид, актуаторы, индекс магнита — из геометрии сцены
         try:
             for n in (self.scene.model.named or []):
                 if n.get("name") == element:
-                    kind, aids = n.get("kind", ""), n.get("aids")
+                    kind, aids, idx = n.get("kind", ""), n.get("aids"), int(n.get("s_idx", -1))
                     break
         except Exception:
             pass
         self.set_status(f"элемент: {element}")
-        self.open_window(InfoWindow(element, kind=kind, aids=aids))
+        self.open_window(InfoWindow(element, kind=kind, aids=aids, index=idx))
 
     def _open_point(self, x_addr: str, y_addr: str):
         from .windows import PointWindow
@@ -712,6 +722,13 @@ class Cockpit(QMainWindow):
             return
         self._last_seq = seq
         self.control.update_meta(snap.meta)
+        dfp = (snap.meta.get("design") or {}).get("fingerprint") or ""
+        if dfp != self._engine_design_fp:                        # модель применила правку — сверить с журналом
+            self._engine_design_fp = dfp
+            derr = (snap.meta.get("design") or {}).get("error")
+            if derr:
+                self.set_status(f"модель не приняла правку: {derr}")
+            self._refresh_edits()
         self.control.update_loops(snap.values)        # синхрон переключателей контуров с движком
         self.control.update_optics(snap.values)       # живые тюн/хроматизм/adts на панели
         if self.scene is not None:
@@ -802,9 +819,15 @@ class Cockpit(QMainWindow):
         Удалённый режим (площадка с вычислителем): модель строится на вычислителе, сюда приходит её описание."""
         exp, m = load_experiment_doc(experiment)
         machine = machine or m
-        if machine is None and self._machine_doc is not None and int(self._machine_doc.lattice_id) == int(exp.lattice_id):
+        if machine is not None:                                  # документ машины задан явно (пакет опыта)
+            self._machine_doc = machine
+        elif self.journal is not None and int(self.journal.machine_id) == int(exp.lattice_id) and \
+                (self.journal.entries or self.journal.rebuild_needed):
+            machine = self.journal.machine()                     # правки проекта — в пересборку
+        elif self._machine_doc is not None and int(self._machine_doc.lattice_id) == int(exp.lattice_id):
             machine = self._machine_doc
-        self._machine_doc = machine
+        else:
+            self._machine_doc = None
         if exp.plant.kind not in COCKPIT_PLANTS:
             raise ValueError(f"опыт «{exp.name}»: модель {exp.plant.kind} без кольца — кокпит показывает только "
                              f"{'/'.join(COCKPIT_PLANTS)}; такой опыт исполняется Simulation(exp).run()")
@@ -911,6 +934,17 @@ class Cockpit(QMainWindow):
         self.experiment = exp
         self._desc = D
         self._plant, self._state = plant, state
+        self._engine_design_fp = ""
+        if self.journal is not None:                             # пересборка по машине журнала — правки в модели
+            fp = (D.get("machine") or {}).get("fingerprint")
+            if fp and self.journal.machine().fingerprint == fp:
+                self.journal.mark_rebuilt()
+            else:
+                n = len(self.journal.entries)
+                self.journal = None
+                if n:
+                    self.set_status(f"машина модели сменилась — правки журнала ({n}) к ней не относятся и сброшены")
+        self._refresh_edits()
         from .scene3d import make_ring_scene
         scene = make_ring_scene(gap_scale=o["gap_scale"]) if first else self.scene
         scene.set_geometry(D["geometry"])
@@ -982,6 +1016,187 @@ class Cockpit(QMainWindow):
             self.set_status(f"{name} пересобран{where} — прогон продолжается с нуля")
         else:
             self.set_status(f"{name} {'готов' if first else 'пересобран'}{where} — нажмите «Пуск»")
+
+    # ---- правки проекта (synchrotronsim.edits): журнал у клиента, горячие — в модель, холодные — пересборкой
+    def _edit_store(self):
+        if self.site is not None and getattr(self.site, "store_url", ""):
+            return self.site.store
+        from synchrotronsim.store import open_store
+        return open_store()
+
+    def _ensure_journal(self):
+        """Журнал правок для машины текущей модели: срез-база — рабочая копия таблиц или ревизия хранилища, чья
+        машина совпала с машиной модели по отпечатку. None — правка недоступна (причина — _journal_reason)."""
+        if self.journal is not None:
+            return self.journal
+        D = self._desc or {}
+        mi = D.get("machine")
+        if not mi:
+            self._journal_reason = "модель ещё не собрана"
+            return None
+        fp, lat = mi["fingerprint"], int(mi["lattice_id"])
+        from synchrotronsim.edits import Journal
+        from synchrotronsim import tableset as T
+        cands = []
+        try:
+            st = self._edit_store()
+        except Exception as e:                                   # noqa: BLE001
+            st = None
+            self._journal_reason = f"хранилище недоступно: {e}"
+        try:
+            if st is not None and getattr(st, "working", None) and hasattr(st, "working_slices"):
+                lib, sls = st.working_slices([lat])
+                cands.append((sls[str(lat)], lib, ""))
+            else:
+                from synchrotronsim.db import PROJECT_ROOT
+                lib = T.library_slice(PROJECT_ROOT)
+                sl = T.machine_slice(PROJECT_ROOT, lat)
+                sl["library"] = T.content_rev(lib)
+                cands.append((sl, lib, ""))
+        except Exception:                                        # noqa: BLE001
+            pass
+        try:
+            if st is not None and hasattr(st, "machine_slice_at"):
+                row = st.revision("machine", str(lat), fp)
+                sl = st.machine_slice_at(str(lat), row["rev"])
+                cands.append((sl, st.library_content(sl["library"]), row["rev"]))
+        except Exception:                                        # noqa: BLE001
+            pass
+        for sl, lib, rev in cands:
+            J = Journal(sl, lib, str(lat), base_rev=rev)
+            if J.machine().fingerprint == fp:
+                self.journal = J
+                self._journal_reason = ""
+                return J
+        self._journal_reason = ("машины модели нет ни в рабочей копии таблиц, ни в хранилище (модель из пакета "
+                                "опыта или таблицы изменились после сборки) — правка проекта недоступна")
+        return None
+
+    def _element_name(self, j: int) -> str:
+        for n in ((self._desc or {}).get("geometry") or {}).get("named", []):
+            if int(n.get("s_idx", -1)) == int(j):
+                return n.get("name", "")
+        return ""
+
+    def design_edit(self, j: int, column: str, value: str):
+        """Правка параметра проекта магнита j: в журнал; горячая — сразу в модель, холодная — ждёт пересборки."""
+        J = self._ensure_journal()
+        if J is None:
+            self.set_status(self._journal_reason)
+            return None
+        try:
+            e = J.make(int(j), column, value, name=self._element_name(j))
+            J.push(e)
+        except Exception as ex:                                  # noqa: BLE001 — правка не принята
+            self.set_status(f"правка не принята: {ex}")
+            return None
+        if e.cost == "hot":
+            self.link.command(e.addr, e.to_dict())
+            self.set_status(f"правка в модели: {e.describe()}")
+        else:
+            self.set_status(f"правка в журнале: {e.describe()} — применится пересборкой («Правки…» → «Пересобрать»)")
+        self._refresh_edits()
+        return e
+
+    def _undo_edit(self):
+        J = self.journal
+        r = J.undo() if J is not None else None
+        if r is None:
+            return
+        inv, send = r
+        if send:
+            self.link.command(inv.addr, inv.to_dict())
+        self.set_status(f"отменено: {inv.inverse().describe()}" + (" — модель отстаёт, нужна пересборка"
+                                                                    if J.rebuild_needed else ""))
+        self._refresh_edits()
+
+    def _redo_edit(self):
+        J = self.journal
+        e = J.redo() if J is not None else None
+        if e is None:
+            return
+        if e.cost == "hot":
+            self.link.command(e.addr, e.to_dict())
+        self.set_status(f"повторено: {e.describe()}")
+        self._refresh_edits()
+
+    def _rebuild_edits(self):
+        if self.journal is None or self.experiment is None:
+            return
+        self.rebuild(self.current_experiment(), self.journal.machine())
+
+    def _save_edits(self, note: str = ""):
+        J = self.journal
+        if J is None or not J.entries:
+            return None
+        try:
+            refs = J.save(self._edit_store(), note)
+        except Exception as ex:                                  # noqa: BLE001
+            self.set_status(f"правки не сохранены: {ex}")
+            QMessageBox.warning(self, "Правки проекта", f"правки не сохранены:\n{ex}")
+            return None
+        self.set_status("правки сохранены: " + (", ".join(r.short for r in refs) or "ревизия не изменилась")
+                        + (" · модель отстаёт — нужна пересборка" if J.rebuild_needed else ""))
+        self._refresh_edits()
+        return refs
+
+    def _discard_edits(self):
+        J = self.journal
+        if J is None:
+            return
+        n = 0
+        while J.entries:
+            inv, send = J.undo()
+            if send:
+                self.link.command(inv.addr, inv.to_dict())
+            n += 1
+        J.redo_stack.clear()
+        self.set_status(f"правки сброшены: {n}" + (" — модель отстаёт, нужна пересборка" if J.rebuild_needed else ""))
+        self._refresh_edits()
+
+    def _fill_design(self, win):
+        J = self._ensure_journal()
+        if J is None or getattr(win, "index", -1) < 0:
+            return
+        try:
+            from synchrotronsim.edits import element_rows
+            keys = element_rows(J.machine(), int(win.index))[:1]
+            vals = {c: J.cell(keys, c) for c in getattr(win, "_design", {})}
+            win.set_design_values(vals)
+        except Exception:                                        # noqa: BLE001
+            pass
+
+    def _refresh_edits(self):
+        if self._edits_win is not None:
+            try:
+                self._edits_win.inner.refresh(self.journal, self._journal_reason, self._engine_design_fp)
+            except RuntimeError:                                 # окно закрыли
+                self._edits_win = None
+        for w in list(self._windows):
+            if hasattr(w, "set_design_values"):
+                self._fill_design(w)
+
+    def _edits_dialog(self):
+        from .edits_window import EditsWindow
+        if self._edits_win is not None:
+            try:
+                self._edits_win.show(); self._edits_win.raise_()
+                self._ensure_journal(); self._refresh_edits()
+                return
+            except RuntimeError:
+                self._edits_win = None
+        ew = EditsWindow()
+        ew.undo.connect(self._undo_edit); ew.redo.connect(self._redo_edit)
+        ew.rebuild.connect(self._rebuild_edits); ew.save.connect(self._save_edits)
+        ew.discard.connect(self._discard_edits)
+        tw = _ToolWindow(ew, "Правки проекта", on_close=lambda: setattr(self, "_edits_win", None), parent=self)
+        tw.inner = ew
+        tw.resize(720, 320)
+        self._place_near_cursor(tw)
+        tw.show()
+        self._edits_win = tw
+        self._ensure_journal()
+        self._refresh_edits()
 
     def current_experiment(self):
         """Опыт с ЖИВЫМИ флагами контуров, отмеченными величинами и лимитом записи — то, что сохранится в JSON

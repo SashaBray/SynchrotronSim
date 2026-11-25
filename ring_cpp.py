@@ -645,6 +645,17 @@ class CppRing:
             r._start()
         return r
 
+    def add_base(self, cmd, j, v):
+        """Добавить БАЗОВОЕ возмущение на том же кольце (сразу в ядро; переживает apply_perturb и RESET): правка
+        проекта на горячую — DK/DKV/DK2/DK3 (Δk = QP·Δполе). Описание магнитов (`mags`) пересоберётся."""
+        cmd = str(cmd).upper()
+        if cmd not in ("KICK", "VKICK", "DK", "DKV", "DSK", "DK2", "DK3"):
+            raise ValueError(f"add_base: {cmd} не базовое возмущение")
+        self._perturb.append((cmd, int(j), float(v)))
+        self._be.cmd(cmd, int(j), float(v))
+        self._py = None
+        return self
+
     def set_threads(self, n):
         """Потоков OpenMP на пакетный запрос этого кольца (0 — все). Только ext (у сервера — все потоки)."""
         if self.backend == "ext":

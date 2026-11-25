@@ -428,8 +428,11 @@ def apply_edits(current: Dict[str, Any], base: Dict[str, Any], edited: Dict[str,
 def machine_from_slices(machine_sl: Dict[str, Any], library_sl: Dict[str, Any], source: str = ""):
     """Документ Machine из среза машины и справочника — тем же разбором, что и из CSV (Repository).
     source — метка происхождения (по умолчанию store:machine/<id>@<ревизия среза>+<ревизия справочника>)."""
+    from dataclasses import replace
     from .db import MemoryRepository
-    label = source or f"store:machine/{machine_sl['id']}@{content_rev(machine_sl)[:16]}+{content_rev(library_sl)[:16]}"
+    # метка кэша машин — ТОЛЬКО по содержимому (одинаковая метка у разного содержимого вернула бы чужую машину)
+    label = f"store:machine/{machine_sl['id']}@{content_rev(machine_sl)[:16]}+{content_rev(library_sl)[:16]}"
     repo = MemoryRepository({**library_sl.get("tables", {}), **machine_sl.get("tables", {})},
                             passport={int(machine_sl["id"]): machine_sl.get("passport")}, label=label)
-    return repo.machine(int(machine_sl["id"]))
+    m = repo.machine(int(machine_sl["id"]))
+    return replace(m, source=source) if source and source != m.source else m
