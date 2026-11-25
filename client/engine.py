@@ -54,6 +54,7 @@ class EngineThread(threading.Thread):
         self._step = 0                                # счётчик базовых тактов (для кадра раз в publish_every)
         self._seq = 0
         self._cav_cache = None                        # (ключ такта и ВЧ, состояние резонатора) — один расчёт на кадр
+        self._cav_nb = None                           # сгустков в заполнении (окно резонатора); None — все h мест
         self._wall_run = 0.0                 # накопленные стенные секунды шагов — знаменатель скорости
         self._screens: Dict[str, dict] = {}  # addr → {"area","res"} — настройки экрана (set_screen)
         self._screen_val: Dict[str, dict] = {}   # addr → последний посчитанный результат экрана
@@ -188,7 +189,11 @@ class EngineThread(threading.Thread):
             elif kind == "cavity":                        # ручки резонатора: cavity.volt_mv | phase_deg | df_hz
                 obj = addr.split(".", 1)[1]
                 tp = self._design_plant()
-                if obj in A.CAVITY_WRITABLE and hasattr(tp, "set_cavity"):
+                if obj == "n_bunches":                    # заполнение: сгустков в кольце (не физика пучка модели)
+                    n = int(round(float(value)))
+                    self._cav_nb = n if n >= 1 else None
+                    self._cav_cache = None
+                elif obj in A.CAVITY_WRITABLE and hasattr(tp, "set_cavity"):
                     tp.set_cavity(**{obj: float(value)})
                 else:
                     self._mark_unknown(addr)
@@ -314,7 +319,8 @@ class EngineThread(threading.Thread):
                 rad = tp.radiation_now() if hasattr(tp, "radiation_now") else None
                 P = getattr(getattr(tp, "_und_sr", None), "P", None)     # ток — допущение undulator_sr.P
                 derived(out, float(tp.ring.circumference), rad=rad,
-                        current_a=float(P.I) if P is not None and getattr(P, "I", None) else None)
+                        current_a=float(P.I) if P is not None and getattr(P, "I", None) else None,
+                        n_bunches=self._cav_nb)
                 self._cav_cache = (ck, out)
             if obj == "state":
                 return out

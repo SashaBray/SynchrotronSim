@@ -5958,6 +5958,13 @@ class TestCavityAndTargets(unittest.TestCase):
             for row in rows:
                 self.assertNotEqual(format_param(row[0], b), "—", row[0])
         self.assertIn("нс", format_param("lambda_rf_m", b))
+        self.assertEqual(b["n_bunches"], h)                                               # по умолчанию все места
+        self.assertAlmostEqual(b["bunch_spacing_m"], C / h, places=9)
+        self.assertAlmostEqual(b["sphi0_deg"], 360.0 * b["sz0_m"] / b["lambda_rf_m"], places=12)
+        q_all = b["q_bunch_c"]
+        derived(b, C, rad=rad, current_a=0.2, n_bunches=h // 2)                           # половина мест
+        self.assertAlmostEqual(b["bunch_spacing_m"], 2 * C / h, places=9)
+        self.assertAlmostEqual(b["q_bunch_c"], 2 * q_all, places=15)
 
     def test_loop_targets_rows(self):
         from types import SimpleNamespace
@@ -6039,6 +6046,10 @@ class TestCavityAndTargets(unittest.TestCase):
         self.assertAlmostEqual(eng._cavity_value("cavity.state")["U0_mev"], u_open, delta=1e-4)   # и без ямы
         eng._command("cavity.df_hz", 250.0)
         self.assertEqual(eng._cavity_value("cavity.df_hz"), 250.0)
+        eng._command("cavity.n_bunches", 100)                                              # заполнение
+        st = eng._cavity_value("cavity.state")
+        self.assertEqual(st["n_bunches"], 100)
+        self.assertAlmostEqual(st["q_bunch_c"], st["I_a"] * st["T0_s"] / 100, places=15)
 
     def test_windows_offscreen(self):
         try:
@@ -6075,6 +6086,8 @@ class TestCavityAndTargets(unittest.TestCase):
         w.sp_v.setValue(6.5); w._apply()
         msgs = link.pull()
         self.assertIn(("cavity.volt_mv", 6.5), [(m.addr, m.value) for m in msgs])
+        self.assertEqual(w.sp_nb.maximum(), 1296)                                            # не больше мест h
+        self.assertIn(("cavity.n_bunches", 1296.0), [(m.addr, float(m.value)) for m in msgs])
         g = GraphWindow("obs.ebpm.x:rms", ref_value=0.0, scale=1e6, units="мкм")
         g.on_snapshot(Snapshot(values={"obs.ebpm.x:rms": 2e-6}, meta={"model_time": 1.0}))
         self.assertEqual(list(g._y), [2.0]); self.assertEqual(list(g._r), [0.0])
@@ -6251,6 +6264,12 @@ class TestProjectEdits(unittest.TestCase):
             self.assertEqual(len(win.journal.entries), 1)
             self.assertEqual(iw._design["mat_G"][0].text(), "2.5")
             win._engine._drain()                                              # движок принял команду правки
+            # команду мог забрать и поток движка (он тоже крутит _drain) — тогда ждём, пока правка применится
+            import time
+            t0 = time.time()
+            while (win._plant.machine.fingerprint != win.journal.machine().fingerprint
+                   and time.time() - t0 < 20.0):
+                time.sleep(0.01)
             self.assertEqual(win._plant.machine.fingerprint, win.journal.machine().fingerprint)
             e = win.design_edit(q, "x", str(float(m0.elements.x[q]) + 1e-4))
             self.assertEqual(e.cost, "cold"); self.assertTrue(win.journal.rebuild_needed)

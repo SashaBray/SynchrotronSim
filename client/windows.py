@@ -1301,7 +1301,10 @@ class CavityWindow(SubscriberWindow):
         self.sp_phi.setSingleStep(0.5); self.sp_phi.setSuffix(" °")
         self.sp_df = QDoubleSpinBox(); self.sp_df.setRange(-1e6, 1e6); self.sp_df.setDecimals(2)
         self.sp_df.setSingleStep(10.0); self.sp_df.setSuffix(" Гц")
-        for sp in (self.sp_v, self.sp_phi, self.sp_df):
+        self.sp_nb = QSpinBox(); self.sp_nb.setRange(1, 100000)      # верх — h (с первым состоянием)
+        self.sp_nb.setToolTip("сгустков в кольце (заполнение): не больше числа сепаратрис h; от него — заряд сгустка "
+                              "и средний шаг. На динамику модели не влияет: трекается один сгусток")
+        for sp in (self.sp_v, self.sp_phi, self.sp_df, self.sp_nb):
             sp.valueChanged.connect(self._mark_edited)
             sp.textChanged.connect(self._mark_edited)       # набор с клавиатуры — уже правка (до Enter)
             sp.setKeyboardTracking(False)
@@ -1309,12 +1312,19 @@ class CavityWindow(SubscriberWindow):
         self.b_design = QPushButton("Проектные"); self.b_design.clicked.connect(self._to_design)
         for b in (self.b_apply, self.b_design):              # до первого состояния модели в полях нули —
             b.setEnabled(False)                              # «Применить» отправило бы V = 0
-        self.b_design.setToolTip("вернуть амплитуду и фазу, с которыми модель собрана, ручной Δf = 0")
+        self.b_design.setToolTip("вернуть амплитуду и фазу, с которыми модель собрана, ручной Δf = 0, "
+                                 "заполнение — все h мест")
         form = QFormLayout()
         form.addRow("амплитуда V", self.sp_v)
         form.addRow("фаза φ (программная)", self.sp_phi)
         form.addRow("сдвиг частоты Δf (ручной)", self.sp_df)
+        form.addRow("сгустков в кольце (заполнение)", self.sp_nb)
+        self.chk_zoom = QCheckBox("портрет: сгусток крупно")
+        self.chk_zoom.setToolTip("фазовый портрет — вокруг синхронной точки: равновесный сгусток (эллипсы 1σ и 3σ) "
+                                 "и частицы модели; снять — вся яма")
+        self.chk_zoom.toggled.connect(self._zoom_toggled)
         row = QHBoxLayout(); row.addWidget(self.b_apply); row.addWidget(self.b_design); row.addStretch(1)
+        row.addWidget(self.chk_zoom)
         form.addRow(row)
         box_ctl = QGroupBox("резонатор (на ходу)")
         box_ctl.setLayout(form)
@@ -1360,7 +1370,11 @@ class CavityWindow(SubscriberWindow):
         self.s_tr = pg.ScatterPlotItem(size=3, pen=None, brush=pg.mkBrush(120, 120, 120, 90))
         self.s_now = pg.ScatterPlotItem(size=8, pen=pg.mkPen("#111", width=0.8), brush=pg.mkBrush(_PALETTE[0]))
         self.s_sync = pg.ScatterPlotItem(size=12, symbol="+", pen=pg.mkPen("#111", width=2))
-        for it in (self.l_dp, self.l_dm, self.l_f1, self.l_f2, self.s_tr, self.s_now, self.s_sync):
+        # равновесный сгусток при нулевом токе (σφ₀, σδ₀): эллипсы 1σ и 3σ вокруг синхронной точки
+        self.c_eq1 = pg.PlotDataItem(pen=pg.mkPen(_PALETTE[4], width=1.8))
+        self.c_eq3 = pg.PlotDataItem(pen=pg.mkPen(_PALETTE[4], width=1.2, style=Qt.DashLine))
+        for it in (self.l_dp, self.l_dm, self.l_f1, self.l_f2, self.s_tr, self.c_eq3, self.c_eq1, self.s_now,
+                   self.s_sync):
             self.p_ph.addItem(it)
         self._hp = CurveHover(self.p_ph, [(self.c_up, "сепаратриса", lambda x: f"φ = {x:.2f}°",
                                            lambda y: f"δ = {_fmt_num(y)}·10⁻³"),
@@ -1399,6 +1413,26 @@ class CavityWindow(SubscriberWindow):
         lay = QVBoxLayout(self)
         lay.addWidget(split)
 
+    def _zoom_toggled(self, on):
+        if not on:
+            self.p_ph.enableAutoRange()
+        elif self._b is not None:
+            self._zoom_bunch(self._b)
+
+    def _zoom_bunch(self, b):
+        """Вид портрета на сгусток: 3σ равновесного (σφ₀, σδ₀) и все частицы модели последнего кадра, с полями."""
+        if not b.get("ok"):
+            return
+        c, ds = float(b["phis_deg"]), float(b["delta_s"]) * 1e3
+        sp0, sd0 = float(b.get("sphi0_deg") or 0.0), float(b.get("sdelta0") or 0.0) * 1e3
+        xs = [c - 3 * sp0, c + 3 * sp0]; ys = [ds - 3 * sd0, ds + 3 * sd0]
+        px, py = self.s_now.getData()
+        if px is not None and len(px):
+            xs += [float(np.nanmin(px)), float(np.nanmax(px))]; ys += [float(np.nanmin(py)), float(np.nanmax(py))]
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        if x1 > x0 and y1 > y0:
+            self.p_ph.setRange(xRange=(x0, x1), yRange=(y0, y1), padding=0.15)
+
     def _graph_row(self, item, _col=0):
         """Двойной клик по строке таблицы → график параметра во времени (адрес cavity.<ключ>)."""
         key = item.data(0, Qt.UserRole)
@@ -1422,6 +1456,7 @@ class CavityWindow(SubscriberWindow):
         self._send("volt_mv", self.sp_v.value())
         self._send("phase_deg", self.sp_phi.value())
         self._send("df_hz", self.sp_df.value())
+        self._send("n_bunches", self.sp_nb.value())
         self._edited = False
         self._trail.clear()                      # след старого режима не мешает видеть новый
 
@@ -1430,6 +1465,7 @@ class CavityWindow(SubscriberWindow):
             return
         for sp, v in ((self.sp_v, self._design["V_mv"]), (self.sp_phi, self._design["phase_deg"]), (self.sp_df, 0.0)):
             sp.blockSignals(True); sp.setValue(float(v)); sp.blockSignals(False)
+        self.sp_nb.blockSignals(True); self.sp_nb.setValue(int(self._design["h"])); self.sp_nb.blockSignals(False)
         self._apply()
 
     def addresses(self) -> List[str]:
@@ -1455,6 +1491,10 @@ class CavityWindow(SubscriberWindow):
             # (фокус — не правка: первое поле получает фокус при открытии окна и иначе осталось бы нулём)
             for sp, v in ((self.sp_v, b["V_mv"]), (self.sp_phi, b["phase_deg"]), (self.sp_df, b.get("manual_df_hz", 0.0))):
                 sp.blockSignals(True); sp.setValue(float(v)); sp.blockSignals(False)
+            self.sp_nb.blockSignals(True)
+            self.sp_nb.setMaximum(int(b["h"]))                  # сгустков не больше мест (сепаратрис)
+            self.sp_nb.setValue(int(b.get("n_bunches") or b["h"]))
+            self.sp_nb.blockSignals(False)
         self.b_apply.setEnabled(True); self.b_design.setEnabled(True)
         ok = bool(b.get("ok"))
         c = float(b["phis_deg"]) if ok else float(b["phase_deg"])
@@ -1477,9 +1517,17 @@ class CavityWindow(SubscriberWindow):
             self.s_sync.setData([c], [ds * 1e3])
             for it in (self.l_dp, self.l_dm, self.l_f1, self.l_f2, self.s_sync):
                 it.show()
+            sp0, sd0 = b.get("sphi0_deg"), b.get("sdelta0")
+            if sp0 and sd0:
+                t = np.linspace(0.0, 2.0 * np.pi, 121)
+                self.c_eq1.setData(c + sp0 * np.cos(t), (ds + sd0 * np.sin(t)) * 1e3)
+                self.c_eq3.setData(c + 3 * sp0 * np.cos(t), (ds + 3 * sd0 * np.sin(t)) * 1e3)
+            else:
+                self.c_eq1.setData([], []); self.c_eq3.setData([], [])
         else:
             self.r_sin.hide(); self.l_phis.hide()
             self.c_up.setData([], []); self.c_lo.setData([], [])
+            self.c_eq1.setData([], []); self.c_eq3.setData([], [])
             for it in (self.l_dp, self.l_dm, self.l_f1, self.l_f2, self.s_sync):
                 it.hide()
         if isinstance(bunch, dict) and bunch.get("phase_deg") is not None:
@@ -1497,6 +1545,8 @@ class CavityWindow(SubscriberWindow):
                 k = np.isfinite(tp) & np.isfinite(td)
                 self.s_tr.setData(tp[k], td[k] * 1e3)
         self.info.setText(self._info_html(b))
+        if self.chk_zoom.isChecked():
+            self._zoom_bunch(b)
         from synchrotronsim.longitudinal import format_param
         for key, (it, _sc, _un) in self._rows.items():
             it.setText(1, format_param(key, b))
@@ -1512,6 +1562,13 @@ class CavityWindow(SubscriberWindow):
                         f"(период {g('Ts_turns', '{:.0f}')} об.) · аксептанс ±{g('delta_max', '{:.3f}', 100)} %")
         else:
             rows.append(f"<span style='color:#a00'><b>ямы нет:</b> {b.get('reason', '')}</span>")
+        if b.get("sz0_m") is not None:
+            rows.append(f"сгусток (нулевой ток): σz₀ = <b>{g('sz0_m', '{:.3f}', 1e3)}</b> мм = "
+                        f"<b>{g('sz0_m', '{:.2f}', 1e12 / 299792458.0)}</b> пс · σφ₀ = {g('sphi0_deg', '{:.3f}')}° · "
+                        f"σδ₀ = {g('sdelta0', '{:.4f}', 1e3)}·10⁻³")
+        rows.append(f"сгустков в кольце: <b>{g('n_bunches', '{:.0f}')}</b> из {g('n_buckets', '{:.0f}')} мест "
+                    f"(сепаратрис, шаг {g('lambda_rf_m', '{:.4f}')} м = {g('lambda_rf_m', '{:.4f}', 1e9 / 299792458.0)} нс)"
+                    f" · средний шаг между сгустками {g('bunch_spacing_m', '{:.4f}')} м")
         if b.get("n_part"):
             lost = int(b.get("n_lost", 0) or 0)
             rows.append(f"пучок: в яме <b>{int(b.get('n_inside', 0) or 0)}</b> из {int(b['n_part'])}"

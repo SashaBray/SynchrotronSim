@@ -49,8 +49,9 @@ AREAS = {
     "element": "магнит", "loop": "контур", "meta": "мета прогона", "screen": "экран", "diag": "стандартный график",
     "rec": "ряд рекордера", "design": "параметр проекта", "ref": "уставка контура", "cavity": "ВЧ-резонатор",
 }
-CAVITY_WRITABLE = ("volt_mv", "phase_deg", "df_hz")         # ручки резонатора (окно «Резонатор ВЧ»)
-CAVITY_UNITS = {"volt_mv": "МВ", "phase_deg": "°", "df_hz": "Гц", "freq_hz": "Гц", "state": "", "bunch": ""}
+CAVITY_WRITABLE = ("volt_mv", "phase_deg", "df_hz", "n_bunches")   # ручки окна «Резонатор ВЧ» (+ заполнение)
+CAVITY_UNITS = {"volt_mv": "МВ", "phase_deg": "°", "df_hz": "Гц", "freq_hz": "Гц", "state": "", "bunch": "",
+                "n_bunches": ""}
 DRIVE_FIELDS = ("slew", "lag_tau", "res", "act", "odz_lo", "odz_hi")
 UND_ATTRS = ("gap", "gap_target", "K", "B0", "orbit_kick", "slew")
 OPTICS_AT = {"beta_x": "betax", "beta_y": "betay", "alpha_x": "alphax",

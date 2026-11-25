@@ -171,11 +171,15 @@ def derived(b: Dict[str, Any], circ_m: float, rad: Optional[Dict[str, Any]] = No
             nus = out.get("nus_m6") or b.get("nus")
             if nus and nus == nus and nus > 0:
                 out["sz0_m"] = circ_m * abs(eta) * out["sdelta0"] / (2.0 * math.pi * float(nus))
-    if current_a is not None:
-        nb = int(n_bunches or h)
-        out["I_a"], out["n_bunches"] = float(current_a), nb
-        out["q_bunch_c"] = float(current_a) * out["T0_s"] / nb
-        out["ne_bunch"] = out["q_bunch_c"] / E_CHARGE
+                out["sphi0_deg"] = 360.0 * out["sz0_m"] / out["lambda_rf_m"]               # та же длина в фазе ВЧ
+    nb = int(n_bunches or h)                             # сгустков в кольце: не больше мест (сепаратрис) h
+    out["n_bunches"] = nb
+    if 1 <= nb <= h:
+        out["bunch_spacing_m"] = circ_m / nb                   # средний шаг (равномерное заполнение)
+        if current_a is not None:
+            out["I_a"] = float(current_a)
+            out["q_bunch_c"] = float(current_a) * out["T0_s"] / nb
+            out["ne_bunch"] = out["q_bunch_c"] / E_CHARGE
     if b.get("n_part") and b.get("ok") and b.get("phi_mean") is not None:
         out["dphi_deg"] = float(b["phi_mean"]) - float(b["phis_deg"])
         nus = float(b["nus"])
@@ -233,8 +237,9 @@ PARAMS = [
         ("tau_x_turns", "время затухания τx", "об", 1.0, "{:.0f}", "2E/(Jx·U₀)", _ms),
         ("tau_y_turns", "время затухания τy", "об", 1.0, "{:.0f}", "2E/(Jy·U₀)", _ms),
         ("sdelta0", "естественный энергоразброс σδ₀", "10⁻³", 1e3, "{:.4f}", "√(Cq·γ²·I₃/(Js·I₂))", None),
-        ("sz0_m", "естественная длина сгустка σz₀", "мм", 1e3, "{:.3f}", "C·|η|·σδ₀/(2π·νs)",
+        ("sz0_m", "естественная длина сгустка σz₀", "мм", 1e3, "{:.3f}", "C·|η|·σδ₀/(2π·νs), нулевой ток",
          lambda v, b: f" · {v / C_LIGHT * 1e12:.2f} пс"),
+        ("sphi0_deg", "та же длина в фазе ВЧ σφ₀", "°", 1.0, "{:.3f}", "360°·σz₀/λ_RF", None),
     ]),
     ("яма (сепаратриса)", [
         ("eta", "коэффициент скольжения η", "", 1.0, "{:.4e}", "αc − 1/γ²", None),
@@ -259,9 +264,11 @@ PARAMS = [
         ("fs_hz", "синхротронная частота fs", "кГц", 1e-3, "{:.4f}", "νs·f₀", None),
         ("Ts_turns", "период синхротронных колебаний", "об", 1.0, "{:.1f}", "1/νs", _ms),
     ]),
-    ("заполнение и ток (допущения)", [
+    ("заполнение и ток", [
+        ("n_bunches", "сгустков в кольце", "", 1.0, "{:.0f}", "ручка окна; по умолчанию заняты все h мест", None),
+        ("bunch_spacing_m", "средний шаг между сгустками", "м", 1.0, "{:.4f}", "C/n_b (равномерное заполнение)",
+         lambda v, b: f" · {v / C_LIGHT * 1e9:.3f} нс"),
         ("I_a", "ток пучка I", "мА", 1e3, "{:.1f}", "допущение (undulator_sr.P.I)", None),
-        ("n_bunches", "сгустков в заполнении", "", 1.0, "{:.0f}", "допущение: заняты все h мест", None),
         ("q_bunch_c", "заряд сгустка", "нКл", 1e9, "{:.4f}", "I·T₀/n_b", None),
         ("ne_bunch", "электронов в сгустке", "", 1.0, "{:.3e}", "заряд / e", None),
     ]),
